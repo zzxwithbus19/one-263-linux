@@ -45,6 +45,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSizePolicy>
+#include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -63,6 +64,7 @@
 #include <cstdio>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace core = mc263::core;
@@ -373,6 +375,182 @@ static MemColors memColors(const QPalette& pal) {
             QColor("#eceef1"), QColor("#b45309")};
 }
 
+// ---------------------------------------------------------------- 主题 ----
+// 一套 tokens 生成 QSS；深浅色都从 palette 推，避免写死颜色在换主题时糊掉
+struct Theme {
+    QString window, card, border, text, muted, accent, accentHover, accentSoft, input, log, hover;
+};
+
+static Theme themeFor(const QPalette& pal) {
+    if (pal.color(QPalette::Window).lightness() < 128)
+        return {"#1b1d21", "#232629", "#33373d", "#e6e8eb", "#9aa4b2", "#4f9bff",
+                "#6cb0ff", "#1e2b3f", "#1b1d21", "#17191c", "#2a2e34"};
+    return {"#f4f5f7", "#ffffff", "#e4e7ec", "#1f2328", "#6b7280", "#2563eb",
+            "#1d4ed8", "#e8f0fe", "#ffffff", "#fbfcfd", "#eef1f5"};
+}
+
+// QSS 里没法画三角形，就现生成一张 14x14 的尖角图给 QComboBox 用（跟随主题色）
+static QString makeChevron(const QString& dir, const QColor& color) {
+    QPixmap pm(14, 14);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    QPen pen(color, 1.8);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+    p.drawLine(QPointF(3.5, 5.5), QPointF(7.0, 9.0));
+    p.drawLine(QPointF(7.0, 9.0), QPointF(10.5, 5.5));
+    p.end();
+    const QString path = dir + "/chevron.png";
+    pm.save(path);
+    return path;
+}
+
+static QString buildStyleSheet(const Theme& t, const QString& chevron) {
+    QString qss = QStringLiteral(R"QSS(
+QWidget { color: @text@; }
+QMainWindow, QStackedWidget, QDialog { background: @window@; }
+QToolTip { background: @card@; color: @text@; border: 1px solid @border@; padding: 4px 6px; }
+
+/* 左侧导航：无边框、选中态是浅蓝药丸 */
+QListWidget#nav { background: transparent; border: none; padding: 12px 8px; outline: none; }
+QListWidget#nav::item {
+    height: 38px; border-radius: 9px; padding-left: 14px; color: @muted@;
+}
+QListWidget#nav::item:hover { background: @hover@; color: @text@; }
+QListWidget#nav::item:selected {
+    background: @accentSoft@; color: @accent@; font-weight: 600;
+    border-left: 3px solid @accent@; padding-left: 11px;
+}
+
+QLabel#pageTitle { font-size: 20px; font-weight: 700; }
+QLabel#pageSubtitle { color: @muted@; font-size: 12px; }
+QLabel#muted { color: @muted@; }
+
+/* 卡片 */
+QGroupBox {
+    background: @card@; border: 1px solid @border@; border-radius: 12px;
+    margin-top: 0px; padding: 16px 18px 16px 18px;
+}
+QLabel#cardTitle {
+    font-size: 13px; font-weight: 700; padding-bottom: 6px;
+    border-bottom: 1px solid @border@; margin-bottom: 8px;
+}
+QScrollArea { background: transparent; border: none; }
+QWidget#qt_scrollarea_viewport { background: transparent; }
+QFrame#gateCard { background: @card@; border: 1px solid @border@; border-radius: 14px; }
+
+/* 按钮 */
+QPushButton {
+    background: @card@; color: @text@; border: 1px solid @border@; border-radius: 8px;
+    padding: 6px 14px; min-height: 18px;
+}
+QPushButton:hover { border-color: @accent@; color: @accent@; }
+QPushButton:pressed { background: @accentSoft@; }
+QPushButton:disabled { color: @muted@; background: @window@; }
+QPushButton#primary {
+    background: @accent@; color: #ffffff; border: 1px solid @accent@; font-weight: 600;
+    padding: 7px 18px;
+}
+QPushButton#primary:hover { background: @accentHover@; border-color: @accentHover@; color: #ffffff; }
+QPushButton#primary:disabled { background: @border@; border-color: @border@; color: @muted@; }
+
+/* 输入 */
+QLineEdit, QComboBox, QSpinBox {
+    background: @input@; border: 1px solid @border@; border-radius: 8px;
+    padding: 5px 8px; min-height: 18px; selection-background-color: @accent@; selection-color: #ffffff;
+}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border-color: @accent@; }
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { color: @muted@; background: @window@; }
+QSpinBox::up-button, QSpinBox::down-button { width: 0; border: none; }
+QComboBox::drop-down {
+    subcontrol-origin: padding; subcontrol-position: center right;
+    width: 24px; border: none; background: transparent;
+}
+QComboBox::down-arrow { image: url(@chevron@); width: 14px; height: 14px; }
+QSpinBox { padding-right: 6px; }
+QComboBox QAbstractItemView {
+    background: @card@; border: 1px solid @border@; selection-background-color: @accentSoft@;
+    selection-color: @accent@; outline: none;
+}
+
+/* 滑块 / 进度 */
+QSlider::groove:horizontal { height: 6px; border-radius: 3px; background: @border@; }
+QSlider::sub-page:horizontal { background: @accent@; border-radius: 3px; }
+QSlider::handle:horizontal {
+    width: 14px; height: 14px; margin: -5px 0; border-radius: 8px;
+    background: @card@; border: 2px solid @accent@;
+}
+QProgressBar {
+    background: @border@; border: none; border-radius: 6px; min-height: 12px;
+    max-height: 12px; text-align: center; color: @muted@; font-size: 11px;
+}
+QProgressBar::chunk { background: @accent@; border-radius: 6px; }
+
+/* 表格 / 日志 */
+QTableWidget {
+    background: @card@; border: 1px solid @border@; border-radius: 10px;
+    gridline-color: transparent; alternate-background-color: @window@;
+}
+QHeaderView::section {
+    background: @window@; color: @muted@; border: none;
+    border-bottom: 1px solid @border@; padding: 6px 8px; font-weight: 600;
+}
+QTableCornerButton::section { background: @window@; border: none; }
+QTableWidget::item { padding: 4px 6px; }
+QTableWidget::item:selected { background: @accentSoft@; color: @text@; }
+QPlainTextEdit, QTextEdit {
+    background: @log@; border: 1px solid @border@; border-radius: 10px; padding: 8px;
+    font-family: "JetBrains Mono", "Noto Sans Mono CJK SC", monospace; font-size: 12px;
+}
+
+/* 滚动条 */
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: @border@; border-radius: 4px; min-height: 26px; }
+QScrollBar::handle:vertical:hover { background: @muted@; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
+QScrollBar::handle:horizontal { background: @border@; border-radius: 4px; min-width: 26px; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* 状态栏 */
+QStatusBar { background: @window@; color: @muted@; border-top: 1px solid @border@; }
+QStatusBar::item { border: none; }
+)QSS");
+
+    const std::vector<std::pair<QString, QString>> tokens = {
+        {"@window@", t.window}, {"@card@", t.card}, {"@border@", t.border},
+        {"@text@", t.text},     {"@muted@", t.muted}, {"@accentHover@", t.accentHover},
+        {"@accentSoft@", t.accentSoft}, {"@accent@", t.accent},
+        {"@input@", t.input},   {"@log@", t.log},     {"@hover@", t.hover},
+        {"@chevron@", chevron},
+    };
+    for (const auto& kv : tokens) qss.replace(kv.first, kv.second);
+    return qss;
+}
+
+// 卡片标题用普通 QLabel 放进布局，不依赖 QGroupBox::title（不同 Qt 风格定位会跑偏）
+static void setCardTitle(QGroupBox* box, QLayout* lay, const QString& text) {
+    box->setTitle("");
+    auto* t = new QLabel(text, box);
+    t->setObjectName("cardTitle");
+    if (auto* vb = qobject_cast<QVBoxLayout*>(lay)) vb->insertWidget(0, t);
+    else if (auto* fm = qobject_cast<QFormLayout*>(lay)) fm->insertRow(0, t);
+}
+
+// 每个页面顶部的标题 + 一句说明
+static void addPageHeader(QVBoxLayout* v, const QString& title, const QString& subtitle) {
+    auto* t = new QLabel(title);
+    t->setObjectName("pageTitle");
+    auto* s = new QLabel(subtitle);
+    s->setObjectName("pageSubtitle");
+    s->setWordWrap(true);
+    v->addWidget(t);
+    v->addWidget(s);
+    v->addSpacing(2);
+}
+
 // 四段式横条：程序占用（蓝）→ 缓存（浅蓝）→ 游戏 -Xmx（浅灰，长度就是分配量）→ 余下可用。
 // 灰段从浅蓝右边缘开始，琥珀三角标在灰段右端，一眼看出「分了多少、还剩多少」。
 class MemoryBar : public QWidget {
@@ -477,6 +655,10 @@ public:
         requiredJava_ = core::requiredJavaMajor(layout_, cfg_.version);
         saveDownloaderScript();
         buildUi();
+        const Theme th = themeFor(palette());
+        const QString chevron = makeChevron(QString::fromStdString(layout_.configDir.string()),
+                                            QColor(th.muted));
+        qApp->setStyleSheet(buildStyleSheet(th, chevron));
         loadingConfig_ = true;
         loadConfigToUi();
         loadingConfig_ = false;
@@ -573,19 +755,38 @@ private:
 
     void buildUi() {
         setWindowTitle("mc263 · Minecraft 26.3 启动器");
-        resize(940, 640);
+        resize(980, 680);
         auto* central = new QWidget(this);
         auto* h = new QHBoxLayout(central);
+        h->setContentsMargins(6, 6, 6, 0);
+        h->setSpacing(4);
         nav_ = new QListWidget(this);
-        nav_->setFixedWidth(170);
+        nav_->setObjectName("nav");
+        nav_->setFixedWidth(178);
+        nav_->setFrameShape(QFrame::NoFrame);
+        nav_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        nav_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         for (const char* s : {"启动游戏", "下载游戏", "Java 与兼容性", "设置 / 内存", "关于"})
             nav_->addItem(QString::fromUtf8(s));
         stack_ = new QStackedWidget(this);
-        stack_->addWidget(pageLaunch());
-        stack_->addWidget(pageDownload());
-        stack_->addWidget(pageJavaCompat());
-        stack_->addWidget(pageSettings());
-        stack_->addWidget(pageAbout());
+        // 每页放进滚动区：窗口缩小/字体变大时滚动，而不是把卡片内容挤到重叠
+        auto addPage = [this](QWidget* page) {
+            if (auto* lay = page->layout()) {
+                lay->setContentsMargins(22, 16, 22, 16);
+                if (auto* vb = qobject_cast<QVBoxLayout*>(lay)) vb->setSpacing(10);
+            }
+            auto* sa = new QScrollArea(this);
+            sa->setWidgetResizable(true);
+            sa->setFrameShape(QFrame::NoFrame);
+            sa->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            sa->setWidget(page);
+            stack_->addWidget(sa);
+        };
+        addPage(pageLaunch());
+        addPage(pageDownload());
+        addPage(pageJavaCompat());
+        addPage(pageSettings());
+        addPage(pageAbout());
         h->addWidget(nav_);
         h->addWidget(stack_, 1);
         mainPage_ = central;
@@ -646,6 +847,7 @@ private:
 
         auto* row = new QHBoxLayout();
         gateDownloadBtn_ = new QPushButton("下载 Java 运行时", card);
+        gateDownloadBtn_->setObjectName("primary");
         gateDownloadBtn_->setDefault(true);
         auto* rescan = new QPushButton("重新检测", card);
         auto* manual = new QPushButton("手动指定 java…", card);
@@ -742,8 +944,10 @@ private:
     QWidget* pageLaunch() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
+        addPageHeader(v, "启动游戏", "选本地版本、填玩家名，日志实时输出；缺 Java 会先被闸门拦住");
         auto* box = new QGroupBox("原版启动", w);
         auto* form = new QFormLayout(box);
+        setCardTitle(box, form, "原版启动");
         launchVersion_ = new QComboBox(w); launchVersion_->setEditable(true);
         usernameEdit_ = new QLineEdit(w);
         form->addRow("游戏版本", launchVersion_);
@@ -751,6 +955,7 @@ private:
         v->addWidget(box);
         auto* row = new QHBoxLayout();
         launchBtn_ = new QPushButton("启动游戏", w);
+        launchBtn_->setObjectName("primary");
         auto* refreshBtn = new QPushButton("刷新本地版本", w);
         auto* openDirBtn = new QPushButton("打开游戏目录", w);
         row->addWidget(launchBtn_); row->addWidget(refreshBtn); row->addWidget(openDirBtn); row->addStretch(1);
@@ -770,8 +975,10 @@ private:
     QWidget* pageDownload() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        auto* box = new QGroupBox("从 Mojang 官方 CDN 下载（python3 多线程）", w);
+        addPageHeader(v, "下载游戏", "从 Mojang 官方 CDN 或镜像拉取 26.3：SHA1 校验 + 多线程 + 断点缓存");
+        auto* box = new QGroupBox("下载来源", w);
         auto* form = new QFormLayout(box);
+        setCardTitle(box, form, "下载来源");
         downloadVersion_ = new QComboBox(w); downloadVersion_->setEditable(true);
         downloadVersion_->addItem("26.3");
         mirrorCombo_ = new QComboBox(w);
@@ -833,6 +1040,7 @@ private:
         v->addWidget(box);
         auto* row = new QHBoxLayout();
         downloadBtn_ = new QPushButton("开始下载", w);
+        downloadBtn_->setObjectName("primary");
         cancelBtn_ = new QPushButton("取消", w); cancelBtn_->setEnabled(false);
         row->addWidget(downloadBtn_); row->addWidget(cancelBtn_); row->addStretch(1);
         v->addLayout(row);
@@ -852,11 +1060,16 @@ private:
     QWidget* pageJavaCompat() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        auto* jbox = new QGroupBox("寻找 Java（后台线程扫描系统 / Mojang JRE）", w);
+        addPageHeader(v, "Java 与兼容性", "列出所有 Java 及其来源，逐项检查架构、依赖库、natives 与图形音频库");
+        auto* jbox = new QGroupBox("可用的 Java", w);
         auto* jv = new QVBoxLayout(jbox);
+        setCardTitle(jbox, jv, "可用的 Java");
         javaTable_ = new QTableWidget(0, 4, w);
         javaTable_->setHorizontalHeaderLabels({"路径", "版本", "来源", "状态"});
         javaTable_->horizontalHeader()->setStretchLastSection(true);
+        javaTable_->verticalHeader()->setVisible(false);
+        javaTable_->setShowGrid(false);
+        javaTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
         jv->addWidget(javaTable_);
         javaCombo_ = new QComboBox(w);
         javaState_ = new QLabel("尚未扫描", w);
@@ -870,9 +1083,13 @@ private:
         v->addWidget(jbox, 2);
         auto* cbox = new QGroupBox("兼容性查验", w);
         auto* cv = new QVBoxLayout(cbox);
+        setCardTitle(cbox, cv, "兼容性查验");
         compatTable_ = new QTableWidget(0, 3, w);
         compatTable_->setHorizontalHeaderLabels({"检查项", "状态", "说明"});
         compatTable_->horizontalHeader()->setStretchLastSection(true);
+        compatTable_->verticalHeader()->setVisible(false);
+        compatTable_->setShowGrid(false);
+        compatTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
         cv->addWidget(compatTable_);
         compatState_ = new QLabel("尚未检查", w);
         netCheck_ = new QCheckBox("同时检查官方下载源连通性", w);
@@ -898,6 +1115,7 @@ private:
     QWidget* pageSettings() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
+        addPageHeader(v, "设置 / 内存", "改动即时保存；内存条每 2 秒按当前占用刷新，灰块就是分给游戏的 -Xmx");
         core::MemInfo mi = core::readMemInfo();
         memTotalMb_ = mi.totalMb >= 2048 ? static_cast<int>(mi.totalMb) : 4096;
         if (mi.totalMb == 0) mi.totalMb = static_cast<uint64_t>(memTotalMb_);
@@ -905,6 +1123,7 @@ private:
         maxMemoryMb_ = std::max(2048, memTotalMb_ * 3 / 4);
         auto* mbox = new QGroupBox("内存图形化配置", w);
         auto* mv = new QVBoxLayout(mbox);
+        setCardTitle(mbox, mv, "内存图形化配置");
 
         // 顶部：系统内存实况（其他程序占用 / 缓存 / 仅可用），每 2 秒刷新
         auto* head = new QHBoxLayout();
@@ -957,6 +1176,7 @@ private:
         v->addWidget(mbox);
         auto* gbox = new QGroupBox("路径与其他", w);
         auto* form = new QFormLayout(gbox);
+        setCardTitle(gbox, form, "路径与其他");
         gameDirEdit_ = new QLineEdit(w);
         browseBtn_ = new QPushButton("浏览", w);
         auto* drow = new QHBoxLayout(); drow->addWidget(gameDirEdit_, 1); drow->addWidget(browseBtn_);
@@ -1005,21 +1225,28 @@ private:
         const bool dark = palette().color(QPalette::Window).lightness() < 128;
         const QString linkColor = dark ? QStringLiteral("#7cc0ff") : QStringLiteral("#1a5fd0");
 
-        auto* title = new QLabel("mc263 · Minecraft 26.3 Linux 启动器（Qt6 原生版）", w);
-        QFont tf = title->font();
-        tf.setPointSize(tf.pointSize() + 4);
-        tf.setBold(true);
-        title->setFont(tf);
+        auto* title = new QLabel("关于", w);
+        title->setObjectName("pageTitle");
         v->addWidget(title);
+        auto* subtitle = new QLabel("Qt6 手写界面的单文件启动器，不套 Electron、不内嵌浏览器", w);
+        subtitle->setObjectName("pageSubtitle");
+        subtitle->setWordWrap(true);
+        v->addWidget(subtitle);
+        v->addSpacing(4);
 
         QString text =
             "本项目源码许可：GPL-3.0-or-later（见 LICENSE）\n"
             "Qt6 运行时：LGPL-3.0-only OR GPL-3.0-only WITH Qt-GPL-exception-1.0（动态链接）\n"
             "游戏文件、Mojang Java 运行时与第三方库各自适用其原有许可，本工具不随仓库分发它们。";
-        auto* label = new QLabel(text, w);
+        auto* licBox = new QGroupBox("许可与说明", w);
+        auto* licLayout = new QVBoxLayout(licBox);
+        setCardTitle(licBox, licLayout, "许可与说明");
+        auto* label = new QLabel(text, licBox);
         label->setWordWrap(true);
         label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        v->addWidget(label);
+        licLayout->addWidget(label);
+        v->addWidget(licBox);
+        v->addSpacing(4);
 
         // 本地 README：蓝色可点，用系统默认程序打开（Wayland 下走 xdg-open / portal）
         const QString readme = findLocalReadme(layout_);
