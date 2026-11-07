@@ -1,0 +1,40 @@
+# PKGBUILD -- mc263 (Arch Linux)
+#
+# 用法：
+#   1) bash packaging/make-source.sh            # 生成 dist/mc263-26.3.tar.gz 与其 sha256
+#   2) cp packaging/PKGBUILD . && 把 source / sha256sums 换成实际值
+#   3) makepkg -si
+#
+# 注意：Arch / AUR 要求从源码构建，不要塞预编译二进制。
+# 元数据（AppStream）直接复用 packaging/mc263.metainfo.xml。
+
+pkgname=mc263
+pkgver=26.3
+pkgrel=1
+pkgdesc="Minecraft 26.3 launcher (Qt6 native, Wayland-ready)"
+arch=('x86_64')
+url="https://github.com/zzxwithbus19/one-263-linux"
+license=('GPL-3.0-or-later')
+depends=('qt6-base' 'qt6-wayland' 'python' 'curl')
+optdepends=('java-runtime: run the game (the launcher can also use Mojang runtimes)')
+source=("mc263-$pkgver.tar.gz")
+sha256sums=('SKIP')   # ← 填 make-source.sh 打印出来的 sha256
+
+build() {
+    cd "$pkgname-$pkgver"
+    make
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    make check
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 build/mc263-qt "$pkgdir/usr/bin/mc263-qt"
+    install -Dm644 packaging/mc263.desktop "$pkgdir/usr/share/applications/mc263.desktop"
+    install -Dm644 packaging/mc263.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/mc263.svg"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 packaging/mc263.metainfo.xml "$pkgdir/usr/share/metainfo/mc263.metainfo.xml"
+}

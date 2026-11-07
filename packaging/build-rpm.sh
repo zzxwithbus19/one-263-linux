@@ -57,6 +57,7 @@ rm -rf "$TOP"
 mkdir -p "$TOP"/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
 cp "$ROOT/build/mc263-qt"          "$TOP/SOURCES/mc263-qt"
 cp "$ROOT/packaging/mc263.desktop" "$TOP/SOURCES/mc263.desktop"
+cp "$ROOT/packaging/mc263.metainfo.xml" "$TOP/SOURCES/mc263.metainfo.xml"
 cp "$ROOT/packaging/mc263.svg"     "$TOP/SOURCES/mc263.svg"
 cp "$ROOT/LICENSE"                 "$TOP/SOURCES/LICENSE"
 

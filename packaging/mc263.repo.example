@@ -1,0 +1,16 @@
+# dnf 仓库配置示例：复制到 /etc/yum.repos.d/mc263.repo 后改 baseurl
+#
+#   sudo cp mc263.repo.example /etc/yum.repos.d/mc263.repo
+#   sudo sed -i 's|__BASEURL__|https://example.com/mc263/|' /etc/yum.repos.d/mc263.repo
+#   sudo dnf install mc263
+#
+# COPR 用户不用这个文件，直接：
+#   sudo dnf copr enable @copr/mc263/release/fedora-$(rpm -E %fedora)
+
+[mc263]
+name=mc263 — Minecraft 26.3 启动器（Qt6 原生）
+baseurl=__BASEURL__
+enabled=1
+# 自己签了名并导入公钥就改成 gpgcheck=1 并写 gpgkey=file:///etc/pki/rpm-gpg/xxx.asc
+gpgcheck=0
+repo_gpgcheck=0

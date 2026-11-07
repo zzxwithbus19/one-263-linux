@@ -157,6 +157,10 @@ HiDPI、分数缩放、多屏交给 Qt6；打开链接走 `xdg-open` / portal。
 
 ## 6. 打包成 rpm
 
+> 当前**主维护目标是 Arch Linux**：`packaging/PKGBUILD` 是主线模板，完整交接说明见
+> [docs/arch-handoff.md](docs/arch-handoff.md)。
+> 下面的 rpm 路线（预编译 spec / 源码 spec / COPR）**保留可用，但不再同步维护**，只当参考。
+
 rpm 里放的是**预编译二进制**：打包装包机要 Qt6 开发包（编译用），
 **安装的人不需要**，`dnf` / `zypper` 会自动拉 Qt6 运行时。
 
@@ -190,6 +194,80 @@ Qt 的库依赖由 rpm 从 ELF 的 `DT_NEEDED` 自动生成；另加 `Requires: 
 | `mc263-qt-26.3-x86_64` | 独立 ELF，免安装；无菜单项、需自备 Qt6 与 python3 |
 | `SHA256SUMS`（可选） | 离线核对；GitHub 自带 digest 时可不传 |
 | `mc263-signing-key.asc`（可选） | 公钥，签名验证用 |
+
+### 6.1 发布到 dnf 仓库
+
+**A. COPR（推荐，免费 + 官方签名）**
+
+> 项目页与逐步操作（描述文案、构建命令、失败排查）见 [docs/copr-publish.md](docs/copr-publish.md)。
+
+COPR 是 Fedora 官方的第三方构建服务：不用审核、自动给各 Fedora 版本构建，
+而且**用 Fedora 的密钥签名**——正好解决 45 的签名门槛，用户 `dnf install` 不再需要 `--nogpgcheck`。
+
+```bash
+sudo dnf install copr-cli
+bash packaging/make-source.sh            # → dist/mc263-26.3.tar.gz（源码 + 源码构建版 spec）
+copr-cli create mc263                    # 建一次即可
+copr-cli build mc263 dist/mc263-26.3.tar.gz
+```
+
+用户侧：
+
+```bash
+sudo dnf install dnf-plugins-core
+sudo dnf copr enable @copr/mc263/release/fedora-$(rpm -E %fedora)
+sudo dnf install mc263
+```
+
+注意两份 spec 的分工：`packaging/mc263.spec` 是**塞预编译二进制**的（本地出包快，用户不必装编译环境）；
+COPPR 在 mock 里现编源码，用 `packaging/mc263-source.spec`（`%prep` 解包 + `%build` 跑 `make` + `%check` 跑单测）。
+`make-source.sh` 已经把源码版 spec 一起打进 tarball。
+
+**B. 自建仓库（最快，不需要账号）**
+
+```bash
+sudo dnf install createrepo-c
+bash packaging/make-repo.sh               # → dist-repo/（含 repomd.xml）
+```
+
+把 `dist-repo/` 传到能走 HTTPS 的地方（自己的 nginx / GitHub Pages / 对象存储），用户加一个 repo 文件
+（模板见 `packaging/mc263.repo.example`）：
+
+```bash
+sudo cp mc263.repo.example /etc/yum.repos.d/mc263.repo
+sudo sed -i 's|__BASEURL__|https://你的域名/mc263/|' /etc/yum.repos.d/mc263.repo
+sudo dnf install mc263
+```
+
+想连签名一起做：把公钥一并发布，用户 `sudo rpm --import` 后把 repo 文件里的 `gpgcheck=1` 打开。
+
+**COPR 建项目时的选项怎么勾**（创建项目页面最下面那块）：
+
+| 选项 | 建议 | 原因 |
+|------|------|------|
+| Create repositories manually | **不勾** | COPR 会自动为每个 Fedora 版本建仓库 |
+| Enable internet access during builds | **不勾** | 编译与单测全离线（下载器自测跑本地 mock CDN），不需要联网 |
+| Project will not be listed on home page | **不勾** | 勾了才不上首页；不勾更容易被搜到 |
+| Follow Fedora branching | **勾上** | Fedora 分支出新版本时自动建对应 chroot，不用手动补构建 |
+| Multilib support | 不勾 | 只发 x86_64（aarch64 以后再说） |
+| This repository contains module hotfixes | 不勾 | 跟模块流无关 |
+| Run fedora-review tool for packages in this project | **勾上** | 提交前自动跑打包规范检查（rpmlint 等），能挡掉一堆低级问题 |
+| Generate AppStream metadata | **勾上** | 配合包里的 `mc263.metainfo.xml`，GNOME Software / KDE Discover 能显示图标、简介与更新提示 |
+| Delete after days | 留空 | 不自动删项目 |
+| Repo priority | 留默认 | |
+| Build isolation / Mock bootstrap | 留默认（mock-core-configs） | |
+| Runtime dependencies | 留空 | 依赖全在 Fedora 官方仓库里 |
+| Packit allowed forge | 留空 | |
+
+> 勾上 fedora-review 后，规范检查可能会挑出这几处：changelog 邮箱格式（已改成
+> `mc263@users.noreply.github.com`）、缺 `BuildArch`（源码 spec 已加 `%{?_arch}`，
+> 否则会被当成 noarch，构建必失败）、包内多余文件（`%files` 漏了 metainfo，已补）。
+
+**C. 其他渠道**
+
+- openSUSE：OBS（build.opensuse.org）流程类似，spec 可直接复用
+- Flatpak / Flathub：另一条分发线，和 dnf 无关
+- 官方 Fedora 源：需要 Fedora Account 的 packager 权限 + 走 Fedora 的审核流程，个人项目基本不现实
 
 ---
 
@@ -245,8 +323,16 @@ mc26-one/
 │   └── fs_util.hpp             目录 / 文件 / 环境变量小工具
 ├── src/
 │   └── mc263_qt.cpp            Qt6 主窗口（6 页，内嵌 python3 下载脚本）
+├── docs/
+│   ├── arch-handoff.md         Arch Linux 打包与分发交接文档
+│   └── copr-publish.md         COPR 上传与项目页文案
 ├── packaging/
 │   ├── mc263.spec              rpm spec（装预编译二进制）
+│   ├── mc263-source.spec       rpm spec（从源码构建，给 COPR / OBS）
+│   ├── make-source.sh          生成源码包 dist/mc263-<版本>.tar.gz
+│   ├── make-repo.sh            用 createrepo_c 生成 dnf 仓库目录
+│   ├── mc263.repo.example      用户侧 repo 文件模板
+│   ├── PKGBUILD                Arch 打包模板（主线）
 │   ├── build-rpm.sh            make → rpmbuild → dist/*.rpm + 独立 ELF + SHA256SUMS
 │   ├── mc263.desktop           应用菜单项（Exec=mc263-qt）
 │   └── mc263.svg               图标
