@@ -107,17 +107,15 @@ int main() {
     check(hasXmx && hasCp && hasLibPath && hasUsername && hasMain, "JVM 参数与游戏参数齐全");
     check(plan.workDir == l.gameDir, "工作目录 = 游戏目录");
 
-    // 6) 下载命令与本地版本列表
-    auto argv = fetchCommand(fs::path("build/mc263-fetch"), l, c2);
-    bool hasMc = false, hasComp = false, hasJson = false;
-    for (const auto& a : argv) {
-        if (a == l.gameDir.string()) hasMc = true;
-        if (a == "assets") hasComp = true;
-        if (a == "--json-progress") hasJson = true;
-    }
-    check(hasMc && hasComp && hasJson, "下载命令包含游戏目录 / 组件 / 进度输出");
+    // 6) 本地版本列表
     auto vers = availableVersions(l);
     check(vers.size() == 1 && vers[0] == "26.3", "本地版本列表扫描正确");
+    // 装到 /usr/bin 时改用 XDG 数据目录：at() 必须把 root 当作应用目录
+    Layout installed = Layout::at(fs::path("/tmp/xdg-mc263-test"));
+    check(installed.appDir == "/tmp/xdg-mc263-test" &&
+              installed.configFile == "/tmp/xdg-mc263-test/.mc263/config.json" &&
+              installed.gameDir == "/tmp/xdg-mc263-test/minecraft",
+          "Layout::at 支持自定义应用目录（安装到只读路径时回落）");
 
     // 7) 显示后端选择（Wayland 优先，缺插件回退 XWayland，全缺则报错）
     check(choosePlatform("offscreen", true, true, true).plugin == "offscreen",

@@ -48,6 +48,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -451,7 +452,16 @@ class LauncherWindow : public QMainWindow {
 public:
     explicit LauncherWindow(QWidget* parent = nullptr) : QMainWindow(parent) {
         const std::string exe = QCoreApplication::applicationFilePath().toStdString();
-        layout_ = core::Layout::detect(exe);
+        // 应用目录 = ELF 所在目录；装进 /usr/bin 这类只读位置时退回 XDG 数据目录，
+        // 否则 .mc263/ 与 minecraft/ 根本建不出来。
+        std::filesystem::path root = core::Layout::detect(exe).appDir;
+        std::error_code ec;
+        std::filesystem::create_directories(root, ec);
+        if (ec || ::access(root.c_str(), W_OK) != 0) {
+            const QString data = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+            if (!data.isEmpty()) root = std::filesystem::path(data.toStdString());
+        }
+        layout_ = core::Layout::at(root);
         std::string err;
         cfg_.load(layout_.configFile, err);  // 配置路径只跟应用目录有关，可以先读
         // 配置里存过游戏目录：能写且过守卫才用，否则回退到默认的 <应用目录>/minecraft

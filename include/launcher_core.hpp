@@ -143,9 +143,9 @@ struct Layout {
     fs::path versionsDir, librariesDir, assetsDir, runtimeDir, modsDir, nativesDir;
     mc263::safe::Policy policy;
 
-    static Layout detect(const fs::path& exe, const std::string& gameDirOverride = "") {
+    static Layout at(const fs::path& root, const std::string& gameDirOverride = "") {
         Layout l;
-        l.appDir = mc263::safe::normalize(exe).parent_path();
+        l.appDir = root;
         // 应用目录本身就是可信沙箱根（用户要求游戏目录建在应用目录下）
         std::string envRoot = fsx::env("MC263_SANDBOX_ROOT");
         l.policy.sandboxRoot = envRoot.empty() ? l.appDir : mc263::safe::normalize(fs::path(envRoot));
@@ -162,6 +162,11 @@ struct Layout {
         l.modsDir = l.gameDir / "mods";
         l.nativesDir = l.gameDir / "natives";
         return l;
+    }
+    // exe 所在目录通常就是应用目录；若那里不可写（例如装进 /usr/bin），
+    // 调用方应改用 XDG 数据目录，用 at() 指定 root。
+    static Layout detect(const fs::path& exe, const std::string& gameDirOverride = "") {
+        return at(mc263::safe::normalize(exe).parent_path(), gameDirOverride);
     }
     bool writable(std::string& err) const {
         for (const fs::path& p : {gameDir, configDir}) {
@@ -651,17 +656,7 @@ inline LaunchPlan buildLaunchPlan(const Layout& l, const Config& c, const JavaIn
     return p;
 }
 
-// -------------------------------------------------------------- 下载命令 ----
-inline std::vector<std::string> fetchCommand(const fs::path& fetchBin, const Layout& l, const Config& c) {
-    std::vector<std::string> a = {
-        fetchBin.string(), "--mc-dir", l.gameDir.string(), "--version", c.version,
-        "--mirror", c.mirror, "--arch", c.arch, "--jobs", std::to_string(c.jobs),
-        "--json-progress",
-    };
-    for (const auto& comp : c.components) { a.push_back("--component"); a.push_back(comp); }
-    return a;
-}
-
+// ------------------------------------------------------------ 本地版本 ----
 inline std::vector<std::string> availableVersions(const Layout& l) {
     std::vector<std::string> out;
     if (!fsx::isDir(l.versionsDir)) return out;
