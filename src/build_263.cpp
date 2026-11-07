@@ -35,7 +35,6 @@
 #include <string>
 #include <sys/stat.h>
 #include <sys/utsname.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
 
@@ -56,9 +55,6 @@ static const char* kUsage = R"(mc263-build -- 把 Minecraft 26.3 (Linux) 打包�
   --mods-dir PATH        额外的 mods 目录（可重复）
   --extra-lib PATH       额外加入 classpath 的 jar（可重复）
   --all-libs             打包 libraries/ 下全部 jar（不依赖 version json 的保底模式）
-  --online               构建前自动调用 mc263-fetch 下载缺失文件（一步到位）
-  --mirror NAME          配合 --online：official | bmclapi | http://自定义镜像
-  --jobs N               配合 --online：并发下载数 1-16（默认 8）
 
 产物:
   --launcher PATH        C++ 启动器 ELF           (默认 ./build/launcher)
@@ -82,7 +78,6 @@ static const char* kUsage = R"(mc263-build -- 把 Minecraft 26.3 (Linux) 打包�
 
 示例（输出都落在项目目录内）:
   mc263-build --mc-dir gamefiles --version 26.3 --output dist/mc263
-  mc263-build --online --version 26.3 --output dist/mc263 --rpm
   mc263-build --check-paths --output dist/mc263
 )";
 
@@ -101,10 +96,7 @@ struct Options {
     std::string username;
     bool allLibs = false;
     bool rpm = false;
-    bool online = false;
     bool checkPaths = false;
-    std::string mirror = "official";
-    size_t jobs = 8;
     bool keepSignatures = false;
     bool nativesScan = true;
     bool verbose = false;
@@ -118,22 +110,6 @@ struct Options {
 static bool fsxIsFile(const fs::path& p) {
     std::error_code ec;
     return fs::is_regular_file(p, ec);
-}
-// 直接 execv 调用工具，不经过 shell（路径含空格也安全）
-static int runTool(const std::vector<std::string>& argv) {
-    std::vector<std::string> a = argv;
-    std::vector<char*> av;
-    for (auto& s : a) av.push_back(s.data());
-    av.push_back(nullptr);
-    pid_t pid = ::fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        ::execvp(a[0].c_str(), av.data());
-        ::_exit(127);
-    }
-    int st = 0;
-    while (::waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
-    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 static void warn(const std::string& msg) { std::println(stderr, "[警告] {}", msg); }
 static void step(const std::string& msg) { std::println("\n==> {}", msg); }
@@ -208,10 +184,7 @@ static bool parseArgs(int argc, char** argv, Options& o, std::string& err) {
         else if (key == "--extra-jvm-arg" || key == "--jvm-arg") { std::string d = value(); if (!needValue(d)) return false; o.extraJvmArgs.push_back(d); }
         else if (key == "--all-libs") o.allLibs = true;
         else if (key == "--rpm") o.rpm = true;
-        else if (key == "--online") o.online = true;
         else if (key == "--check-paths") o.checkPaths = true;
-        else if (key == "--mirror") { o.mirror = value(); if (!needValue(o.mirror)) return false; }
-        else if (key == "--jobs") { o.jobs = static_cast<size_t>(std::stoi(value())); }
         else if (key == "--keep-signatures") o.keepSignatures = true;
         else if (key == "--no-natives-scan") o.nativesScan = false;
         else if (key == "--preserve-work") { /* 兼容旧文档：默认即保留 */ }
@@ -707,20 +680,6 @@ int main(int argc, char** argv) {
 
     std::println("mc263-build | C++23 重写 build_262.py | Linux 单文件 Minecraft {}", opt.version);
     std::println("架构: {} | 来源: {}", opt.arch, opt.mcDir);
-
-    if (opt.online) {
-        step("在线下载游戏文件（mc263-fetch）");
-        fs::path fetch = fs::absolute(argv[0]).parent_path() / "mc263-fetch";
-        if (!mc263::fsx::isFile(fetch)) fetch = fs::path("mc263-fetch"); // 交给 PATH 查找
-        std::vector<std::string> a = {
-            fetch.string(), "--mc-dir", opt.mcDir, "--version", opt.version,
-            "--mirror", opt.mirror, "--arch", opt.arch, "--jobs", std::to_string(opt.jobs)
-        };
-        int rc = runTool(a);
-        if (rc != 0) die("在线下载失败 (rc=" + std::to_string(rc) +
-                         ")；可先手动运行 mc263-fetch 排查，或换 --mirror bmclapi");
-        std::println("  下载完成，继续构建");
-    }
 
     fs::path mcDir(opt.mcDir);
     VersionInfo vi = resolveVersion(opt);

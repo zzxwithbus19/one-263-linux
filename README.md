@@ -6,20 +6,16 @@
 **C++23 重写**，源码位于仓库根目录。目标产物是 Linux 上的**一个 ELF 文件**：内置 Java 运行时、
 游戏库、Linux natives、assets 与 mods，双击即玩；也可封装成 `.rpm`，安装后在应用菜单/命令行一键启动。
 
-另外提供两块「开箱即用」能力：
-
-- **winetricks 风格图形化配置页**（`make gui`）：浏览器里勾选组件、选版本/镜像/架构/内存/mods URL，
-  一键完成「下载 → 构建 → 打 rpm」，实时进度与日志；无浏览器时 `--zenity` 用对话框完成同样流程。
-- **网络下载器**（`mc263-fetch`）：从 Mojang 官方 CDN / BMCLAPI 镜像下载 version manifest、client jar、
-  114 个依赖库与 natives、asset index 与 5147 个资源对象、官方 Java 25 运行时，全部 SHA1 校验 + 本地缓存 +
-  并发下载；也可直接 `mc263-build --online` 一步到位。
+另外提供 **Qt6 原生启动器**（`make qt`）：一个 ELF + 应用目录下的 `minecraft/` 与 `.mc263/`，
+自带 Python3 多线程下载（Mojang / BMCLAPI 镜像，SHA1 校验 + 缓存）、Java 探测与闸门、
+兼容性查验、内存图形化配置，形态参考 HMCL。详见 [4.6](#46-qt6-原生启动器hmcl-形态)。
 
 > 目标平台：**Fedora 43+ / openSUSE Tumbleweed**（GCC ≥ 15、rpm ≥ 4.18、libzstd）。
 > 本仓库**不含任何 Mojang 游戏文件**；构建者需用正版启动器下载的 26.3 文件自行生成成品。
 >
 > **路径安全（默认强制）**：所有写入目标默认只允许项目目录（沙箱根），
 > `/`、`/home`、`/etc`、`/usr`、`/var`、`/opt` 等系统敏感路径一律拒绝，
-> 且会先规范化路径以挡住 `..` 与符号链接逃逸。详见 [4.7 路径安全](#47-路径安全与输出目录)。
+> 且会先规范化路径以挡住 `..` 与符号链接逃逸。详见 [4.5 路径安全](#45-路径安全与输出目录)。
 > 工具不会再往 `~/.config`、`~/.cache`、`~/.local/share`、`~/mc263` 写任何东西。
 
 ---
@@ -94,9 +90,7 @@ sudo zypper install gcc-c++ make zlib-devel libzstd-devel rpm-build desktop-file
 | zlib (`-lz`) | 构建器读取 Maven jar、重写版本 jar | 否 |
 | libzstd (`-lzstd`) | 压缩/解压 payload（v2） | 是（rpm 自动声明 `libzstd.so.1()(64bit)`） |
 | rpmbuild / zstd / sha256sum | 打 rpm、系统压缩、摘要 | 否 |
-| curl CLI | `mc263-fetch` 的下载后端（fork+execv，不拼 shell） | 否 |
-| zenity / xdg-open / 浏览器 | GUI 配置页（Web 模式或 `--zenity` 对话框模式） | 否 |
-| python3 | 仅 `make check` 的 mock CDN / 端点诊断脚本 | 否 |
+| python3 | Qt 启动器的下载器（运行时释放到 `.mc263/`）+ `make check` 的 mock CDN | 否 |
 
 `USE_ZSTD=0` 时成品只依赖 glibc/libstdc++，可拿到其它发行版直接跑。
 
@@ -108,68 +102,20 @@ sudo zypper install gcc-c++ make zlib-devel libzstd-devel rpm-build desktop-file
 
 ```bash
 # 在仓库根目录执行
-make                 # C++23 编译 4 个工具：launcher / mc263-build / mc263-fetch / mc263-gui
-make check           # 51 项端到端检查（全部离线可跑）
+make                 # C++23 编译 2 个工具：launcher / mc263-build
+make qt              # 另加 Qt6 原生启动器 build/mc263-qt
+make check           # 39 项端到端检查 + 46 项核心单测（全部离线可跑）
 make info            # 查看编译器 / payload 格式 / 系统库
-make gui             # 打开图形化配置页
 ```
 
 `make check` 覆盖：版本 json 解析与 rules 过滤、签名剥离、DEFLATE jar 读取、`.so` 提取与内容、
 JRE 裁剪与可执行位、assets/mods/config、v2 zstd 与 v1 STORED 双路径、缓存命中、
-classpath 冒号分隔、JVM/游戏参数、日志、损坏 payload 被 CRC 干净拦截，
-以及**离线 mock CDN** 下的下载器（SHA1、缓存、并发、进度、篡改自愈、`--online` 一步式）、
-**GUI 任务编排**（配置读写、`/api/start`、状态流转、日志）与
-**路径守卫**（`/`、`/home`、`/etc`、`/usr` 等 7 个敏感路径、符号链接逃逸、沙箱内放行、GUI/rpm 接口同样拒绝）。
+classpath 冒号分隔、JVM/游戏参数、日志、损坏 payload 被 CRC 干净拦截、
+**路径守卫**（`/`、`/home`、`/etc`、`/usr` 等 7 个敏感路径、符号链接逃逸、沙箱内放行、rpm 接口同样拒绝），
+以及从 Qt 源码里抽取内嵌 python3 下载器、在**离线 mock CDN** 上验证下载（SHA1、多线程、进度）。
 调试时 `MC263_KEEP=1 make check` 会保留临时目录；`python3 tests/probe_endpoints.py` 可诊断真实下载端点。
 
-### 4.2 图形化配置（winetricks 风格，推荐）
-
-```bash
-make gui                         # 自动打开浏览器配置页
-make gui GUI_ARGS="--no-browser" # 只打印 URL，自己打开
-build/mc263-gui --zenity         # 无浏览器：zenity 勾选清单 + 进度对话框
-```
-
-页面（`gui/index.html`）分区：
-
-1. **组件勾选清单**：游戏主程序 / 依赖库+natives / 资源 / Java 运行时 / Fabric / 额外 mods / 打 rpm。
-2. **基本设置**：版本（可从官方清单刷新）、下载源（official / bmclapi）、架构、并发数、玩家名、
-   `-Xmx`、游戏文件目录、输出路径。
-3. **额外 mods URL**：任意多个 `.jar` 直链，下载后随单文件打包。
-4. **执行**：进度条 + 当前文件 + 实时日志，按钮「开始构建 / 仅保存配置 / 取消任务」。
-
-配置持久化在 **`<项目目录>/.mc263/config.json`**（不再写 `~/.config`）。服务端只监听 `127.0.0.1`、
-校验 Host、用 `fork+execv` 传参数（不拼 shell），任务顺序为 `mc263-fetch → mc263-build → build-rpm.sh`；
-`POST /api/config` 会先校验 `mcDir` / `output` 是否在允许范围内。
-`--zenity` 模式用 `--list --checklist` 选组件、`--entry` 填版本、`--progress` 显示进度，适合纯桌面会话。
-
-### 4.3 网络下载（不需要预先准备游戏文件）
-
-```bash
-# 一键：下载 + 构建 + 打 rpm
-make gui             # 页面上点「开始构建」
-
-# 命令行两步（输出全部在项目目录内）
-build/mc263-fetch --version 26.3                       # 默认下载到 ./gamefiles
-build/mc263-build --mc-dir gamefiles --version 26.3 --output dist/mc263 --rpm
-
-# 或者一步到位（构建前自动调用同目录的 mc263-fetch）
-build/mc263-build --online --version 26.3 --mc-dir gamefiles --output dist/mc263
-```
-
-下载源（2026-11 实测，见 `tests/probe_endpoints.py`）：`piston-meta.mojang.com` 版本清单
-（26.3 是当前 `latest.release`）、`piston-data.mojang.com` client jar、`libraries.minecraft.net`
-（26.3 声明 114 个库）、`piston-meta` asset index（id=34，5147 个对象约 485 MB）、
-`resources.download.minecraft.net` 资源对象、`launchermeta.mojang.com` Java 运行时清单
-（`java-runtime-epsilon` / Java 25，147 个文件，含 `executable` 标志）、
-`meta.fabricmc.net` Fabric loader（最新 0.20.1）。
-
-特性：每个文件按官方 `sha1` 校验、已存在且校验通过即跳过（可断点续传/重复构建）、
-`--jobs` 并发 1–16、`--mirror official|bmclapi|<http://自定义镜像>`、`--limit N` 小流量调试、
-`--json-progress` 每行一个 JSON 供 GUI 解析、`--list-versions` 列出最近 release、
-`--no-cache` 强制重下、`--allow-partial` 容忍个别失败。国内可加 `--mirror bmclapi`。
-
-### 4.4 构建真正的单文件（已有游戏文件时）
+### 4.2 构建真正的单文件（已有游戏文件时）
 
 先用官方启动器下载并完整运行一次 Minecraft **26.3**（Linux 版），确保有：
 
@@ -203,14 +149,12 @@ Fabric 整合版（例如版本目录叫 `263+fo`）同理，用 `--version 263+
 | `--all-libs` | 打包 `libraries/` 全部 jar（不依赖 version json 的保底模式） |
 | `--mods-dir` / `--extra-lib` / `--extra-jvm-arg` | 可重复追加 mods 目录 / 单个 jar / JVM 参数 |
 | `--launcher` / `--output` / `--work-dir` | 启动器 ELF、输出文件、暂存目录 |
-| `--online` | 构建前自动调用同目录 `mc263-fetch` 下载缺失文件 |
-| `--mirror` / `--jobs` | 配合 `--online`：下载源与并发数 |
 | `--rpm` | 构建完直接调用 rpm 打包 |
 | `--keep-signatures` / `--no-natives-scan` / `--verbose` | 调优与排查 |
 
 构建结束会打印 `SHA256`，分发时请一并核对。
 
-### 4.5 运行单文件
+### 4.3 运行单文件
 
 ```bash
 dist/mc263                               # 便携模式，存档在同目录
@@ -221,7 +165,7 @@ dist/mc263 --info                        # 查看 payload 格式 / 沙箱根 / �
 cp dist/mc263 dist/Notch                 # 重命名即改玩家名
 ```
 
-### 4.6 打成 rpm，安装后一键启动
+### 4.4 打成 rpm，安装后一键启动
 
 ```bash
 bash packaging/build-rpm.sh --payload dist/mc263       # rpm 输出到 dist/，或 make rpm
@@ -242,9 +186,9 @@ ELF 尾部的 payload（spec 里用 `%global __os_install_post %{nil}` 禁用该
 rpm 净负荷也用系统 zstd（`w19.zstdio`）压缩，老版本 rpm 自动回退 xz。
 `.rpm` 产物本身只写到 `dist/`（或 `--out` 指定的沙箱内目录），`--out /etc` 之类会被拒绝。
 
-### 4.7 路径安全与输出目录
+### 4.5 路径安全与输出目录
 
-`include/safe_path.hpp` 是统一守卫，四个工具在**任何目录创建 / 网络下载之前**调用：
+`include/safe_path.hpp` 是统一守卫，构建器与 Qt 启动器在**任何目录创建 / 网络下载之前**调用：
 
 | 规则 | 行为 |
 |------|------|
@@ -258,27 +202,111 @@ rpm 净负荷也用系统 zstd（`w19.zstdio`）压缩，老版本 rpm 自动回
 默认写入位置（**全部在项目目录内**）：
 
 ```
-gamefiles/                 下载的游戏文件（mc263-fetch 默认 --mc-dir）
-.cache/fetch/              下载元数据缓存
+gamefiles/                 游戏文件默认来源（--mc-dir 的示例位置）
 build/work/                构建暂存
 dist/mc263                 输出单文件
 dist/*.rpm                 rpm 产物
-.mc263/config.json         GUI 配置（不再写 ~/.config）
+.mc263/config.json         Qt 启动器配置（不再写 ~/.config）
 runtime-data/{data,game}   运行时回退目录（XDG 的 /home 路径被拒时使用）
 ```
 
 预检与调整：
 
 ```bash
-build/mc263-fetch --check-paths                       # 只校验，不联网、不写文件
-build/mc263-build --check-paths --output dist/mc263
-MC263_SANDBOX_ROOT=/mnt/mydata make gui              # 把沙箱根换到专用数据盘
-MC263_ALLOW_OUTSIDE=1 build/mc263-fetch --mc-dir /data/mc263   # 放行沙箱外非敏感路径
+build/mc263-build --check-paths --output dist/mc263   # 只校验，不写文件
+MC263_SANDBOX_ROOT=/mnt/mydata build/mc263-qt        # 把沙箱根换到专用数据盘
+MC263_ALLOW_OUTSIDE=1 build/mc263-build --mc-dir /data/mc263 --output dist/mc263  # 放行沙箱外非敏感路径
 ```
 
 边界说明：rpm **安装阶段**的路径由包管理器管理（默认 `/opt/mc263`，`--system-links` 才写 `/usr`），
 不属于构建工具的输出；用 `--prefix "$PWD/dist/rpm-root"` 可完全不写系统盘。
 `--out` / `--topdir` 本身受守卫约束，`--out /etc` 会被直接拒绝。
+
+### 4.6 Qt6 原生启动器（HMCL 形态）
+
+和前面「把游戏塞进 ELF」不同，这是标准启动器形态 —— **一个 ELF + 应用目录下的游戏目录 + 配置目录**：
+
+```
+mc263-qt                      ← 单个 ELF（Qt6 Widgets，无 moc / Q_OBJECT）
+minecraft/                    ← 应用目录下的游戏目录，首次运行自动建立
+.mc263/
+├── config.json               版本 / 内存 / Java / 镜像 / 组件
+└── mc263_downloader.py       内嵌 python3 下载脚本（运行时释放）
+```
+
+```bash
+make qt                                   # 构建 build/mc263-qt（需 qt6-qtbase-devel）
+make USE_QT6=1                            # 默认构建也包含 Qt 启动器
+build/mc263-qt                            # 桌面运行
+QT_QPA_PLATFORM=offscreen build/mc263-qt  # 无图形环境冒烟测试
+```
+
+| 页面 | 能力 |
+|------|------|
+| 启动游戏 | 本地版本下拉、玩家名、一键原版启动；QProcess 异步 exec java，日志实时显示。启动前先过 Java 闸门（见下） |
+| 下载游戏 | 在线版本列表、组件勾选、official/bmclapi 镜像、并发线程（默认 10）；JSON 进度条与日志。「Java 运行时」不是常驻选项，只在 Java 不达标时以蓝色高亮出现并默认勾选 |
+| Java 与兼容性 | 后台线程扫描 JAVA_HOME / PATH / Mojang JRE / `/usr/lib/jvm`，列出版本与来源；查验架构、Java 版本、依赖库、natives、图形/音频库、内存、磁盘、路径守卫，可选网络连通性 |
+| 设置 / 内存 | 改完即存（400 ms 防抖，状态栏回显时间），没有「保存配置」按钮；架构按本机自动判断，不再让用户选。四段式内存条：程序占用（蓝）→ 缓存（浅蓝）→ 游戏 `-Xmx`（浅灰，长度就是分配量）→ 余下可用；2 秒自动刷新，琥珀三角标出分配右边界，显示占比与启动后预计剩余，超出可用内存时红字提示 OOM 风险；另有 `-Xms`、JVM 参数与游戏目录 |
+| 关于 | 本地 `README.md` 蓝字链接（用系统默认程序打开）、仓库链接、当前显示后端与 Qt 版本 |
+
+**多线程模型**（主线程不做任何耗时操作）：下载交给内嵌的 python3 脚本，
+脚本用 `ThreadPoolExecutor` 并发下载 + SHA1 校验 + 本地缓存，Qt 通过 `QProcess` 异步读取 JSON 进度；
+Java 扫描与兼容性查验在 `std::thread` 后台执行，用 `QMetaObject::invokeMethod` 回主线程刷 UI；
+启动游戏用 `QProcess` 异步执行。核心逻辑全部在 `include/launcher_core.hpp`（不依赖 Qt），
+由 `tests/core_test.cpp` 做 46 项离线单测。
+
+#### 启动前的 Java 闸门
+
+启动器不再让用户自己勾「要不要下 Java」，而是在 `QApplication` 起来后先扫一遍 Java，
+用**整页遮住主界面**（不是弹窗，点不穿）直到条件满足：
+
+| 版本 | 要求的 Java |
+|------|-------------|
+| 26.x（本仓库主线） | **25** |
+| 1.20 ~ 1.21 | 21 |
+| 1.17 ~ 1.19 | 17 |
+| 1.12 及更早 | 8 |
+
+阈值不是写死的：优先读已下载的 `<版本>.json` 里的 `javaVersion.majorVersion`，
+没下载时按版本号推断（`core::requiredJavaMajor`，有单测）。
+
+- 找到达标的 Java → 直接放行进主界面
+- 只找到更老的版本 → 卡片标题写「需要 Java 25 及以上（当前 Java 11）」，
+  正文按情况说明：8/11 提示「已不再被 Minecraft 所支持」，17/21 提示「低于该版本要求」
+- 一个都没有 → 提示去下载页，那里「Java 运行时」会**蓝色高亮并默认勾选**
+- 卡片上有「下载 Java 运行时 / 重新检测 / 手动指定 java… / 退出」；
+  下载完成或手动指定后会自动重新扫描，达标即自动放行
+- 点「启动游戏」时会用当前选中版本再算一次阈值，不达标就把闸门拉回来
+
+#### Wayland 原生（KDE Plasma 6 / GNOME 46+ 等只给 Wayland 的桌面）
+
+KDE Plasma 6 起默认只提供 Wayland 会话，XWayland 可能根本没装，所以 `mc263-qt`
+在 `QApplication` 之前就按会话选好 Qt 平台插件（`core::choosePlatform`，有离线单测）：
+
+| 情形 | 结果 |
+|------|------|
+| 已设 `QT_QPA_PLATFORM`（或命令行 `-platform`） | 完全尊重，不干预 |
+| Wayland 会话 + 装了 wayland 插件 | `wayland`，原生协议，不经过 XWayland |
+| Wayland 会话 + 只有 xcb 插件 | 回退 `xcb`（需 XWayland），启动时在 stderr 提示补装 |
+| 两个插件都缺 | 打印 Fedora / openSUSE 的安装命令后退出，而不是让 Qt qFatal |
+
+配套细节：`setDesktopFileName("mc263-qt")` 让 Wayland 的 `app_id` 与桌面项一致
+（窗口分组、任务栏图标、通知归属）；HiDPI、分数缩放、多屏由 Qt6 自己处理；
+打开仓库链接与「打开游戏目录」都走 `QDesktopServices` / `xdg-open`，在 Wayland 下经 portal 生效。
+
+```bash
+sudo dnf install qt6-qtwayland        # Fedora：不装就只有 xcb 回退
+sudo zypper install libQt6WaylandClient6   # openSUSE TW
+QT_QPA_PLATFORM=xcb build/mc263-qt    # 想强制走 XWayland 时
+build/mc263-qt --platform wayland      # 强制原生（Qt 自身参数，优先级最高）
+```
+
+「关于」页底部会显示 `显示后端：wayland（原生 Wayland，不经过 XWayland）· Qt 6.x.y`，
+可以直接确认当前跑在哪个后端上。
+
+> 若 stderr 出现 `Failed to register with host portal ... App info not found for 'mc263-qt'`：
+> 只是系统里没有同名的 `mc263-qt.desktop`（源码直接运行时正常），不影响窗口、下载和启动。
+> 想让任务栏图标与窗口分组完全正确，装一个同名桌面项即可。
 
 ---
 
@@ -287,7 +315,7 @@ MC263_ALLOW_OUTSIDE=1 build/mc263-fetch --mc-dir /data/mc263   # 放行沙箱外
 ```
 mc26-one/（仓库根目录）
 ├── .gitignore                 忽略回收站/记忆目录/构建产物/运行期数据
-├── Makefile                    C++23 / pkg-config / USE_ZSTD 开关 / check / gui / fetch / rpm
+├── Makefile                    C++23 / USE_ZSTD / USE_QT6 / check / qt / rpm
 ├── README.md
 ├── include/
 │   ├── mini_zip.hpp            ZIP32 STORED 读写 + CRC32 + unix mode（构建器侧支持 zlib DEFLATE）
@@ -296,21 +324,20 @@ mc26-one/（仓库根目录）
 │   ├── zstd_stream.hpp         系统 libzstd 流式压缩/解压
 │   ├── download.hpp            curl 下载后端 + 自实现 SHA1 + 并发任务池 + 镜像替换
 │   ├── safe_path.hpp           输出路径守卫（黑名单 + 沙箱根 + 符号链接逃逸防护）
+│   ├── launcher_core.hpp       HMCL 式核心：布局/配置/Java 探测/兼容性/启动/内嵌下载（不依赖 Qt）
 │   └── fs_util.hpp             目录复制/裁剪、路径与日志工具
 ├── src/
-│   ├── build_263.cpp           原 Windows 脚本的 C++23 重写（支持 --online）
+│   ├── build_263.cpp           原 Windows 脚本的 C++23 重写（离线打包）
 │   ├── launcher.cpp            C++23 自解压启动器（零/一 个第三方运行库）
-│   ├── fetch_263.cpp           网络下载器 mc263-fetch
-│   └── gui_263.cpp             本地 HTTP 配置服务 + zenity 回退 mc263-gui
-├── gui/
-│   └── index.html              winetricks 风格配置页（组件勾选 / 进度 / 日志）
+│   └── mc263_qt.cpp            Qt6 原生启动器（内嵌 python3 下载脚本）
 ├── packaging/
 │   ├── mc263.spec              rpm spec（禁 strip、自动依赖）
 │   ├── build-rpm.sh            打包 + 完整性校验 + 安装提示
 │   ├── mc263.desktop           应用菜单项
 │   └── mc263.svg               草方块图标
 └── tests/
-    ├── selftest.sh             42 项端到端自测（含 v1/v2、mock CDN、GUI 编排）
+    ├── selftest.sh             39 项端到端自测（v1/v2、mock CDN、路径守卫）
+    ├── core_test.cpp           Qt 版核心 46 项离线单测（Wayland / xcb 后端选择、meminfo 口径、Java 版本阈值）
     ├── mock_cdn.py             离线模拟 Mojang 全部下载端点（真实 SHA1）
     └── probe_endpoints.py      真实端点诊断（版本清单 / JRE / Fabric / 镜像）
 ```
@@ -343,22 +370,20 @@ openSUSE TW 对应 `Mesa-libGL1` 等包。rpm 无法自动声明这些 `dlopen` 
 A：用 `MC263_DATA_DIR=/path/on/exec/mount` 换一个可执行分区，或 `MC263_PORTABLE=1` 走便携模式。
 
 **Q：下载慢、个别文件失败、或官方 CDN 连不上？**
-A：加 `--mirror bmclapi`（国内镜像）、`--jobs 12` 提高并发；重复执行只会补下校验失败的文件；
-个别文件始终失败时可用 `--allow-partial` 先构建，或 `python3 tests/probe_endpoints.py` 诊断端点。
-`--limit N` 可小流量验证，`--no-cache` 强制重新校验。
+A：Qt 启动器的下载页里把「下载源」切到 `bmclapi`（国内镜像）、把「并发线程」调到 12；
+再点一次「开始下载」只会补下校验失败的文件。`python3 tests/probe_endpoints.py` 可诊断真实端点。
 
 **Q：找不到 26.3 版本 / 想装别的版本？**
-A：`build/mc263-fetch --list-versions` 列出最近 20 个 release；`--version latest` 跟最新正式版，
-GUI 里点「刷新」从官方清单拉版本下拉。26.3 实测为当前 `latest.release`。
+A：Qt 启动器「下载游戏」页点「获取在线版本」从官方清单拉下拉（最近 20 个 release），
+也可以直接手输版本号。26.3 实测为当前 `latest.release`。
 
 **Q：aarch64 没有官方 JRE？**
-A：Mojang 的 JRE 清单目前只提供 `linux`（x86_64）；`mc263-fetch` 在 aarch64 会跳过 runtime 下载，
-构建时用系统 Java 或 `--java-runtime` 指定自备 JRE（一样会复制进单文件）。
+A：Mojang 的 JRE 清单目前只提供 `linux`（x86_64）。Qt 启动器在 aarch64 会跳过运行时下载，
+用系统 Java 即可；单文件构建时用 `--java-runtime` 指定自备 JRE（一样会复制进单文件）。
 
-**Q：GUI 页面没自动打开？**
-A：`make gui GUI_ARGS="--no-browser"` 打印 URL 手动打开；纯命令行/无桌面用
-`build/mc263-gui --zenity`（需 zenity），或直接用 `mc263-fetch` + `mc263-build` 命令行。
-服务只监听 `127.0.0.1`，关闭终端或 Ctrl+C 即停止。
+**Q：没有桌面，怎么下游戏文件？**
+A：用官方启动器先下好一份 26.3，再用 `mc263-build --mc-dir ~/.minecraft` 打包；
+或者在有桌面的机器上跑 `build/mc263-qt` 下载到 `minecraft/` 再拷过来。
 
 **Q：为什么 `--output ~/mc263` / `--mc-dir /etc/...` 被拒绝？想把数据放到别的盘怎么办？**
 A：默认禁止把输出写到 `/`、`/home`（含主目录下的散落路径）、`/etc`、`/usr` 等敏感位置。
@@ -392,10 +417,18 @@ A：`make clean && make USE_ZSTD=0`，用该 launcher 重新构建即可产出 v
 README 亦为重写，因此本仓库现有代码是全新的 C++23 实现，不含上游代码。
 本许可仅覆盖本仓库自身代码。
 
+**Qt6 启动器（`src/mc263_qt.cpp`）** 额外动态链接 Qt6 Widgets/Gui/Core。按 Fedora 包元数据，
+Qt6 为 `LGPL-3.0-only OR GPL-3.0-only WITH Qt-GPL-exception-1.0`，此处按 **LGPL-3.0-only** 使用：
+LGPL 与 GPLv3 兼容，**项目许可不变**。分发 Qt 版时需履行 LGPL 附带义务 —— 随附 LGPL-3.0
+许可文本、明确声明使用 Qt（「关于」页已写明）、保持动态链接以便用户替换 Qt 库、
+按 LGPL 提供 Qt 源码获取途径（发行版源码包或 Qt 官方）。若修改了 Qt 库本身需回馈。
+`mc263-qt` 是构建期/本机工具，不进入 rpm 包，因此 `mc263.spec` 的 `License` 字段保持
+`GPL-3.0-or-later`；若将来把它也打进 rpm，需改为 SPDX 组合表达式并附带对应许可文本。
+
 ### 8.2 第三方素材
 
 本项目**不包含** Minecraft 游戏文件、Java 运行时或任何 Mojang/Microsoft 版权素材，
-仅提供构建工具。`mc263-fetch` 只从 Mojang 官方 CDN / 公共镜像下载公开资源文件，
+仅提供构建工具。Qt 启动器的下载器只从 Mojang 官方 CDN / 公共镜像获取公开资源文件，
 **不提供账号认证、不绕过任何验证**；运行游戏仍需构建者自己拥有正版 Minecraft 账号。
 成品由构建者使用自己通过正版渠道获取的文件生成，分发责任由构建者承担。
 打包进单文件的第三方素材（Minecraft jar / assets、Mojang Java 运行时、第三方依赖库与 mods）

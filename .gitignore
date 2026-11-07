@@ -13,3 +13,6 @@ gamefiles/
 .mc263/
 runtime-data/
 .cache/
+minecraft/
+__pycache__/
+*.pyc

@@ -220,7 +220,41 @@ check "v1 自解压出 app/mc.jar 与 java" "test -f '$TMP/data_v1/app/mc.jar' &
 check "v1 启动参数正确" "MC263_FAKE_JAVA_OUT='$TMP/java_v1.txt' '$TMP/out_v1/mc263' --game-dir '$TMP/game_v1' --data-dir '$TMP/data_v1' --username Alex >/dev/null 2>&1 && grep -qx -- '--username' '$TMP/java_v1.txt' && grep -qx 'Alex' '$TMP/java_v1.txt'"
 
 echo
-echo "== 7. 离线 mock CDN：下载器全链路（SHA1 / 缓存 / 并发 / 进度） =="
+echo "== 7. 路径守卫：/、/home、/etc 等敏感目录一律拒绝 =="
+BAD_REJECTED=0
+for BAD in "/" "/etc" "/etc/mc263-test" "/home" "/home/mc263-test" "/usr/bin/mc263" "/var/tmp/mc263"; do
+    if "$ROOT/build/mc263-build" --output "$BAD/mc263" --check-paths > "$TMP/path.log" 2>&1; then
+        echo "  FAIL 构建器未拒绝 $BAD" >&2; exit 1
+    fi
+    BAD_REJECTED=$((BAD_REJECTED + 1))
+done
+check "构建器拒绝 7 个敏感路径（含 / 与 /home）" "test '$BAD_REJECTED' -eq 7"
+check "拒绝原因明确（受保护目录）" "grep -q '受保护目录' '$TMP/path.log'"
+ln -s /etc "$TMP/link-to-etc" 2>/dev/null || true
+if [[ -L "$TMP/link-to-etc" ]]; then
+    check "符号链接逃逸到 /etc 被挡住" "! '$ROOT/build/mc263-build' --output '$TMP/link-to-etc/mc263' --check-paths >/dev/null 2>&1"
+else
+    echo "  SKIP 符号链接测试（当前环境不允许创建链接）"
+fi
+check "构建器拒绝 --output /etc/mc263" "! '$ROOT/build/mc263-build' --output /etc/mc263 --check-paths >/dev/null 2>&1"
+check "构建器拒绝 --output /home/mc263" "! '$ROOT/build/mc263-build' --output /home/mc263 --check-paths >/dev/null 2>&1"
+check "构建器接受沙箱内输出" "'$ROOT/build/mc263-build' --output '$TMP/dist/mc263' --work-dir '$TMP/work' --check-paths >/dev/null 2>&1"
+if bash "$ROOT/packaging/build-rpm.sh" --payload "$OUT" --out /etc > "$TMP/rpm_path.log" 2>&1; then
+    echo "  FAIL rpm 脚本未拒绝 --out /etc" >&2; exit 1
+fi
+check "rpm 脚本拒绝 --out /etc" "grep -q '受保护目录' '$TMP/rpm_path.log'"
+
+echo
+echo "== 8. 内嵌 python3 下载器（从 Qt 源码抽取，跑离线 mock CDN） =="
+python3 - "$ROOT/src/mc263_qt.cpp" "$TMP/mc263_downloader.py" <<'PYX'
+import re, sys
+s = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r'R"PY\((.*?)\)PY"', s, re.S)
+assert m, "Qt 源码里找不到内嵌下载脚本"
+open(sys.argv[2], "w", encoding="utf-8").write(m.group(1))
+PYX
+check "从 Qt 源码抽取内嵌下载器" "test -s '$TMP/mc263_downloader.py'"
+check "下载器脚本语法正确" "python3 -m py_compile '$TMP/mc263_downloader.py'"
 CPORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
 python3 "$ROOT/tests/mock_cdn.py" --port "$CPORT" > "$TMP/mock.log" 2>&1 &
 MOCK_PID=$!
@@ -228,114 +262,14 @@ for i in $(seq 1 40); do
     curl -s --max-time 1 "http://127.0.0.1:$CPORT/mc/game/version_manifest_v2.json" >/dev/null 2>&1 && break
     sleep 0.15
 done
-MIRROR="http://127.0.0.1:$CPORT"
-FETCH="$ROOT/build/mc263-fetch"
-"$FETCH" --mirror "$MIRROR" --mc-dir "$TMP/mockmc" --version 26.3 \
-    --component jar,libraries,assets,runtime --jobs 3 --json-progress > "$TMP/fetch.log" 2>&1 || {
-        cat "$TMP/fetch.log" >&2; exit 1; }
-check "下载器成功解析 manifest 与 version json" "grep -q '声明库 1 个' '$TMP/fetch.log'"
-check "client.jar 是有效 jar 且 SHA1 校验通过" "python3 -c 'import zipfile,sys;z=zipfile.ZipFile(sys.argv[1]);assert \"META-INF/MOCK.SF\" in z.namelist() and \"net/minecraft/client/main/Main.class\" in z.namelist()' '$TMP/mockmc/versions/26.3/26.3.jar'"
-check "library 内容正确" "grep -q 'MOCK-LIBRARY-JAR' '$TMP/mockmc/libraries/mock/lib/1.0/lib-1.0.jar'"
-check "asset 对象按 hash 落盘" "test -s '$TMP/mockmc/assets/indexes/34.json' && find '$TMP/mockmc/assets/objects' -type f | grep -q ."
-check "JRE bin/java 下载并带可执行位" "test -x '$TMP/mockmc/runtime/java-runtime-epsilon/bin/java'"
-check "进度 JSON 覆盖多个阶段" "grep -q '\"stage\": \"libraries\"' '$TMP/fetch.log' && grep -q '\"stage\": \"assets\"' '$TMP/fetch.log' && grep -q '\"stage\": \"runtime\"' '$TMP/fetch.log'"
-"$FETCH" --mirror "$MIRROR" --mc-dir "$TMP/mockmc" --version 26.3 \
-    --component jar,libraries,assets,runtime --jobs 3 > "$TMP/fetch2.log" 2>&1
-check "二次运行命中本地缓存" "grep -q '缓存命中 1' '$TMP/fetch2.log'"
-printf 'BROKEN' > "$TMP/mockmc/versions/26.3/26.3.jar"
-"$FETCH" --mirror "$MIRROR" --mc-dir "$TMP/mockmc" --version 26.3 \
-    --component jar > "$TMP/fetch3.log" 2>&1
-check "SHA1 不匹配时自动重新下载修复" "python3 -c 'import zipfile,sys;assert zipfile.is_zipfile(sys.argv[1])' '$TMP/mockmc/versions/26.3/26.3.jar'"
-# --online：构建器自动先调 mc263-fetch，再走完整构建（mock 数据足以跑通）
-"$ROOT/build/mc263-build" --online --mirror "$MIRROR" --mc-dir "$TMP/mockmc" \
-    --version 26.3 --launcher "$ROOT/build/launcher" \
-    --output "$TMP/online_out/mc263" --work-dir "$TMP/online_work" \
-    > "$TMP/online.log" 2>&1 || { cat "$TMP/online.log" >&2; exit 1; }
-check "--online 先下载再构建" "grep -q '下载完成，继续构建' '$TMP/online.log'"
-check "--online 产出带 payload 的单文件" "'$TMP/online_out/mc263' --info | grep -q '内嵌 payload : 是'"
+python3 "$TMP/mc263_downloader.py" --mc-dir "$TMP/qtdl" --version 26.3 \
+    --base-url "http://127.0.0.1:$CPORT" --components jar,libraries,assets,runtime \
+    --jobs 3 --limit 2 > "$TMP/qtdl.log" 2>&1 || { cat "$TMP/qtdl.log" >&2; exit 1; }
+check "下载完成：client.jar 是有效 zip" "python3 -c 'import zipfile,sys;assert zipfile.is_zipfile(sys.argv[1])' '$TMP/qtdl/versions/26.3/26.3.jar'"
+check "JRE bin/java 落盘且可执行" "test -x '$TMP/qtdl/runtime/java-runtime-epsilon/bin/java'"
+check "进度 JSON 覆盖多个阶段" "grep -q '\"stage\": \"libraries\"' '$TMP/qtdl.log' && grep -q '\"stage\": \"assets\"' '$TMP/qtdl.log'"
 kill "$MOCK_PID" 2>/dev/null || true
 MOCK_PID=""
-
-echo
-echo "== 8. GUI 任务编排（mock 工具，验证 /api/start 与状态流转） =="
-mkdir -p "$TMP/tools" "$TMP/guihome"
-cat > "$TMP/tools/mc263-fetch" <<'SH'
-#!/usr/bin/env bash
-echo '{"stage": "jar","done": 1,"total": 2,"label": "mock.jar","ok": true,"note": ""}'
-echo '{"stage": "jar","done": 2,"total": 2,"label": "mock2.jar","ok": true,"note": "cached"}'
-SH
-cat > "$TMP/tools/mc263-build" <<'SH'
-#!/usr/bin/env bash
-echo "mock build ok"
-SH
-chmod +x "$TMP/tools/mc263-fetch" "$TMP/tools/mc263-build"
-: > "$TMP/tools/launcher"
-GPORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
-HOME="$TMP/guihome" "$ROOT/build/mc263-gui" --no-browser --port "$GPORT" --tool-dir "$TMP/tools" \
-    > "$TMP/gui.log" 2>&1 &
-GPID=$!
-for i in $(seq 1 40); do
-    curl -s --max-time 1 "http://127.0.0.1:$GPORT/api/health" >/dev/null 2>&1 && break
-    sleep 0.15
-done
-check "GUI 服务可用" "curl -s --max-time 3 'http://127.0.0.1:$GPORT/api/health' | grep -q '\"ok\": true'"
-CFG="{\"version\":\"26.3\",\"mcDir\":\"$TMP/mockmc\",\"output\":\"$TMP/out_gui/mc263\",\"mirror\":\"official\",\"arch\":\"x86_64\",\"jobs\":2,\"memory\":\"2G\",\"username\":\"GuiTest\",\"components\":[\"jar\"],\"rpm\":false,\"fabric\":false,\"modUrls\":[]}"
-curl -s --max-time 3 -X POST -H "Content-Type: application/json" -d "$CFG" \
-    "http://127.0.0.1:$GPORT/api/config" > "$TMP/gui_cfg.json"
-check "配置写入并可回读" "curl -s --max-time 3 'http://127.0.0.1:$GPORT/api/config' | grep -q 'GuiTest'"
-curl -s --max-time 3 -X POST "http://127.0.0.1:$GPORT/api/start" > "$TMP/gui_start.json"
-for i in $(seq 1 40); do
-    ST="$(curl -s --max-time 3 "http://127.0.0.1:$GPORT/api/status")"
-    echo "$ST" | grep -q '"finished": true' && break
-    sleep 0.2
-done
-printf '%s' "$ST" > "$TMP/gui_status.json"
-check "任务完成且 ok=true" "grep -q '\"finished\": true' '$TMP/gui_status.json' && grep -q '\"ok\": true' '$TMP/gui_status.json'"
-check "阶段走到完成" "grep -q '\"phase\": \"完成\"' '$TMP/gui_status.json'"
-check "日志包含 mock 工具输出" "grep -q 'mock build ok' '$TMP/gui_status.json'"
-kill "$GPID" 2>/dev/null || true
-GPID=""
-
-echo
-echo "== 9. 路径守卫：/、/home、/etc 等敏感目录一律拒绝 =="
-BAD_REJECTED=0
-for BAD in "/" "/etc" "/etc/mc263-test" "/home" "/home/mc263-test" "/usr/bin/mc263" "/var/tmp/mc263"; do
-    if "$ROOT/build/mc263-fetch" --mc-dir "$BAD" --check-paths > "$TMP/path.log" 2>&1; then
-        echo "  FAIL 下载器未拒绝 $BAD" >&2; exit 1
-    fi
-    BAD_REJECTED=$((BAD_REJECTED + 1))
-done
-check "下载器拒绝 7 个敏感路径（含 / 与 /home）" "test '$BAD_REJECTED' -eq 7"
-check "拒绝原因明确（受保护目录）" "grep -q '受保护目录' '$TMP/path.log'"
-ln -s /etc "$TMP/link-to-etc" 2>/dev/null || true
-if [[ -L "$TMP/link-to-etc" ]]; then
-    check "符号链接逃逸到 /etc 被挡住" "! '$ROOT/build/mc263-fetch' --mc-dir '$TMP/link-to-etc/mc263' --check-paths >/dev/null 2>&1"
-else
-    echo "  SKIP 符号链接测试（当前环境不允许创建链接）"
-fi
-check "构建器拒绝 --output /etc/mc263" "! '$ROOT/build/mc263-build' --output /etc/mc263 --check-paths >/dev/null 2>&1"
-check "构建器拒绝 --output /home/mc263" "! '$ROOT/build/mc263-build' --output /home/mc263 --check-paths >/dev/null 2>&1"
-check "构建器接受沙箱内输出" "'$ROOT/build/mc263-build' --output '$TMP/dist/mc263' --work-dir '$TMP/work' --check-paths >/dev/null 2>&1"
-check "下载器接受沙箱内游戏目录" "'$ROOT/build/mc263-fetch' --mc-dir '$TMP/allowed/gamefiles' --check-paths >/dev/null 2>&1"
-if bash "$ROOT/packaging/build-rpm.sh" --payload "$OUT" --out /etc > "$TMP/rpm_path.log" 2>&1; then
-    echo "  FAIL rpm 脚本未拒绝 --out /etc" >&2; exit 1
-fi
-check "rpm 脚本拒绝 --out /etc" "grep -q '受保护目录' '$TMP/rpm_path.log'"
-# 单独起一个 GUI 服务，验证 HTTP 配置接口也拒绝敏感路径
-G2PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
-HOME="$TMP/guihome2" "$ROOT/build/mc263-gui" --no-browser --port "$G2PORT" > "$TMP/gui2.log" 2>&1 &
-GPID=$!
-for i in $(seq 1 40); do
-    curl -s --max-time 1 "http://127.0.0.1:$G2PORT/api/health" >/dev/null 2>&1 && break
-    sleep 0.15
-done
-RSP="$(curl -s --max-time 3 -X POST -H 'Content-Type: application/json' \
-      -d "{\"mcDir\":\"/etc/mc263\",\"output\":\"$TMP/out_gui2/mc263\"}" \
-      "http://127.0.0.1:$G2PORT/api/config")"
-printf '%s' "$RSP" > "$TMP/gui2_cfg.json"
-check "GUI /api/config 拒绝 /etc 并返回错误" "grep -q '\"ok\": false' '$TMP/gui2_cfg.json' && grep -q '受保护目录' '$TMP/gui2_cfg.json'"
-kill "$GPID" 2>/dev/null || true
-GPID=""
 
 echo
 printf '\033[32m全部通过：%d 项检查 | payload 格式: %s\033[0m\n' "$PASS" "$FORMAT"

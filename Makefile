@@ -17,8 +17,6 @@ BUILD    := build
 DIST     := dist
 LAUNCHER := $(BUILD)/launcher
 BUILDER  := $(BUILD)/mc263-build
-FETCH    := $(BUILD)/mc263-fetch
-GUI      := $(BUILD)/mc263-gui
 HEADERS  := $(wildcard include/*.hpp)
 
 # ---- 系统库（pkg-config，Fedora / openSUSE TW 均自带）----
@@ -62,9 +60,24 @@ BUILDER_LIBS  := $(ZLIB_LIBS)
 PAYLOAD_FMT   := v1 (STORED zip, 零第三方运行库)
 endif
 
-.PHONY: all check rpm info clean help gui fetch
+CORE_TEST := $(BUILD)/core-test
+QT_APP    := $(BUILD)/mc263-qt
+USE_QT6   ?= 0
+QT6_CFLAGS := $(shell pkg-config --cflags Qt6Widgets Qt6Gui Qt6Core 2>/dev/null)
+QT6_LIBS   := $(shell pkg-config --libs Qt6Widgets Qt6Gui Qt6Core 2>/dev/null)
 
-all: $(LAUNCHER) $(BUILDER) $(FETCH) $(GUI)
+ifeq ($(USE_QT6),1)
+ifeq ($(QT6_LIBS),)
+$(error 未找到 Qt6 开发包：sudo dnf install qt6-qtbase-devel（openSUSE TW: qt6-base-devel）)
+endif
+endif
+
+.PHONY: all check rpm info clean help qt
+
+all: $(LAUNCHER) $(BUILDER)
+ifeq ($(USE_QT6),1)
+all: $(QT_APP)
+endif
 
 $(LAUNCHER): src/launcher.cpp $(HEADERS)
 	@mkdir -p $(BUILD)
@@ -76,27 +89,27 @@ $(BUILDER): src/build_263.cpp $(HEADERS)
 	$(CXX) $(COMMON) $(BUILDER_DEFS) $(ZLIB_CFLAGS) $(ZSTD_CFLAGS) \
 	  $< -o $@ $(BUILDER_LIBS)
 
-# 下载器：只用系统 curl CLI + 标准库；GUI 用 POSIX socket + 线程
-$(FETCH): src/fetch_263.cpp $(HEADERS)
+# HMCL 式核心逻辑单测（不依赖 Qt / 不联网）
+$(CORE_TEST): tests/core_test.cpp $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CXX) $(COMMON) -pthread $< -o $@
 
-$(GUI): src/gui_263.cpp $(HEADERS) gui/index.html
+# Qt6 原生启动器：无 Q_OBJECT / 无需 moc，单个 ELF
+$(QT_APP): src/mc263_qt.cpp $(HEADERS)
 	@mkdir -p $(BUILD)
-	$(CXX) $(COMMON) -pthread $< -o $@
+	$(CXX) $(COMMON) -pthread -fPIC $(QT6_CFLAGS) $< -o $@ $(QT6_LIBS)
 
-check: all
+check: all $(CORE_TEST)
+	$(CORE_TEST)
 	bash tests/selftest.sh --builder "$(abspath $(BUILDER))" --launcher "$(abspath $(LAUNCHER))" \
 	     --format "$(PAYLOAD_FMT)"
 
+qt:
+	@$(MAKE) --no-print-directory USE_QT6=1 $(QT_APP)
+	@printf '已构建 %s；桌面直接运行，或 QT_QPA_PLATFORM=offscreen %s 做冒烟测试\n' '$(QT_APP)' '$(QT_APP)'
+
 rpm:
 	bash packaging/build-rpm.sh --payload "$(abspath $(DIST)/mc263)"
-
-gui: all
-	$(GUI) $(GUI_ARGS)
-
-fetch: $(FETCH)
-	$(FETCH) $(FETCH_ARGS)
 
 info:
 	@$(CXX) --version | head -1
@@ -106,18 +119,17 @@ info:
 	@printf 'libzstd   : %s\n' '$(ZSTD_LIBS)'
 	@printf 'launcher  : %s\n' '$(LAUNCHER)'
 	@printf 'builder   : %s\n' '$(BUILDER)'
-	@printf 'fetch     : %s\n' '$(FETCH)'
-	@printf 'gui       : %s\n' '$(GUI)'
+	@printf 'qt app    : %s (make qt 构建)\n' '$(QT_APP)'
+	@printf 'Qt6       : %s\n' '$(if $(QT6_LIBS),可用,缺 qt6-qtbase-devel)'
 	@printf '沙箱根    : %s (MC263_SANDBOX_ROOT 可覆盖)\n' '$(abspath .)'
 
 clean:
 	rm -rf $(BUILD) $(DIST)
 
 help:
-	@printf '目标: all / check / gui / fetch / rpm / info / clean\n'
-	@printf '  make gui          打开 winetricks 风格配置页（GUI_ARGS="--no-browser" 可只打印 URL）\n'
-	@printf '  make fetch FETCH_ARGS="--version 26.3 --component jar"  手动下载\n'
-	@printf '  make gui 的 zenity 模式: build/mc263-gui --zenity\n'
+	@printf '目标: all / check / qt / rpm / info / clean\n'
+	@printf '  make qt           构建 Qt6 原生启动器 build/mc263-qt（单个 ELF）\n'
+	@printf '  make USE_QT6=1    默认构建也包含 Qt 启动器\n'
 	@printf '路径安全: 输出默认只写项目沙箱内；/、/home、/etc、/usr 等一律拒绝\n'
-	@printf '          build/mc263-fetch --check-paths 可预检；MC263_SANDBOX_ROOT=<dir> 改沙箱根\n'
+	@printf '          build/mc263-build --check-paths 可预检；MC263_SANDBOX_ROOT=<dir> 改沙箱根\n'
 	@printf '变量: USE_ZSTD=0 关闭 zstd；STATIC_CXX=1 静态链接 libstdc++；CXX=clang++ 换编译器\n'
