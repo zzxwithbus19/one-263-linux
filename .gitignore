@@ -3,7 +3,13 @@
 .workbuddy/
 *.log
 *.rpm
+*.tmp-*
 
-# 构建产物（mc263-linux 内部还有更细的 .gitignore）
+# 构建产物与运行期数据（工具已全部上移到仓库根，都限制在项目沙箱内）
 build/
 dist/
+_data/
+gamefiles/
+.mc263/
+runtime-data/
+.cache/

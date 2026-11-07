@@ -1,4 +1,4 @@
-# mc263-linux -- C++23 构建
+# mc26-one -- C++23 构建（源码位于仓库根目录）
 # 目标平台: Fedora 43+ / openSUSE Tumbleweed (GCC >= 15, libzstd, rpm >= 4.18)
 #   make                 编译 launcher + mc263-build
 #   make check           用伪造的 26.3 游戏目录跑端到端自测

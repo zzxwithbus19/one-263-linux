@@ -1,8 +1,8 @@
-# mc263-linux — 用 C++23 重写 build_262.py，产出 Minecraft 26.3 的 Linux 单文件
+# mc26-one — Minecraft 26.3 的 Linux 单文件构建器（C++23）
 
-把仓库根目录的 Windows 构建脚本 `build_262.py`（Python + .NET/C# 自解压 exe）整体重写为
-**C++23 工具链**，目标产物是 Linux 上的**一个 ELF 文件**：内置 Java 运行时、游戏库、
-Linux natives、assets 与 mods，双击即玩；也可封装成 `.rpm`，安装后在应用菜单/命令行一键启动。
+本仓库是原 Windows 构建脚本 `build_262.py`（Python + .NET/C# 自解压 exe，**已从仓库移除**）的
+**C++23 重写**，源码位于仓库根目录。目标产物是 Linux 上的**一个 ELF 文件**：内置 Java 运行时、
+游戏库、Linux natives、assets 与 mods，双击即玩；也可封装成 `.rpm`，安装后在应用菜单/命令行一键启动。
 
 另外提供两块「开箱即用」能力：
 
@@ -64,7 +64,7 @@ v1 纯 STORED，此时启动器**零第三方运行库依赖**（只依赖 glibc
 
 ## 2. 与原 Python 脚本的对照
 
-| `build_262.py`（Windows） | 本目录（Linux / 26.3） |
+| 原 `build_262.py`（Windows，已移除） | 本仓库（Linux / 26.3） |
 |---------------------------|------------------------|
 | 硬编码 `F:\beif\...` 路径 | `--mc-dir` / `--java-runtime` / `--output` 等 CLI + 环境变量 |
 | `shutil.copytree(JAVA_RT)` | `copyRuntime()`，自动探测 Mojang JRE / JAVA_HOME / 系统 java，裁剪 man/src.zip/classes.jsa |
@@ -105,7 +105,7 @@ sudo zypper install gcc-c++ make zlib-devel libzstd-devel rpm-build desktop-file
 ### 4.1 编译与自测（不需要游戏文件）
 
 ```bash
-cd mc263-linux
+# 在仓库根目录执行
 make                 # C++23 编译 4 个工具：launcher / mc263-build / mc263-fetch / mc263-gui
 make check           # 51 项端到端检查（全部离线可跑）
 make info            # 查看编译器 / payload 格式 / 系统库
@@ -246,7 +246,7 @@ rpm 净负荷也用系统 zstd（`w19.zstdio`）压缩，老版本 rpm 自动回
 
 | 规则 | 行为 |
 |------|------|
-| 沙箱根 | 默认 `mc263-linux/`（自动从可执行文件位置向上找 `Makefile` + `src/build_263.cpp`）；`MC263_SANDBOX_ROOT` 可覆盖 |
+| 沙箱根 | 默认**仓库根目录**（自动从可执行文件位置向上找 `Makefile` + `src/build_263.cpp`）；`MC263_SANDBOX_ROOT` 可覆盖 |
 | 沙箱内 | 一律允许（即使项目本身位于 `/home/<user>/...` 下） |
 | 沙箱外硬拒绝 | `/`、`/etc`、`/usr`、`/bin`、`/sbin`、`/lib*`、`/boot`、`/dev`、`/proc`、`/sys`、`/root`、`/var`、`/opt`、`/run`、`/srv`、`/mnt`、`/media`、`/home`（含子目录） |
 | 沙箱外其它（如 `/tmp`、`/data`） | 默认也拒绝；`MC263_ALLOW_OUTSIDE=1` 才放行 |
@@ -283,7 +283,8 @@ MC263_ALLOW_OUTSIDE=1 build/mc263-fetch --mc-dir /data/mc263   # 放行沙箱外
 ## 5. 目录结构
 
 ```
-mc263-linux/
+mc26-one/（仓库根目录）
+├── .gitignore                 忽略回收站/记忆目录/构建产物/运行期数据
 ├── Makefile                    C++23 / pkg-config / USE_ZSTD 开关 / check / gui / fetch / rpm
 ├── README.md
 ├── include/
@@ -295,7 +296,7 @@ mc263-linux/
 │   ├── safe_path.hpp           输出路径守卫（黑名单 + 沙箱根 + 符号链接逃逸防护）
 │   └── fs_util.hpp             目录复制/裁剪、路径与日志工具
 ├── src/
-│   ├── build_263.cpp           build_262.py 的 C++23 重写（支持 --online）
+│   ├── build_263.cpp           原 Windows 脚本的 C++23 重写（支持 --online）
 │   ├── launcher.cpp            C++23 自解压启动器（零/一 个第三方运行库）
 │   ├── fetch_263.cpp           网络下载器 mc263-fetch
 │   └── gui_263.cpp             本地 HTTP 配置服务 + zenity 回退 mc263-gui
