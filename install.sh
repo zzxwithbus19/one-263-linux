@@ -1,41 +1,44 @@
 #!/bin/sh
 # mc263 一键安装
 #   默认：有 dnf/zypper 就装预编译 rpm（自动解 Qt6 运行时依赖），否则装独立 ELF
-#   sh install.sh --elf         强制装独立 ELF 到 ~/.local/bin（不碰系统包管理）
-#   sh install.sh --rpm         强制装 rpm
-#   sh install.sh --uninstall   卸载（rpm 与 ELF 都会处理）
+#   --elf / --rpm / --uninstall / --tag <tag>
 #
 #   curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh | sh
+#   curl -fsSL .../install.sh | sh -s -- --tag pre非生产     # 装某个 pre-release
 #
-# 环境变量：MC263_VER（默认 26.3）、MC263_REPO（默认 zzxwithbus19/one-263-linux）
+# 环境变量：MC263_VER、MC263_REPO、MC263_TAG
 set -eu
 
 REPO="${MC263_REPO:-zzxwithbus19/one-263-linux}"
 VER="${MC263_VER:-26.3}"
+TAG="${MC263_TAG:-}"
 ARCH="$(uname -m)"
+API="https://api.github.com/repos/$REPO"
 BASE="https://github.com/$REPO/releases/latest/download"
-RPM_ASSET="mc263-$VER-1.$ARCH.rpm"
-ELF_ASSET="mc263-qt-$VER-$ARCH"
 
 step() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '注意: %s\n' "$*" >&2; }
 die()  { printf '错误: %s\n' "$*" >&2; exit 1; }
 
-if [ "$(id -u)" -eq 0 ]; then SUDO=""; BIN_DIR="/usr/local/bin"; else SUDO="sudo"; BIN_DIR="$HOME/.local/bin"; fi
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; DEFAULT_BIN="/usr/local/bin"; else SUDO="sudo"; DEFAULT_BIN="$HOME/.local/bin"; fi
+BIN_DIR="${MC263_BIN_DIR:-$DEFAULT_BIN}"
 
 if command -v dnf >/dev/null 2>&1; then PM=dnf
 elif command -v zypper >/dev/null 2>&1; then PM=zypper
 else PM=""; fi
 
 MODE="auto"
-case "${1:-}" in
-    --elf) MODE=elf ;;
-    --rpm) MODE=rpm ;;
-    -u|--uninstall) MODE=uninstall ;;
-    "" ) ;;
-    -h|--help) sed -n '2,10p' "$0" 2>/dev/null || true; exit 0 ;;
-    *) die "未知参数: $1（可用 --elf / --rpm / --uninstall）" ;;
-esac
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --elf) MODE=elf ;;
+        --rpm) MODE=rpm ;;
+        -u|--uninstall) MODE=uninstall ;;
+        --tag) TAG="${2:-}"; shift ;;
+        -h|--help) sed -n '2,10p' "$0" 2>/dev/null || true; exit 0 ;;
+        *) die "未知参数: $1（可用 --elf / --rpm / --tag <tag> / --uninstall）" ;;
+    esac
+    shift
+done
 
 fetch() {  # fetch URL DEST
     if command -v curl >/dev/null 2>&1; then
@@ -66,84 +69,98 @@ esac
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
-if [ "$MODE" = uninstall ]; then
-    uninstall
-    exit 0
-fi
+if [ "$MODE" = uninstall ]; then uninstall; exit 0; fi
 if [ "$MODE" = auto ]; then
     if [ -n "$PM" ]; then MODE=rpm; else MODE=elf; fi
 fi
 
-# ---------- 下载 + 摘要校验 ----------
-if [ "$MODE" = rpm ]; then ASSET="$RPM_ASSET"; else ASSET="$ELF_ASSET"; fi
+# ---------- 通过 GitHub API 找资产：支持 prerelease、任意资产名 ----------
+RES_URL=""
+RES_NAME=""
+RES_DIGEST=""
 
-step "下载 $ASSET"
-if ! fetch "$BASE/$ASSET" "$TMP/$ASSET" 2>/dev/null; then
-    step "固定文件名不存在，从 Releases 里找"
-    fetch "https://api.github.com/repos/$REPO/releases/latest" "$TMP/release.json" 2>/dev/null || \
-        die "无法访问 GitHub API，请到 github.com/$REPO/releases 手动下载"
-    HAVE_RELEASE_JSON=1
-    if [ "$MODE" = elf ]; then
-        PAT="/mc263-qt-[^\"]*$ARCH\$"
+resolve_via_api() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    if [ -n "$TAG" ]; then
+        enc="$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$TAG")" || return 1
+        endpoint="$API/releases/tags/$enc"
     else
-        PAT="/mc263-[^\"]*[.]rpm\$"
+        endpoint="$API/releases/latest"
     fi
-    URL="$(sed -n 's/.*"browser_download_url": *"\([^"]*\)".*/\1/p' "$TMP/release.json" \
-           | grep -E "$PAT" | head -1)"
-    [ -n "$URL" ] || die "没找到可下载的文件，请到 github.com/$REPO/releases 手动下载"
-    fetch "$URL" "$TMP/$ASSET" || die "下载失败：$URL"
-fi
-
-# 校验：GitHub 给每个 release asset 都附了 sha256 digest（API 的 assets[].digest），
-# 优先用它；拿不到再退回 release 里的 SHA256SUMS；都没有就只提示、不阻断。
-verify_asset() {  # verify_asset <本地文件> <资产名>
-    local_file="$1"
-    asset_name="$2"
-    want=""
-    if [ -z "${HAVE_RELEASE_JSON:-}" ]; then
-        if fetch "https://api.github.com/repos/$REPO/releases/latest" "$TMP/release.json" 2>/dev/null; then
-            HAVE_RELEASE_JSON=1
-        fi
+    if ! fetch "$endpoint" "$TMP/rel.json" 2>/dev/null; then
+        [ -n "$TAG" ] && return 1
+        # 仓库只有 prerelease 时 /releases/latest 会 404，退回列表取最新一个
+        fetch "$API/releases?per_page=1" "$TMP/rel.json" 2>/dev/null || return 1
     fi
-    if [ -n "${HAVE_RELEASE_JSON:-}" ] && command -v python3 >/dev/null 2>&1; then
-        want="$(python3 - "$TMP/release.json" "$asset_name" <<'PY'
+    out="$(python3 - "$TMP/rel.json" "$MODE" "$VER" "$ARCH" <<'PY'
 import json, sys
+path, mode, ver, arch = sys.argv[1:5]
 try:
-    data = json.load(open(sys.argv[1]))
+    data = json.load(open(path))
 except Exception:
-    sys.exit(0)
-for a in data.get("assets", []):
-    if a.get("name") == sys.argv[2]:
-        d = a.get("digest") or ""
-        if d.startswith("sha256:"):
-            print(d.split(":", 1)[1])
-        break
+    sys.exit(1)
+rel = data[0] if isinstance(data, list) else data
+assets = rel.get("assets", [])
+
+def pick():
+    if mode == "rpm":
+        exact = f"mc263-{ver}-1.{arch}.rpm"
+        hit = next((a for a in assets if a.get("name") == exact), None)
+        if hit:
+            return hit
+        return next((a for a in assets
+                     if a.get("name", "").startswith("mc263-")
+                     and a.get("name", "").endswith(".rpm")), None)
+    exact = f"mc263-qt-{ver}-{arch}"
+    hit = next((a for a in assets if a.get("name") == exact), None)
+    if hit:
+        return hit
+    return next((a for a in assets
+                 if a.get("name", "").startswith("mc263-qt")
+                 and not a.get("name", "").endswith((".asc", ".sha256", ".txt"))), None)
+
+a = pick()
+if not a:
+    sys.exit(1)
+print(a.get("browser_download_url", ""))
+print(a.get("name", ""))
+print(a.get("digest") or "")
 PY
-)"
-    fi
-
-    if [ -n "$want" ]; then
-        got="$(sha256sum "$local_file" | awk '{print $1}')"
-        [ "$want" = "$got" ] || die "SHA256 不匹配（GitHub: $want，本地: $got）。文件可能损坏或被篡改"
-        echo "  OK $asset_name（GitHub digest）"
-        return 0
-    fi
-
-    if fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS" 2>/dev/null; then
-        want="$(awk -v n="$asset_name" '$2 == n {print $1; exit}' "$TMP/SHA256SUMS")"
-        if [ -n "$want" ]; then
-            got="$(sha256sum "$local_file" | awk '{print $1}')"
-            [ "$want" = "$got" ] || die "SHA256 不匹配（SHA256SUMS: $want，本地: $got）"
-            echo "  OK $asset_name（SHA256SUMS）"
-            return 0
-        fi
-    fi
-
-    warn "没拿到 $asset_name 的摘要（GitHub API 不可用且 release 里没有 SHA256SUMS），跳过校验"
+)" || return 1
+    RES_URL="$(printf '%s\n' "$out" | sed -n '1p')"
+    RES_NAME="$(printf '%s\n' "$out" | sed -n '2p')"
+    RES_DIGEST="$(printf '%s\n' "$out" | sed -n '3p')"
+    [ -n "$RES_URL" ] && [ -n "$RES_NAME" ]
 }
 
+if resolve_via_api; then
+    URL="$RES_URL"
+    ASSET="$RES_NAME"
+    [ -n "$TAG" ] && echo "  使用 tag: $TAG"
+else
+    if [ "$MODE" = rpm ]; then ASSET="mc263-$VER-1.$ARCH.rpm"; else ASSET="mc263-qt-$VER-$ARCH"; fi
+    URL="$BASE/$ASSET"
+    warn "拿不到 release 元数据（API 不可达或没有 python3），按固定文件名下载：$ASSET"
+fi
+
+step "下载 $ASSET"
+fetch "$URL" "$TMP/$ASSET" || die "下载失败：$URL"
+
+# ---------- 校验：优先 GitHub digest，其次 SHA256SUMS ----------
 step "校验下载完整性"
-verify_asset "$TMP/$ASSET" "$ASSET"
+if [ -n "$RES_DIGEST" ]; then
+    want="${RES_DIGEST#sha256:}"
+    got="$(sha256sum "$TMP/$ASSET" | awk '{print $1}')"
+    [ "$want" = "$got" ] || die "SHA256 不匹配（GitHub: $want，本地: $got）。文件可能损坏或被篡改"
+    echo "  OK $ASSET（GitHub digest）"
+elif fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS" 2>/dev/null &&
+     want="$(awk -v n="$ASSET" '$2 == n {print $1; exit}' "$TMP/SHA256SUMS")" && [ -n "$want" ]; then
+    got="$(sha256sum "$TMP/$ASSET" | awk '{print $1}')"
+    [ "$want" = "$got" ] || die "SHA256 不匹配（SHA256SUMS: $want，本地: $got）"
+    echo "  OK $ASSET（SHA256SUMS）"
+else
+    warn "没拿到摘要，跳过校验"
+fi
 
 # ---------- 独立 ELF ----------
 install_elf() {
@@ -159,11 +176,11 @@ install_elf() {
         echo "  Arch:     sudo pacman -S qt6-base qt6-wayland python" >&2
         echo "  Debian:   sudo apt install qt6-base-dev python3" >&2
     fi
-    command -v python3 >/dev/null 2>&1 || warn "没有 python3，下载功能不可用（dnf/zypper/apt 装一个即可）"
+    command -v python3 >/dev/null 2>&1 || warn "没有 python3，下载功能不可用（装一个即可）"
 
     case ":$PATH:" in
         *":$BIN_DIR:"*) ;;
-        *) echo "提示：$BIN_DIR 不在 PATH 里，加一行到 shell 配置：export PATH=\"$BIN_DIR:\$PATH\"" ;;
+        *) echo "提示：$BIN_DIR 不在 PATH 里，加一行：export PATH=\"$BIN_DIR:\$PATH\"" ;;
     esac
 }
 
@@ -186,7 +203,6 @@ install_dnf() {
 if [ "$MODE" = elf ]; then
     install_elf
 else
-    # 有公钥就导入（发布时带了的话），这样是正规验证而不是绕过
     if fetch "$BASE/mc263-signing-key.asc" "$TMP/key.asc" 2>/dev/null; then
         step "导入签名公钥"
         $SUDO rpmkeys --import "$TMP/key.asc" 2>/dev/null || echo "公钥导入失败，继续（按未签名包处理）"

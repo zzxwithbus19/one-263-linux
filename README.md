@@ -30,14 +30,19 @@ curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/ins
 - **没有（Arch、Debian…）**：自动退回**独立 ELF**，装到 `~/.local/bin/mc263-qt`（root 则 `/usr/local/bin`）
 - 完整性：优先用 GitHub 给每个 asset 自动附的 `sha256:` digest 校验，拿不到再退回 `SHA256SUMS`
 - 签名：发布里带 `mc263-signing-key.asc` 就先 `rpmkeys --import`；未签名时按 Fedora 45 的规则自动降级（见 [第 7 节](#7-fedora-45--rpm-61-的签名要求)）
+- 资产名不固定也没关系：脚本走 GitHub API 按规则挑（`*.rpm` / `mc263-qt*`），所以 release 里叫什么都能装上
 
-强制走某条路 / 卸载：
+强制走某条路 / 装指定 tag（含 pre-release）/ 卸载：
 
 ```sh
 sh install.sh --elf          # 只装独立 ELF，不碰包管理器
 sh install.sh --rpm          # 只装 rpm
+sh install.sh --tag pre非生产  # 装指定 tag（pre-release 也支持）
 sh install.sh --uninstall    # 卸载（rpm 与 ELF 都会处理）
 ```
+
+> 注意：`releases/latest` 只指向**非 pre-release**。仓库里只有 pre-release 时，
+> 脚本会自动退回 `/releases` 列表取最新一个；也可以用 `--tag` 明确指定。
 
 ### 手动下载
 
