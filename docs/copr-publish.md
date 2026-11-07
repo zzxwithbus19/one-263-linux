@@ -33,7 +33,7 @@ Minecraft 26.3 的 Linux 原生启动器（Qt6 Widgets 手写界面，不用 moc
 
 ```
 sudo dnf install 'dnf-command(copr)'
-sudo dnf copr enable @copr/cxc123/one-263-linux/release/fedora-45
+sudo dnf copr enable cxc123/one-263-linux
 sudo dnf install mc263
 
 # 也可以不装插件，手写 repo 文件：
