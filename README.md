@@ -22,7 +22,7 @@ minecraft/               ← 游戏目录（首次运行自动建，可在设置
 
 主线是 **Arch Linux（理论上pacman能用的都可以）和Fedora（理论上任何rpm支持的都可以）**。AUR 上没有（我没账户啊啊啊），copr倒是有
 
-### 1.2 一条命令（从 Release 装）
+### 1.1 
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh | sh
@@ -48,7 +48,7 @@ sh install.sh --uninstall    # 卸载（pacman 包 / rpm / ELF 都会处理）
 > `/releases` 列表取最新一个，也可以用 `--tag` 明确指定。
 > 想马上装但 release 里还没 `.pkg.tar.zst`：走 1.1，本机出包当场就能装。
 
-### 1.3 免安装 ELF
+### 1.2 免安装 ELF
 
 `mc263-qt-26.3-x86_64` 是单独一个二进制，没有菜单项和图标，运行时自己备：
 
@@ -120,11 +120,11 @@ KDE Plasma 6.8 起默认只有 Wayland 会话。
 
 ---
 
-## 7. Fedora 45 / RPM 6.1 的签名要求
+## 6. Fedora 45 / RPM 6.1 的签名要求
 
 我有COPR
 
-## 8. 目录结构
+## 7. 目录结构
 
 ```
 mc26-one/
@@ -162,7 +162,7 @@ mc26-one/
 
 ---
 
-## 9. 常见问题
+## 8. 常见问题
 
 
 **Q：没有 Java 能先下游戏吗？**
@@ -175,7 +175,7 @@ A：**暂时不能**。启动参数是离线模式（`--accessToken 0 --userType
 
 ---
 
-## 10. 许可与法律声明
+## 9. 许可与法律声明
 
 本项目源码采用 **GPL-3.0-or-later**。上游 `zhanbalao/mc26-one` 未声明许可证，
 且其唯一的 `build_262.py` 已从本仓库移除；当前代码为全新 C++23 实现，不含上游代码。
