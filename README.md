@@ -14,25 +14,19 @@ minecraft/               ← 游戏目录（首次运行自动建，可在设置
 └── mc263_downloader.py  内嵌 python3 下载脚本（运行时释放）
 ```
 
-> 装在 `/usr/bin` 这类只读位置时，这两个目录自动改放 `~/.local/share/mc263/`。
+>目录放 `~/.local/share/mc263/`。
 
 ---
 
 ## 1. 安装
 
-主线是 **Arch Linux（理论上pacman能用的都可以）和Fedora（理论上任何rpm支持的都可以）**。AUR 上没有（我没账户啊啊啊），copr倒是有
+主线是 **Arch Linux和Fedora**。AUR 上没有（我没账户啊啊啊），copr倒是有
 
 ### 1.1 
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh | sh
 ```
-
-- **Arch（有 `pacman`）**：下 `.pkg.tar.zst` → `sudo pacman -U`，Qt6 / python / curl 从官方源补
-- **Fedora / openSUSE（`dnf` / `zypper`）**：下 rpm → `sudo dnf install`（COPR 版排队慢，见 [第 6 节](#6-打包与分发)）
-- **都没有**：退回**独立 ELF**，装到 `~/.local/bin/mc263-qt`（root 则 `/usr/local/bin`）
-- 完整性：优先用 GitHub 给每个 asset 附的 `sha256:` digest，拿不到再退回 `SHA256SUMS`
-- 资产名不固定也没关系：脚本走 GitHub API 按规则挑，release 里叫什么都能装上
 
 强制走某条路 / 指定 tag（含 pre-release）/ 卸载：
 
@@ -43,10 +37,6 @@ sh install.sh --elf          # 只装独立 ELF，不碰包管理器
 sh install.sh --tag pre非生产  # 装指定 tag（pre-release 也支持）
 sh install.sh --uninstall    # 卸载（pacman 包 / rpm / ELF 都会处理）
 ```
-
-> `releases/latest` 只指向**非 pre-release**；仓库里只有 pre-release 时脚本会自动退回
-> `/releases` 列表取最新一个，也可以用 `--tag` 明确指定。
-> 想马上装但 release 里还没 `.pkg.tar.zst`：走 1.1，本机出包当场就能装。
 
 ### 1.2 免安装 ELF
 
@@ -65,7 +55,7 @@ chmod +x mc263-qt-26.3-x86_64
 
 ## 2. 从源码构建
 
-不支持在README.md里提供！不推荐二次分发
+不支持在README.md里提供！不推荐二次分发该仓库
 
 ---
 
@@ -113,9 +103,6 @@ Mod 下载也装进对应版本的目录，而不是全局 `minecraft/mods/`。
 ---
 
 ## 5. Wayland 原生
-
-KDE Plasma 6.8 起默认只有 Wayland 会话。
-
 「关于」页会显示当前后端与 Qt 版本，可直接确认。
 
 ---
