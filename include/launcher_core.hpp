@@ -202,10 +202,13 @@ struct Config {
     std::string mirror = "official";
     std::string arch = detectArch();
     std::string gameDir;  // 空 = 用应用目录下的 minecraft/
+    bool autoMemory = true;  // 默认交给 JVM 自己决定堆大小（不传 -Xmx/-Xms）
     int memoryMb = 4096;
     int minMemoryMb = 0;
     int jobs = 10;
     bool fabric = false;
+    std::string profile;  // 加载器 profile 名（如 fabric），空 = 原版
+    std::string language;  // 游戏语言（en_us / zh_cn…）；空 = 跟随系统
     std::vector<std::string> extraJvmArgs;
     std::vector<std::string> components = {"jar", "libraries", "assets", "runtime"};
 
@@ -217,10 +220,13 @@ struct Config {
         j.set("mirror", JValue::stringV(mirror));
         j.set("arch", JValue::stringV(arch));
         j.set("gameDir", JValue::stringV(gameDir));
+        j.set("autoMemory", JValue::booleanV(autoMemory));
         j.set("memoryMb", JValue::numberV(memoryMb));
         j.set("minMemoryMb", JValue::numberV(minMemoryMb));
         j.set("jobs", JValue::numberV(jobs));
         j.set("fabric", JValue::booleanV(fabric));
+        j.set("profile", JValue::stringV(profile));
+        j.set("language", JValue::stringV(language));
         JValue a = JValue::arrayV();
         for (const auto& s : extraJvmArgs) a.push(JValue::stringV(s));
         j.set("extraJvmArgs", a);
@@ -237,10 +243,12 @@ struct Config {
         };
         s("version", c.version); s("username", c.username); s("javaPath", c.javaPath);
         s("mirror", c.mirror); s("arch", c.arch); s("gameDir", c.gameDir);
+        const JValue* am = j.find("autoMemory"); if (am) c.autoMemory = am->boolean(true);
         const JValue* m = j.find("memoryMb"); if (m) c.memoryMb = static_cast<int>(m->number(4096));
         const JValue* mi = j.find("minMemoryMb"); if (mi) c.minMemoryMb = static_cast<int>(mi->number(0));
         const JValue* jobs = j.find("jobs"); if (jobs) c.jobs = static_cast<int>(jobs->number(10));
         const JValue* f = j.find("fabric"); if (f) c.fabric = f->boolean(false);
+        s("profile", c.profile); s("language", c.language);
         const JValue* a = j.find("extraJvmArgs");
         if (a && a->isArray()) { c.extraJvmArgs.clear(); for (const auto& v : a->array()) if (v.isString()) c.extraJvmArgs.push_back(v.str()); }
         const JValue* cc = j.find("components");
@@ -265,6 +273,250 @@ struct Config {
     std::string xmxString() const { return "-Xmx" + std::to_string(memoryMb) + "M"; }
     std::string xmsString() const { return minMemoryMb > 0 ? "-Xms" + std::to_string(minMemoryMb) + "M" : ""; }
 };
+
+// 版本目录名：装了加载器就是 <版本>+<profile>
+inline std::string versionDirName(const Config& c) {
+    if (!c.profile.empty()) return c.version + "+" + c.profile;
+    return c.fabric ? c.version + "+fabric" : c.version;
+}
+
+// 版本隔离后的 gameDir：每个版本一个目录，存档 / mods / 资源包互不干扰
+inline fs::path isolatedGameDir(const Layout& l, const Config& c) {
+    return l.versionsDir / versionDirName(c);
+}
+
+struct GameDirInfo {
+    fs::path path;
+    int versions = 0;      // versions/ 下带同名 json 的目录数
+    int mods = 0;          // mods/*.jar 数量
+    bool current = false;  // 是否是当前使用的目录
+    bool exists = false;
+};
+
+// 扫一圈可能被当成游戏目录的位置（ELF 旁边的 minecraft/、rpm 装完的 XDG 目录、~/.minecraft 等）
+inline std::vector<GameDirInfo> scanGameDirs(const Layout& l, const std::string& currentCfg) {
+    std::vector<fs::path> cands;
+    if (!currentCfg.empty()) cands.emplace_back(currentCfg);
+    cands.push_back(l.gameDir);
+    const fs::path home = fsx::env("HOME").empty() ? fs::path(".") : fs::path(fsx::env("HOME"));
+    cands.push_back(home / ".minecraft");
+    const std::string xdg = fsx::env("XDG_DATA_HOME");
+    cands.push_back((xdg.empty() ? home / ".local" / "share" : fs::path(xdg)) / "mc263" / "minecraft");
+
+    std::vector<fs::path> seen;
+    std::vector<GameDirInfo> out;
+    for (const auto& raw : cands) {
+        std::error_code ec;
+        fs::path p = fs::weakly_canonical(raw, ec);
+        if (ec) p = raw;
+        bool dup = false;
+        for (const auto& s : seen) if (s == p) { dup = true; break; }
+        if (dup) continue;
+        seen.push_back(p);
+
+        GameDirInfo info;
+        info.path = p;
+        info.exists = fsx::isDir(p);
+        if (info.exists) {
+            if (fsx::isDir(p / "versions")) {
+                for (fs::directory_iterator it(p / "versions", ec), end; !ec && it != end; it.increment(ec)) {
+                    if (!it->is_directory()) continue;
+                    const std::string n = it->path().filename().string();
+                    if (fsx::isFile(it->path() / (n + ".json"))) info.versions++;
+                }
+            }
+            if (fsx::isDir(p / "mods")) {
+                for (fs::directory_iterator it(p / "mods", ec), end; !ec && it != end; it.increment(ec)) {
+                    if (it->is_regular_file() && it->path().extension() == ".jar") info.mods++;
+                }
+            }
+        }
+        out.push_back(std::move(info));
+    }
+    // 当前生效的目录打标记
+    std::error_code ec;
+    const fs::path cur = fs::weakly_canonical(l.gameDir, ec);
+    for (auto& g : out) if (g.path == cur) g.current = true;
+    return out;
+}
+
+// ------------------------------------------------------------ 游戏语言 ----
+// 系统 locale → Minecraft 语言代码；识别不了就退回 en_us
+inline std::string detectSystemLanguage() {
+    static const char* vars[] = {"LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"};
+    std::string raw;
+    for (const char* v : vars) {
+        const std::string val = fsx::env(v);
+        if (val.empty() || val == "C" || val == "POSIX") continue;
+        raw = val;
+        break;
+    }
+    if (raw.empty()) return "en_us";
+
+    const size_t colon = raw.find(':');          // LANGUAGE="zh_CN:en_US"
+    if (colon != std::string::npos) raw = raw.substr(0, colon);
+    const size_t dot = raw.find('.');            // zh_CN.UTF-8
+    if (dot != std::string::npos) raw = raw.substr(0, dot);
+    const size_t at = raw.find('@');             // sr_RS@latin
+    if (at != std::string::npos) raw = raw.substr(0, at);
+
+    std::string loc;
+    for (char ch : raw) loc.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    if (loc.empty()) return "en_us";
+
+    static const char* known[] = {
+        "en_us", "en_gb", "zh_cn", "zh_tw", "de_de", "es_es", "fr_fr", "it_it", "ja_jp", "ko_kr",
+        "pt_br", "pt_pt", "ru_ru", "nl_nl", "pl_pl", "sv_se", "tr_tr", "da_dk", "fi_fi", "nb_no",
+        "nn_no", "cs_cz", "hu_hu", "el_gr", "he_il", "uk_ua", "ro_ro", "bg_bg", "sk_sk", "sl_si",
+        "hr_hr", "sr_rs", "lt_lt", "lv_lv", "et_ee", "ca_es", "eu_eu", "gl_es", "id_id", "ms_my",
+        "th_th", "vi_vn", "ar_sa", "fa_ir", "hi_in", "bn_bd", "ta_in", "ur_pk", "be_by", "ka_ge",
+        "az_az", "mk_mk", "sq_al", "bs_ba"};
+    for (const char* k : known)
+        if (loc == k) return loc;
+
+    // 只有语言没有地区时的常见映射
+    const std::string lang = loc.substr(0, loc.find('_'));
+    static const std::pair<const char*, const char*> alias[] = {
+        {"zh", "zh_cn"},   {"en", "en_us"},   {"ja", "ja_jp"},   {"ko", "ko_kr"},
+        {"de", "de_de"},   {"fr", "fr_fr"},   {"es", "es_es"},   {"it", "it_it"},
+        {"pt", "pt_br"},   {"ru", "ru_ru"},   {"nl", "nl_nl"},   {"pl", "pl_pl"},
+        {"tr", "tr_tr"},   {"sv", "sv_se"},   {"da", "da_dk"},   {"fi", "fi_fi"},
+        {"cs", "cs_cz"},   {"hu", "hu_hu"},   {"el", "el_gr"},   {"he", "he_il"},
+        {"uk", "uk_ua"},   {"ro", "ro_ro"},   {"bg", "bg_bg"},   {"sk", "sk_sk"},
+        {"sl", "sl_si"},   {"hr", "hr_hr"},   {"sr", "sr_rs"},   {"lt", "lt_lt"},
+        {"lv", "lv_lv"},   {"et", "et_ee"},   {"ca", "ca_es"},   {"eu", "eu_eu"},
+        {"gl", "gl_es"},   {"id", "id_id"},   {"ms", "ms_my"},   {"th", "th_th"},
+        {"vi", "vi_vn"},   {"ar", "ar_sa"},   {"fa", "fa_ir"},   {"hi", "hi_in"},
+        {"bn", "bn_bd"},   {"ta", "ta_in"},   {"ur", "ur_pk"},   {"be", "be_by"},
+        {"ka", "ka_ge"},   {"az", "az_az"},   {"mk", "mk_mk"},   {"sq", "sq_al"},
+        {"bs", "bs_ba"}};
+    for (const auto& kv : alias)
+        if (lang == kv.first) return kv.second;
+    return "en_us";
+}
+
+// ---------------------------------------------------------------- 加载器 ----
+struct LoaderVersion {
+    std::string version;
+    bool stable = false;
+};
+
+inline std::string loaderBase(const std::string& loader) {
+    return loader == "quilt" ? "https://meta.quiltmc.org/v3" : "https://meta.fabricmc.net/v2";
+}
+
+inline bool loaderVersions(const std::string& loader, const fs::path& cacheDir,
+                           std::vector<LoaderVersion>& out, std::string& err) {
+    out.clear();
+    std::string text;
+    if (!mc263::dl::fetchText(loaderBase(loader) + "/versions/loader", "", cacheDir, 25, text, err)) return false;
+    std::string jerr;
+    JValue j = mc263::jsonParse(text, jerr);
+    if (!jerr.empty()) { err = "解析加载器版本失败: " + jerr; return false; }
+    if (!j.isArray()) { err = "加载器版本响应不是数组"; return false; }
+    for (const JValue& v : j.array()) {
+        LoaderVersion lv;
+        if (const JValue* x = v.find("version"); x && x->isString()) lv.version = x->str();
+        if (const JValue* st = v.find("stable"); st) lv.stable = st->boolean(false);
+        if (!lv.version.empty()) out.push_back(std::move(lv));
+    }
+    err.clear();
+    return !out.empty();
+}
+
+// group:artifact:version[:classifier] -> Maven 仓库里的相对路径
+inline std::string mavenPath(const std::string& coord) {
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char ch : coord) {
+        if (ch == ':') { parts.push_back(cur); cur.clear(); } else cur.push_back(ch);
+    }
+    parts.push_back(cur);
+    if (parts.size() < 3) return {};
+    std::string group = parts[0], artifact = parts[1], ver = parts[2];
+    const std::string classifier = parts.size() > 3 ? parts[3] : "";
+    for (char& ch : group) if (ch == '.') ch = '/';
+    return group + "/" + artifact + "/" + ver + "/" + artifact + "-" + ver +
+           (classifier.empty() ? "" : "-" + classifier) + ".jar";
+}
+
+// 装 Fabric / Quilt 加载器：抓 profile json，与原版 json 合并后写入 versions/<ver>+<loader>/
+inline bool installLoader(const Layout& l, Config& c, const std::string& loader,
+                          const std::string& loaderVer,
+                          const std::function<void(const std::string&)>& note, std::string& err) {
+    const fs::path vanilla = l.versionJson(c.version);
+    if (!fsx::isFile(vanilla)) {
+        err = "先下载原版 " + c.version + "（要用它的 json 作基底）";
+        return false;
+    }
+    const std::string base = loaderBase(loader);
+    std::string profText;
+    if (!mc263::dl::fetchText(base + "/versions/loader/" + c.version + "/" + loaderVer + "/profile/json",
+                              "", l.configDir / "cache", 30, profText, err))
+        return false;
+    std::string jerr;
+    JValue prof = mc263::jsonParse(profText, jerr);
+    if (!jerr.empty()) { err = "profile json 解析失败: " + jerr; return false; }
+
+    std::string baseText = fsx::readText(vanilla, err);
+    if (!err.empty()) return false;
+    JValue json = mc263::jsonParse(baseText, jerr);
+    if (!jerr.empty()) { err = "原版 json 解析失败: " + jerr; return false; }
+
+    const std::string dirName = c.version + "+" + loader;
+    if (const JValue* mc = prof.find("mainClass"); mc && mc->isString())
+        json.set("mainClass", *mc);
+    json.set("id", JValue::stringV(dirName));
+
+    JValue libs = JValue::arrayV();
+    if (const JValue* vl = json.find("libraries"); vl && vl->isArray())
+        for (const JValue& x : vl->array()) libs.push(x);
+
+    std::vector<mc263::dl::Task> tasks;
+    if (const JValue* pl = prof.find("libraries"); pl && pl->isArray()) {
+        for (const JValue& lib : pl->array()) {
+            const JValue* nm = lib.find("name");
+            if (!nm || !nm->isString()) continue;
+            const JValue* urlv = lib.find("url");
+            const std::string repo = (urlv && urlv->isString() && !urlv->str().empty())
+                                         ? urlv->str() : "https://maven.fabricmc.net/";
+            const std::string path = mavenPath(nm->str());
+            if (path.empty()) continue;
+            const std::string url = repo + (repo.back() == '/' ? "" : "/") + path;
+
+            JValue entry = JValue::objectV();
+            entry.set("name", JValue::stringV(nm->str()));
+            JValue art = JValue::objectV();
+            art.set("path", JValue::stringV(path));
+            art.set("url", JValue::stringV(url));
+            JValue dl = JValue::objectV();
+            dl.set("artifact", art);
+            entry.set("downloads", dl);
+            libs.push(entry);
+
+            tasks.push_back(mc263::dl::Task{url, l.librariesDir / path, "", 0644, path});
+        }
+    }
+    json.set("libraries", libs);
+
+    // 写入版本目录
+    const fs::path dir = l.versionsDir / dirName;
+    if (!fsx::makeDirs(dir, err)) return false;
+    if (!fsx::writeText(dir / (dirName + ".json"), mc263::jsonDump(json), err)) return false;
+
+    if (note) note("下载加载器依赖 " + std::to_string(tasks.size()) + " 个");
+    std::vector<std::string> failures;
+    mc263::dl::runTasks(tasks, "", 8, 180, true, nullptr, failures);
+    if (!failures.empty()) {
+        err = "有 " + std::to_string(failures.size()) + " 个依赖下载失败，例如 " + failures.front();
+        return false;
+    }
+
+    c.profile = loader;
+    c.fabric = (loader == "fabric");
+    err.clear();
+    return true;
+}
 
 // ------------------------------------------------------------------ Java ----
 struct JavaInfo {
@@ -441,7 +693,7 @@ struct VersionMeta {
 
 inline VersionMeta loadVersion(const Layout& l, const Config& c) {
     VersionMeta m;
-    fs::path vj = l.versionJson(c.fabric ? c.version + "+fabric" : c.version);
+    fs::path vj = l.versionJson(versionDirName(c));
     std::string err;
     std::string text = fsx::readText(vj, err);
     if (!err.empty()) { m.error = "缺少版本 json: " + vj.string(); return m; }
@@ -484,7 +736,7 @@ inline VersionMeta loadVersion(const Layout& l, const Config& c) {
             }
         }
     }
-    m.classpath.push_back(l.versionJar(c.fabric ? c.version + "+fabric" : c.version).string());
+    m.classpath.push_back(l.versionJar(versionDirName(c)).string());
     return m;
 }
 
@@ -624,8 +876,16 @@ inline LaunchPlan buildLaunchPlan(const Layout& l, const Config& c, const JavaIn
     if (!vm.ok()) { p.error = vm.error; return p; }
     std::string err;
     if (!l.ensure(err)) { p.error = "无法创建运行目录: " + err; return p; }
-    fs::path natives = l.nativesDir / (c.fabric ? c.version + "+fabric" : c.version);
+    fs::path natives = l.nativesDir / versionDirName(c);
     if (!extractNatives(vm.nativeJars, natives, err)) { p.error = err; return p; }
+
+    // 版本隔离（始终开启，不提供关闭）：每个版本自己的 gameDir，存档 / mods / 资源包互不影响
+    const fs::path isolated = isolatedGameDir(l, c);
+    if (!fsx::makeDirs(isolated, err)) { p.error = "无法创建版本目录: " + err; return p; }
+    for (const char* sub : {"mods", "saves", "resourcepacks", "shaderpacks", "logs"}) {
+        if (!fsx::makeDirs(isolated / sub, err)) { p.error = "无法创建 " + std::string(sub) + ": " + err; return p; }
+    }
+    p.workDir = isolated;
 
     for (const auto& s : vm.classpath) {
         if (!p.classpath.empty()) p.classpath += ":";
@@ -633,8 +893,10 @@ inline LaunchPlan buildLaunchPlan(const Layout& l, const Config& c, const JavaIn
     }
     p.mainClass = vm.mainClass;
     p.argv.push_back(java.path.string());
-    if (c.minMemoryMb > 0) p.argv.push_back(c.xmsString());
-    p.argv.push_back(c.xmxString());
+    if (!c.autoMemory) {  // 自动模式下不传 -Xmx/-Xms，让 JVM 按物理内存自己定
+        if (c.minMemoryMb > 0) p.argv.push_back(c.xmsString());
+        p.argv.push_back(c.xmxString());
+    }
     for (const auto& a : c.extraJvmArgs) p.argv.push_back(a);
     p.argv.push_back("-Djava.library.path=" + natives.string());
     p.argv.push_back("-Dorg.lwjgl.librarypath=" + natives.string());
@@ -646,9 +908,10 @@ inline LaunchPlan buildLaunchPlan(const Layout& l, const Config& c, const JavaIn
     p.argv.insert(p.argv.end(), {
         "--username", c.username.empty() ? "Player" : c.username,
         "--version", vm.id,
-        "--gameDir", l.gameDir.string(),
+        "--gameDir", isolated.string(),
         "--assetsDir", l.assetsDir.string(),
         "--assetIndex", vm.assetIndex,
+        "--language", c.language.empty() ? detectSystemLanguage() : c.language,
         "--accessToken", "0",
         "--userType", "legacy",
         "--versionType", "release",

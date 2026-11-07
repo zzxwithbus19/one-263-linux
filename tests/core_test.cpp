@@ -1,5 +1,8 @@
 // core_test.cpp -- launcher_core.hpp 的离线单测（不依赖 Qt、不联网）
 #include "launcher_core.hpp"
+#include "modrinth.hpp"
+
+#include <cstdlib>
 
 #include <filesystem>
 #include <fstream>
@@ -104,12 +107,66 @@ int main() {
         if (plan.argv[i] == "--username") hasUsername = true;
         if (plan.argv[i] == vm.mainClass) hasMain = true;
     }
-    check(hasXmx && hasCp && hasLibPath && hasUsername && hasMain, "JVM 参数与游戏参数齐全");
-    check(plan.workDir == l.gameDir, "工作目录 = 游戏目录");
+    bool hasLang = false;
+    std::string langVal;
+    for (size_t i = 0; i + 1 < plan.argv.size(); ++i)
+        if (plan.argv[i] == "--language") { hasLang = true; langVal = plan.argv[i + 1]; }
+    check(hasLang && !langVal.empty(), "启动参数带 --language");
+    check(!hasXmx && hasCp && hasLibPath && hasUsername && hasMain,
+          "JVM 自动内存：默认不传 -Xmx");
+    vc.autoMemory = false;
+    LaunchPlan manual = buildLaunchPlan(l, vc, fake);
+    bool manualXmx = false;
+    for (const auto& a : manual.argv) if (a == "-Xmx4096M") manualXmx = true;
+    check(manualXmx, "手动内存：-Xmx 按配置传入");
+    vc.autoMemory = true;
+    check(plan.workDir == l.versionsDir / "26.3", "版本隔离：工作目录 = versions/<版本>");
+    check(std::filesystem::is_directory(plan.workDir / "mods"), "版本隔离：自动建 mods 目录");
+
+    // 5.1) 系统语言 → Minecraft 语言代码
+    ::setenv("LC_ALL", "zh_CN.UTF-8", 1);
+    ::setenv("LANG", "zh_CN.UTF-8", 1);
+    check(detectSystemLanguage() == "zh_cn", "系统语言 zh_CN → zh_cn");
+    ::setenv("LC_ALL", "en_US.UTF-8", 1);
+    check(detectSystemLanguage() == "en_us", "系统语言 en_US → en_us");
+    ::setenv("LC_ALL", "de_DE.UTF-8", 1);
+    check(detectSystemLanguage() == "de_de", "系统语言 de_DE → de_de");
+    ::setenv("LC_ALL", "zh_TW.UTF-8", 1);
+    check(detectSystemLanguage() == "zh_tw", "系统语言 zh_TW → zh_tw");
+    ::setenv("LC_ALL", "C", 1);
+    ::setenv("LANG", "C", 1);
+    check(detectSystemLanguage() == "en_us", "系统语言 C/POSIX → 退回 en_us");
+    ::unsetenv("LC_ALL");
+    ::unsetenv("LANG");
 
     // 6) 本地版本列表
     auto vers = availableVersions(l);
     check(vers.size() == 1 && vers[0] == "26.3", "本地版本列表扫描正确");
+
+    // 6.1) Modrinth 响应解析（离线，用固定 JSON）
+    const std::string searchJson = R"({"hits":[
+        {"project_id":"AABBCC","slug":"sodium","title":"Sodium","author":"jellysquid3",
+         "description":"现代渲染优化","downloads":12345678},
+        {"project_id":"DDEEFF","slug":"lithium","title":"Lithium","author":"jellysquid3",
+         "description":"服务端/客户端逻辑优化","downloads":9876543}]})";
+    std::vector<mc263::modrinth::Hit> hits;
+    std::string merr;
+    check(mc263::modrinth::parseSearch(searchJson, hits, merr) && hits.size() == 2 &&
+              hits[0].id == "AABBCC" && hits[0].title == "Sodium" &&
+              hits[0].downloads == 12345678,
+          "Modrinth 搜索响应解析");
+
+    const std::string verJson = R"([{"id":"ver1","name":"Sodium 0.6","version_number":"0.6.0",
+        "game_versions":["26.3"],"loaders":["fabric"],
+        "files":[{"url":"https://cdn/x.jar","filename":"sodium-0.6.jar","size":2048,
+                  "primary":true,"hashes":{"sha1":"abc123"}}]}])";
+    std::vector<mc263::modrinth::Version> mvers;
+    check(mc263::modrinth::parseVersions(verJson, mvers, merr) && mvers.size() == 1 &&
+              mvers[0].gameVersions.size() == 1 && mvers[0].loaders[0] == "fabric" &&
+              mc263::modrinth::primaryFile(mvers[0]) != nullptr &&
+              mc263::modrinth::primaryFile(mvers[0])->sha1 == "abc123",
+          "Modrinth 版本响应解析");
+    check(mc263::modrinth::urlEncode("a b/c") == "a%20b%2Fc", "Modrinth 查询参数转义");
     // 装到 /usr/bin 时改用 XDG 数据目录：at() 必须把 root 当作应用目录
     Layout installed = Layout::at(fs::path("/tmp/xdg-mc263-test"));
     check(installed.appDir == "/tmp/xdg-mc263-test" &&

@@ -69,7 +69,7 @@ sudo dnf install gcc-c++ make qt6-qtbase-devel qt6-qtwayland python3
 sudo zypper install gcc-c++ make qt6-qtbase-devel libQt6WaylandClient6 python3
 
 make                 # 编译 build/mc263-qt
-make check           # 46 项核心单测 + 7 项内嵌下载器自测（全部离线）
+make check           # 57 项核心单测 + 7 项内嵌下载器自测（全部离线）
 make info            # 编译器 / Qt6 / 产物路径
 
 build/mc263-qt                            # 运行
@@ -85,10 +85,27 @@ QT_QPA_PLATFORM=offscreen build/mc263-qt  # 无图形环境冒烟测试
 | 页面 | 能力 |
 |------|------|
 | 启动游戏 | 本地版本下拉、玩家名、一键启动；`QProcess` 异步 exec java，日志实时刷新 |
-| 下载游戏 | 在线版本列表、组件勾选、official / bmclapi 镜像、并发线程（默认 10）；JSON 进度条与日志 |
+| 下载游戏 | 在线版本列表、组件勾选、official / bmclapi 镜像、并发线程（默认 10）；JSON 进度条与日志；**清除下载缓存**按钮（只删元数据缓存，已下载的 jar / 库 / 资源不受影响） |
+| Mod 下载 | 搜 Modrinth：关键词 + 加载器 + 游戏版本过滤，**排序可选下载量 / 相关度 / 关注数 / 最新发布 / 最近更新**；双击即装，SHA1 校验、已存在则跳过 |
+| 加载器 | Fabric / Quilt 版本列表拉取 + 一键安装：抓 profile json、与原版 json 合并、下载依赖到 `libraries/`，生成 `versions/<版本>+<加载器>/` |
 | Java 与兼容性 | 后台线程扫描配置 / Mojang JRE / `JAVA_HOME` / `PATH` / `/usr/lib/jvm`；11 项查验（架构、Java 版本、依赖库、natives、图形音频库、内存、磁盘、路径守卫，可选网络连通性） |
-| 设置 / 内存 | 四段式内存条：程序占用（蓝）→ 缓存（浅蓝）→ 游戏 `-Xmx`（浅灰，长度就是分配量）→ 余下可用；2 秒自动刷新，超可用内存红字提示 OOM；`-Xms`、JVM 参数、游戏目录；**改完即存，没有保存按钮** |
-| 关于 | 本地 `README.md` 蓝字链接、仓库链接、当前显示后端与 Qt 版本 |
+| 游戏目录 | 独立一页：自动扫描 ELF 旁 / XDG 数据目录 / `~/.minecraft`，列出各自的版本数与 mods 数，选中即切换，避免两套装各用一份 |
+| 设置 / 内存 | **内存默认交给 JVM 管理**（不传 `-Xmx`/`-Xms`）；关掉自动后可手动拖 `-Xmx`/`-Xms`。四段式内存条：程序占用 → 缓存 → 游戏堆 → 余下可用，2 秒刷新、超可用内存红字提示；额外 JVM 参数；**游戏语言默认跟随系统 locale**（识别不到就 `en_us`）；页底是许可与说明（README 链接、仓库链接、显示后端） |
+
+**版本隔离（始终开启，没有关闭开关）**：启动时 `--gameDir` 指向 `versions/<版本>/`，
+`mods`、`saves`、`resourcepacks`、`shaderpacks`、`logs` 都在该目录下自动建好 ——
+不同版本（含 `26.3` 与 `26.3+fabric`）互不影响，存档和 Mod 不会串。
+Mod 下载也装进对应版本的目录，而不是全局 `minecraft/mods/`。
+升级前已有的存档不会自动搬（避免动用户文件）：需要时把 `minecraft/saves`、`mods` 移到 `versions/<版本>/` 下同名目录。
+
+**游戏目录（独立页面）**：自动扫描 ELF 旁的 `minecraft/`、安装版的
+`~/.local/share/mc263/minecraft`、`~/.minecraft` 与当前配置，列出各自的版本数 / mods 数，
+选中即切换（也可「浏览…」手选）；启动时若发现多个目录都存有版本，会在状态栏提示。
+
+**游戏语言**：启动参数带 `--language`。默认**跟随系统 locale**（依次看 `LC_ALL` → `LC_MESSAGES` →
+`LANG` → `LANGUAGE`，去掉编码与 modifier 后映射到 Minecraft 的语言代码，例如 `zh_CN.UTF-8` → `zh_cn`、
+`zh_TW` → `zh_tw`）；识别不到或系统是 `C`/`POSIX` 就用 `en_us`。也可以在「设置 / 内存」里手动指定，
+选择会存进 `config.json`。
 
 下载逻辑：内嵌 python3 脚本（`ThreadPoolExecutor` 多线程 + SHA1 校验 + 本地缓存），
 Qt 通过 `QProcess` 读 JSON 进度；Java 扫描与兼容性查验在 `std::thread` 后台跑，
@@ -219,21 +236,22 @@ mc26-one/
 ├── README.md
 ├── install.sh                  一键安装（rpm / ELF 自动选择 + 摘要校验）
 ├── include/
-│   ├── launcher_core.hpp       布局 / 配置 / Java 探测 / 兼容性 / 启动 / meminfo / 后端选择
+│   ├── launcher_core.hpp       布局 / 配置 / Java 探测 / 兼容性 / 启动 / meminfo / 版本隔离 / 加载器 / 目录扫描
 │   ├── download.hpp            curl 下载后端 + SHA1 + 并发池（兼容性网络检查用）
+│   ├── modrinth.hpp            Modrinth 搜索 / 版本 / 下载（公开 API，无需 key）
 │   ├── mini_json.hpp           JSON 解析与生成
 │   ├── mini_zip.hpp            ZIP 读取（扫 natives）
 │   ├── safe_path.hpp           路径守卫（黑名单 + 沙箱根 + 符号链接逃逸防护）
 │   └── fs_util.hpp             目录 / 文件 / 环境变量小工具
 ├── src/
-│   └── mc263_qt.cpp            Qt6 主窗口（5 页，内嵌 python3 下载脚本）
+│   └── mc263_qt.cpp            Qt6 主窗口（6 页，内嵌 python3 下载脚本）
 ├── packaging/
 │   ├── mc263.spec              rpm spec（装预编译二进制）
 │   ├── build-rpm.sh            make → rpmbuild → dist/*.rpm + 独立 ELF + SHA256SUMS
 │   ├── mc263.desktop           应用菜单项（Exec=mc263-qt）
 │   └── mc263.svg               图标
 └── tests/
-    ├── core_test.cpp           46 项核心单测
+    ├── core_test.cpp           57 项核心单测
     ├── downloader_test.sh      内嵌下载器 + mock CDN 自测（7 项）
     ├── mock_cdn.py             离线模拟 Mojang 下载端点（真实 SHA1）
     └── probe_endpoints.py      真实端点诊断
@@ -255,7 +273,7 @@ A：缺 `qt6-qtwayland`（openSUSE 是 `libQt6WaylandClient6`）。装上即可�
 临时也可 `QT_QPA_PLATFORM=xcb build/mc263-qt` 走 XWayland。
 
 **Q：Wayland 下没图标 / 任务栏分组不对？**
-A：从 rpm 安装就有桌面项；源码直接跑时没有 `mc263-qt.desktop`，不影响功能。
+A：从 rpm 安装就有桌面项；源码直接跑时没有 `mc263.desktop`，不影响功能。
 
 **Q：内存条里「缓存」和「游戏 -Xmx」什么关系？**
 A：缓存是可回收的文件页缓存；灰块长度就是 `-Xmx`，从缓存之后起算。

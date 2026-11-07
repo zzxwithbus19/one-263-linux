@@ -10,11 +10,13 @@
 // 显示后端：启动时按会话自动选择 Wayland / XWayland（见 core::choosePlatform），
 // 显式 QT_QPA_PLATFORM=... 或 -platform ... 始终优先；「关于」页会显示当前实际后端。
 #include "launcher_core.hpp"
+#include "modrinth.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QDialog>
 #include <QDir>
 #include <QFileDialog>
 #include <QFont>
@@ -33,6 +35,7 @@
 #include <QLibraryInfo>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QLocale>
 #include <QMainWindow>
 #include <QMessageBox>
 #include <QPaintEvent>
@@ -482,6 +485,9 @@ QSlider::handle:horizontal {
     width: 14px; height: 14px; margin: -5px 0; border-radius: 8px;
     background: @card@; border: 2px solid @accent@;
 }
+QSlider::sub-page:horizontal:disabled { background: @border@; }
+QSlider::handle:horizontal:disabled { border-color: @border@; background: @window@; }
+QCheckBox:disabled { color: @muted@; }
 QProgressBar {
     background: @border@; border: none; border-radius: 6px; min-height: 12px;
     max-height: 12px; text-align: center; color: @muted@; font-size: 11px;
@@ -528,6 +534,18 @@ QStatusBar::item { border: none; }
     };
     for (const auto& kv : tokens) qss.replace(kv.first, kv.second);
     return qss;
+}
+
+// 统计目录里的文件数与字节数（清缓存前给个交代）
+static void dirUsage(const std::filesystem::path& root, int& files, uint64_t& bytes) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(root, ec)) return;
+    for (std::filesystem::recursive_directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->is_regular_file(ec)) {
+            bytes += static_cast<uint64_t>(it->file_size(ec));
+            files++;
+        }
+    }
 }
 
 // 卡片标题用普通 QLabel 放进布局，不依赖 QGroupBox::title（不同 Qt 风格定位会跑偏）
@@ -659,6 +677,7 @@ public:
         const QString chevron = makeChevron(QString::fromStdString(layout_.configDir.string()),
                                             QColor(th.muted));
         qApp->setStyleSheet(buildStyleSheet(th, chevron));
+        QTimer::singleShot(700, this, [this] { checkGameDirs(); });
         loadingConfig_ = true;
         loadConfigToUi();
         loadingConfig_ = false;
@@ -766,7 +785,7 @@ private:
         nav_->setFrameShape(QFrame::NoFrame);
         nav_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         nav_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        for (const char* s : {"启动游戏", "下载游戏", "Java 与兼容性", "设置 / 内存", "关于"})
+        for (const char* s : {"启动游戏", "下载游戏", "Mod 下载", "Java 与兼容性", "游戏目录", "设置 / 内存"})
             nav_->addItem(QString::fromUtf8(s));
         stack_ = new QStackedWidget(this);
         // 每页放进滚动区：窗口缩小/字体变大时滚动，而不是把卡片内容挤到重叠
@@ -784,9 +803,10 @@ private:
         };
         addPage(pageLaunch());
         addPage(pageDownload());
+        addPage(pageMods());
         addPage(pageJavaCompat());
+        addPage(pageDirs());
         addPage(pageSettings());
-        addPage(pageAbout());
         h->addWidget(nav_);
         h->addWidget(stack_, 1);
         mainPage_ = central;
@@ -1042,7 +1062,12 @@ private:
         downloadBtn_ = new QPushButton("开始下载", w);
         downloadBtn_->setObjectName("primary");
         cancelBtn_ = new QPushButton("取消", w); cancelBtn_->setEnabled(false);
-        row->addWidget(downloadBtn_); row->addWidget(cancelBtn_); row->addStretch(1);
+        clearCacheBtn_ = new QPushButton("清除下载缓存", w);
+        clearCacheBtn_->setToolTip("只删元数据缓存（版本清单 / Modrinth 查询 / 加载器 profile），已下载的游戏文件不动");
+        row->addWidget(downloadBtn_);
+        row->addWidget(cancelBtn_);
+        row->addWidget(clearCacheBtn_);
+        row->addStretch(1);
         v->addLayout(row);
         downloadBar_ = new QProgressBar(w);
         downloadLabel_ = new QLabel("等待下载", w);
@@ -1053,8 +1078,217 @@ private:
         connect(cancelBtn_, &QPushButton::clicked, this, [this] {
             if (downloadProc_) downloadProc_->terminate();
         });
+        connect(clearCacheBtn_, &QPushButton::clicked, this, &LauncherWindow::clearDownloadCache);
         connect(onlineBtn, &QPushButton::clicked, this, &LauncherWindow::refreshOnlineVersions);
         return w;
+    }
+
+    // ---- Mod 下载（Modrinth 公开 API）----
+    QWidget* pageMods() {
+        auto* w = new QWidget(this);
+        auto* v = new QVBoxLayout(w);
+        addPageHeader(v, "Mod 下载", "从 Modrinth 搜索，按加载器与游戏版本过滤，直接装进 minecraft/mods/");
+
+        auto* sbox = new QGroupBox("搜索", w);
+        auto* form = new QFormLayout(sbox);
+        setCardTitle(sbox, form, "搜索");
+        modQuery_ = new QLineEdit(sbox);
+        modQuery_->setPlaceholderText("sodium / lithium / jei …");
+        modQuery_->setClearButtonEnabled(true);
+        modLoader_ = new QComboBox(sbox);
+        modLoader_->addItem("Fabric", "fabric");
+        modLoader_->addItem("Forge", "forge");
+        modLoader_->addItem("NeoForge", "neoforge");
+        modLoader_->addItem("Quilt", "quilt");
+        modLoader_->addItem("不限", "");
+        modVersionEdit_ = new QLineEdit(sbox);
+        modVersionEdit_->setText(QString::fromStdString(cfg_.version));
+        modSort_ = new QComboBox(sbox);
+        modSort_->addItem("下载量", "downloads");
+        modSort_->addItem("相关度", "relevance");
+        modSort_->addItem("关注数", "follows");
+        modSort_->addItem("最新发布", "newest");
+        modSort_->addItem("最近更新", "updated");
+        form->addRow("关键词", modQuery_);
+        form->addRow("加载器", modLoader_);
+        form->addRow("游戏版本", modVersionEdit_);
+        form->addRow("排序", modSort_);
+
+        modSearchBtn_ = new QPushButton("搜索", sbox);
+        modSearchBtn_->setObjectName("primary");
+        auto* srow = new QHBoxLayout();
+        srow->addWidget(modSearchBtn_);
+        auto* hint = new QLabel("按下载量排序，取前 20 个；双击结果可直接安装", sbox);
+        hint->setObjectName("muted");
+        srow->addWidget(hint);
+        srow->addStretch(1);
+        form->addRow(QString(), srow);
+        v->addWidget(sbox);
+
+        auto* lbox = new QGroupBox("加载器", w);
+        auto* lform = new QFormLayout(lbox);
+        setCardTitle(lbox, lform, "加载器（Fabric / Quilt）");
+        loaderCombo_ = new QComboBox(lbox);
+        loaderCombo_->addItem("Fabric", "fabric");
+        loaderCombo_->addItem("Quilt", "quilt");
+        loaderVerCombo_ = new QComboBox(lbox);
+        auto* getLv = new QPushButton("获取版本", lbox);
+        auto* lrow = new QHBoxLayout();
+        lrow->addWidget(loaderVerCombo_, 1);
+        lrow->addWidget(getLv);
+        installLoaderBtn_ = new QPushButton("安装 / 更新加载器", lbox);
+        installLoaderBtn_->setObjectName("primary");
+        loaderState_ = new QLabel("装完后启动会用 versions/<版本>+<加载器>，原版不受影响", lbox);
+        loaderState_->setObjectName("muted");
+        lform->addRow("加载器", loaderCombo_);
+        lform->addRow("版本", lrow);
+        auto* irow = new QHBoxLayout();
+        irow->addWidget(installLoaderBtn_);
+        irow->addStretch(1);
+        lform->addRow(QString(), irow);
+        lform->addRow(QString(), loaderState_);
+        v->addWidget(lbox);
+
+
+        modTable_ = new QTableWidget(0, 4, w);
+        modTable_->setHorizontalHeaderLabels({"Mod", "作者", "下载量", "说明"});
+        modTable_->horizontalHeader()->setStretchLastSection(true);
+        modTable_->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        modTable_->horizontalHeader()->resizeSection(0, 230);
+        modTable_->horizontalHeader()->resizeSection(1, 130);
+        modTable_->horizontalHeader()->resizeSection(2, 90);
+        modTable_->verticalHeader()->setVisible(false);
+        modTable_->setShowGrid(false);
+        modTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        modTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+        modTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        modTable_->setAlternatingRowColors(true);
+        v->addWidget(modTable_, 2);
+
+        modInstallBtn_ = new QPushButton("安装选中 Mod", w);
+        modInstallBtn_->setObjectName("primary");
+        auto* openMods = new QPushButton("打开 mods 目录", w);
+        auto* brow = new QHBoxLayout();
+        brow->addWidget(modInstallBtn_);
+        brow->addWidget(openMods);
+        brow->addStretch(1);
+        v->addLayout(brow);
+
+        modState_ = new QLabel("输入关键词后点搜索", w);
+        modState_->setObjectName("muted");
+        v->addWidget(modState_);
+        modLog_ = new QPlainTextEdit(w);
+        modLog_->setReadOnly(true);
+        modLog_->setMaximumBlockCount(500);
+        v->addWidget(modLog_, 1);
+
+        connect(modSearchBtn_, &QPushButton::clicked, this, &LauncherWindow::startModSearch);
+        connect(modQuery_, &QLineEdit::returnPressed, this, &LauncherWindow::startModSearch);
+        connect(modInstallBtn_, &QPushButton::clicked, this, &LauncherWindow::installSelectedMod);
+        connect(modTable_, &QTableWidget::cellDoubleClicked, this,
+                [this](int, int) { installSelectedMod(); });
+        connect(getLv, &QPushButton::clicked, this, &LauncherWindow::refreshLoaderVersions);
+        connect(installLoaderBtn_, &QPushButton::clicked, this, &LauncherWindow::installSelectedLoader);
+        connect(loaderCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this](int) { refreshLoaderVersions(); });
+        connect(openMods, &QPushButton::clicked, this, [this] {
+            const auto dir = core::isolatedGameDir(layout_, cfg_) / "mods";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            QProcess::startDetached("xdg-open", {QString::fromStdString(dir.string())});
+        });
+        return w;
+    }
+
+    void startModSearch() {
+        const QString q = modQuery_->text().trimmed();
+        if (q.isEmpty()) { modState_->setText("先输入关键词"); return; }
+        modSearchBtn_->setEnabled(false);
+        modState_->setText("搜索中…");
+        const std::string loader = modLoader_->currentData().toString().toStdString();
+        const std::string ver = modVersionEdit_->text().trimmed().toStdString();
+        const std::string sort = modSort_->currentData().toString().toStdString();
+        const auto cache = layout_.configDir / "cache";
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, q, loader, ver, sort, cache] {
+            std::vector<mc263::modrinth::Hit> hits;
+            std::string err;
+            const bool ok = mc263::modrinth::search(q.toStdString(), loader, ver, sort, cache, hits, err);
+            QMetaObject::invokeMethod(qApp, [guard, ok, err, hits] {
+                if (guard) guard->applyModHits(ok, err, hits);
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    void applyModHits(bool ok, const std::string& err, const std::vector<mc263::modrinth::Hit>& hits) {
+        modSearchBtn_->setEnabled(true);
+        modTable_->setRowCount(0);
+        if (!ok) {
+            modState_->setText("搜索失败：" + QString::fromStdString(err));
+            return;
+        }
+        for (const auto& h : hits) {
+            const int r = modTable_->rowCount();
+            modTable_->insertRow(r);
+            auto* name = new QTableWidgetItem(QString::fromStdString(h.title));
+            name->setData(Qt::UserRole, QString::fromStdString(h.id));
+            name->setToolTip(QString::fromStdString(h.id));
+            modTable_->setItem(r, 0, name);
+            modTable_->setItem(r, 1, new QTableWidgetItem(QString::fromStdString(h.author)));
+            auto* dl = new QTableWidgetItem(QLocale().toString(static_cast<qulonglong>(h.downloads)));
+            dl->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            modTable_->setItem(r, 2, dl);
+            modTable_->setItem(r, 3, new QTableWidgetItem(QString::fromStdString(h.description)));
+        }
+        modState_->setText(hits.empty() ? "没有结果，换个关键词或放宽版本 / 加载器"
+                                        : QString("找到 %1 个，双击或点「安装选中 Mod」").arg(hits.size()));
+    }
+
+    void installSelectedMod() {
+        const int row = modTable_->currentRow();
+        if (row < 0) { modState_->setText("先在列表里选一个 Mod"); return; }
+        auto* nameItem = modTable_->item(row, 0);
+        const std::string project = nameItem->data(Qt::UserRole).toString().toStdString();
+        const QString title = nameItem->text();
+        const std::string loader = modLoader_->currentData().toString().toStdString();
+        const std::string ver = modVersionEdit_->text().trimmed().toStdString();
+        modInstallBtn_->setEnabled(false);
+        modState_->setText("安装 " + title + " …");
+        const auto cache = layout_.configDir / "cache";
+        const auto mods = core::isolatedGameDir(layout_, cfg_) / "mods";  // 版本隔离：mods 跟着版本走
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, project, loader, ver, cache, mods, title] {
+            std::vector<mc263::modrinth::Version> list;
+            std::string err;
+            bool ok = false;
+            QString msg;
+            if (!mc263::modrinth::versions(project, loader, ver, cache, list, err)) {
+                msg = "查版本失败：" + QString::fromStdString(err);
+            } else if (list.empty()) {
+                msg = "没有适配该版本 / 加载器的文件";
+            } else if (const auto* f = mc263::modrinth::primaryFile(list.front()); !f) {
+                msg = "该版本没有可下载文件";
+            } else {
+                std::error_code ec;
+                std::filesystem::create_directories(mods, ec);
+                const auto dest = mods / f->filename;
+                mc263::dl::Task t{f->url, dest, f->sha1, 0644, f->filename};
+                bool cached = false;
+                ok = mc263::dl::fetchOne(t, "", 120, true, err, cached);
+                msg = ok ? QString("%1 → %2%3")
+                               .arg(QString::fromStdString(list.front().number),
+                                    QString::fromStdString(dest.string()),
+                                    cached ? "（已存在，跳过）" : "")
+                         : "下载失败：" + QString::fromStdString(err);
+            }
+            QMetaObject::invokeMethod(qApp, [guard, ok, msg, title] {
+                if (!guard) return;
+                guard->modInstallBtn_->setEnabled(true);
+                guard->modState_->setText(ok ? "完成" : "失败");
+                guard->modLog_->appendPlainText(QString("[%1] %2  %3")
+                                                    .arg(QTime::currentTime().toString("HH:mm:ss"), title, msg));
+            }, Qt::QueuedConnection);
+        }).detach();
     }
 
     QWidget* pageJavaCompat() {
@@ -1112,10 +1346,70 @@ private:
         return w;
     }
 
+    QWidget* pageDirs() {
+        auto* w = new QWidget(this);
+        auto* v = new QVBoxLayout(w);
+        addPageHeader(v, "游戏目录", "自动扫描常见位置（ELF 旁 / rpm 的 XDG 目录 / ~/.minecraft），避免两套装各用一份、重复下载");
+
+        auto* box = new QGroupBox("目录", w);
+        auto* bv = new QVBoxLayout(box);
+        setCardTitle(box, bv, "选择游戏目录");
+        gameDirEdit_ = new QLineEdit(box);
+        browseBtn_ = new QPushButton("浏览…", box);
+        auto* drow = new QHBoxLayout();
+        drow->addWidget(gameDirEdit_, 1);
+        drow->addWidget(browseBtn_);
+        bv->addLayout(drow);
+
+        dirsTable_ = new QTableWidget(0, 4, box);
+        dirsTable_->setHorizontalHeaderLabels({"目录", "版本数", "mods", "当前"});
+        dirsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+        dirsTable_->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        dirsTable_->verticalHeader()->setVisible(false);
+        dirsTable_->setShowGrid(false);
+        dirsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        dirsTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+        dirsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        bv->addWidget(dirsTable_, 1);
+
+        auto* row = new QHBoxLayout();
+        auto* useBtn = new QPushButton("使用所选目录", box);
+        useBtn->setObjectName("primary");
+        auto* openBtn = new QPushButton("打开目录", box);
+        auto* rescan = new QPushButton("重新扫描", box);
+        row->addWidget(useBtn);
+        row->addWidget(openBtn);
+        row->addWidget(rescan);
+        row->addStretch(1);
+        bv->addLayout(row);
+
+        dirsState_ = new QLabel(box);
+        dirsState_->setObjectName("muted");
+        bv->addWidget(dirsState_);
+        v->addWidget(box, 1);
+
+        connect(rescan, &QPushButton::clicked, this, &LauncherWindow::refreshGameDirs);
+        connect(useBtn, &QPushButton::clicked, this, &LauncherWindow::applySelectedGameDir);
+        connect(browseBtn_, &QPushButton::clicked, this, [this] {
+            const QString d = QFileDialog::getExistingDirectory(this, "选择游戏目录", gameDirEdit_->text());
+            if (d.isEmpty()) return;
+            gameDirEdit_->setText(d);
+            collectUiToConfig();
+            saveConfigQuietly();
+            refreshGameDirs();
+            refreshLocalVersions();
+        });
+        connect(openBtn, &QPushButton::clicked, this, [this] {
+            QProcess::startDetached("xdg-open", {QString::fromStdString(layout_.gameDir.string())});
+        });
+        refreshGameDirs();
+        return w;
+    }
+
     QWidget* pageSettings() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        addPageHeader(v, "设置 / 内存", "改动即时保存；内存条每 2 秒按当前占用刷新，灰块就是分给游戏的 -Xmx");
+        addPageHeader(v, "设置 / 内存", "改动即时保存；内存默认交给 JVM 管理，需要精细控制时再关掉自动");
         core::MemInfo mi = core::readMemInfo();
         memTotalMb_ = mi.totalMb >= 2048 ? static_cast<int>(mi.totalMb) : 4096;
         if (mi.totalMb == 0) mi.totalMb = static_cast<uint64_t>(memTotalMb_);
@@ -1155,6 +1449,14 @@ private:
         legend->addStretch(1);
         mv->addLayout(legend);
 
+        memAuto_ = new QCheckBox("内存交给 JVM 自动管理（推荐，不传 -Xmx / -Xms）", w);
+        if (langCombo_) {
+            const int li = langCombo_->findData(QString::fromStdString(cfg_.language));
+            langCombo_->setCurrentIndex(li >= 0 ? li : 0);
+        }
+        memAuto_->setChecked(cfg_.autoMemory);
+        mv->addWidget(memAuto_);
+
         auto* srow = new QHBoxLayout();
         memSlider_ = new QSlider(Qt::Horizontal, w);
         memSlider_->setRange(512, maxMemoryMb_); memSlider_->setSingleStep(256);
@@ -1174,17 +1476,31 @@ private:
         auto* xrow = new QHBoxLayout(); xrow->addWidget(xmsCheck_); xrow->addWidget(xmsSpin_); xrow->addStretch(1);
         mv->addLayout(xrow);
         v->addWidget(mbox);
-        auto* gbox = new QGroupBox("路径与其他", w);
+        auto* gbox = new QGroupBox("其他", w);
         auto* form = new QFormLayout(gbox);
-        setCardTitle(gbox, form, "路径与其他");
-        gameDirEdit_ = new QLineEdit(w);
-        browseBtn_ = new QPushButton("浏览", w);
-        auto* drow = new QHBoxLayout(); drow->addWidget(gameDirEdit_, 1); drow->addWidget(browseBtn_);
-        form->addRow("游戏目录", drow);
+        setCardTitle(gbox, form, "其他");
         extraArgsEdit_ = new QLineEdit(w);
+        extraArgsEdit_->setPlaceholderText("例如 -XX:+UseZGC，空格分隔");
         form->addRow("额外 JVM 参数", extraArgsEdit_);
+        langCombo_ = new QComboBox(w);
+        langCombo_->addItem(QString("跟随系统（%1）")
+                                .arg(QString::fromStdString(core::detectSystemLanguage())), QString());
+        for (const char* code : {"en_us", "zh_cn", "zh_tw", "ja_jp", "ko_kr", "de_de",
+                                  "fr_fr", "es_es", "pt_br", "ru_ru"})
+            langCombo_->addItem(QString::fromLatin1(code), QString::fromLatin1(code));
+        form->addRow("游戏语言", langCombo_);
         v->addWidget(gbox);
+        v->addWidget(aboutSection());
         v->addStretch(1);
+        connect(memAuto_, &QCheckBox::toggled, this, [this] {
+            const bool manual = !memAuto_->isChecked();
+            memSlider_->setEnabled(manual);
+            memSpin_->setEnabled(manual);
+            xmsCheck_->setEnabled(manual);
+            xmsSpin_->setEnabled(manual && xmsCheck_->isChecked());
+            updateMemPreview();
+            scheduleAutoSave();
+        });
         connect(memSlider_, &QSlider::valueChanged, memSpin_, &QSpinBox::setValue);
         connect(memSpin_, QOverload<int>::of(&QSpinBox::valueChanged), memSlider_, &QSlider::setValue);
         connect(memSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this] {
@@ -1196,15 +1512,113 @@ private:
         auto* memTimer = new QTimer(this);
         connect(memTimer, &QTimer::timeout, this, &LauncherWindow::refreshMemory);
         memTimer->start(2000);
-        connect(browseBtn_, &QPushButton::clicked, this, [this] {
-            QString d = QFileDialog::getExistingDirectory(this, "选择游戏目录", gameDirEdit_->text());
-            if (!d.isEmpty()) {
-                gameDirEdit_->setText(d);
-                scheduleAutoSave();
-            }
-        });
         refreshMemory();
         return w;
+    }
+
+    void refreshLoaderVersions() {
+        const std::string loader = loaderCombo_->currentData().toString().toStdString();
+        loaderState_->setText("获取版本中…");
+        auto cache = layout_.configDir / "cache";
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, loader, cache] {
+            std::vector<core::LoaderVersion> list;
+            std::string err;
+            const bool ok = core::loaderVersions(loader, cache, list, err);
+            QMetaObject::invokeMethod(qApp, [guard, ok, err, list] {
+                if (guard) guard->applyLoaderVersions(ok, err, list);
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    void applyLoaderVersions(bool ok, const std::string& err,
+                             const std::vector<core::LoaderVersion>& list) {
+        loaderVerCombo_->clear();
+        if (!ok) {
+            loaderState_->setText("获取失败：" + QString::fromStdString(err));
+            return;
+        }
+        for (const auto& v : list)
+            loaderVerCombo_->addItem(QString::fromStdString(v.version) + (v.stable ? "（稳定）" : ""),
+                                     QString::fromStdString(v.version));
+        loaderState_->setText(QString("共 %1 个版本，选一个再点安装").arg(list.size()));
+    }
+
+    void installSelectedLoader() {
+        if (loaderVerCombo_->count() == 0) { loaderState_->setText("先点「获取版本」"); return; }
+        const std::string loader = loaderCombo_->currentData().toString().toStdString();
+        const std::string lv = loaderVerCombo_->currentData().toString().toStdString();
+        core::Config c = cfg_;
+        core::Layout l = layout_;
+        installLoaderBtn_->setEnabled(false);
+        loaderState_->setText("安装中…（会下载加载器依赖）");
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, l, c, loader, lv]() mutable {
+            std::string err;
+            const bool ok = core::installLoader(l, c, loader, lv, nullptr, err);
+            QMetaObject::invokeMethod(qApp, [guard, ok, err, c, loader, lv] {
+                if (!guard) return;
+                guard->installLoaderBtn_->setEnabled(true);
+                if (!ok) {
+                    guard->loaderState_->setText("失败：" + QString::fromStdString(err));
+                    return;
+                }
+                guard->cfg_ = c;
+                std::string serr;
+                guard->cfg_.save(guard->layout_.configFile, serr);
+                guard->loaderState_->setText(QString("已装 %1 %2 → %3")
+                                                 .arg(QString::fromStdString(loader), QString::fromStdString(lv),
+                                                      QString::fromStdString(core::versionDirName(c))));
+                guard->modLog_->appendPlainText(QString("[%1] 加载器 %2 %3 安装完成")
+                                                    .arg(QTime::currentTime().toString("HH:mm:ss"),
+                                                         QString::fromStdString(loader), QString::fromStdString(lv)));
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    void refreshGameDirs() {
+        if (!dirsTable_) return;
+        const auto dirs = core::scanGameDirs(layout_, cfg_.gameDir);
+        dirsTable_->setRowCount(0);
+        int withVer = 0;
+        for (const auto& d : dirs) {
+            if (d.versions > 0) withVer++;
+            const int r = dirsTable_->rowCount();
+            dirsTable_->insertRow(r);
+            auto* p0 = new QTableWidgetItem(QString::fromStdString(d.path.string()));
+            p0->setData(Qt::UserRole, QString::fromStdString(d.path.string()));
+            dirsTable_->setItem(r, 0, p0);
+            dirsTable_->setItem(r, 1, new QTableWidgetItem(d.exists ? QString::number(d.versions) : QString("—")));
+            dirsTable_->setItem(r, 2, new QTableWidgetItem(d.exists ? QString::number(d.mods) : QString("—")));
+            dirsTable_->setItem(r, 3, new QTableWidgetItem(d.current ? "使用中" : ""));
+            if (d.current) dirsTable_->selectRow(r);
+        }
+        dirsState_->setText(withVer > 1
+                                ? QString("有 %1 个目录存着游戏版本，可能重复；选中后点「使用所选目录」统一").arg(withVer)
+                                : QString("只有 %1 个目录存着游戏版本").arg(withVer));
+    }
+
+    void applySelectedGameDir() {
+        const int r = dirsTable_->currentRow();
+        if (r < 0) { dirsState_->setText("先在表里选一个目录"); return; }
+        gameDirEdit_->setText(dirsTable_->item(r, 0)->data(Qt::UserRole).toString());
+        collectUiToConfig();
+        saveConfigQuietly();
+        refreshGameDirs();
+        refreshLocalVersions();
+    }
+
+    void checkGameDirs() {
+        refreshGameDirs();
+        if (!dirsTable_) return;
+        int withVer = 0;
+        for (int i = 0; i < dirsTable_->rowCount(); ++i) {
+            const QString v = dirsTable_->item(i, 1) ? dirsTable_->item(i, 1)->text() : QString();
+            if (!v.isEmpty() && v != "—" && v != "0") withVer++;
+        }
+        if (withVer > 1)
+            statusBar()->showMessage(
+                QString("检测到 %1 个目录存有游戏版本，可在「游戏目录」页统一").arg(withVer), 12000);
     }
 
     // 从应用目录往上找 README.md（源码树里 exe 在 build/，上一级就是仓库根）
@@ -1219,20 +1633,13 @@ private:
         return {};
     }
 
-    QWidget* pageAbout() {
+    QWidget* aboutSection() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
         const bool dark = palette().color(QPalette::Window).lightness() < 128;
         const QString linkColor = dark ? QStringLiteral("#7cc0ff") : QStringLiteral("#1a5fd0");
 
-        auto* title = new QLabel("关于", w);
-        title->setObjectName("pageTitle");
-        v->addWidget(title);
-        auto* subtitle = new QLabel("Qt6 手写界面的单文件启动器，不套 Electron、不内嵌浏览器", w);
-        subtitle->setObjectName("pageSubtitle");
-        subtitle->setWordWrap(true);
-        v->addWidget(subtitle);
-        v->addSpacing(4);
+        v->setContentsMargins(0, 10, 0, 0);
 
         QString text =
             "本项目源码许可：GPL-3.0-or-later（见 LICENSE）\n"
@@ -1295,7 +1702,6 @@ private:
         platLabel->setStyleSheet("color:" +
                                  (dark ? QStringLiteral("#9aa4b2") : QStringLiteral("#5b6472")) + ";");
         v->addWidget(platLabel);
-        v->addStretch(1);
         return w;
     }
 
@@ -1324,14 +1730,19 @@ private:
 
     void updateMemPreview() {
         if (!memPreview_) return;
-        const int want = memSpin_ ? memSpin_->value() : 0;
+        const bool autoMode = memAuto_ && memAuto_->isChecked();
+        const int want = autoMode
+                             ? static_cast<int>(std::max<uint64_t>(1024, memInfo_.totalMb / 4))
+                             : (memSpin_ ? memSpin_->value() : 0);
         if (xmsSpin_) xmsSpin_->setMaximum(std::max(256, want));
         const uint64_t total = memInfo_.totalMb;
         const uint64_t avail = memInfo_.availableMb;
         const int pTotal = total ? static_cast<int>(want * 100 / total) : 0;
         const int pAvail = avail ? static_cast<int>(want * 100 / avail) : 0;
-        QString line = QString("-Xmx%1M　·　占物理内存 %2%　·　占当前可用 %3%")
-                           .arg(want).arg(pTotal).arg(pAvail);
+        QString line = autoMode
+                           ? QString("JVM 自动：预计上限约 %1（不传 -Xmx）").arg(fmtMem(static_cast<uint64_t>(want)))
+                           : QString("-Xmx%1M　·　占物理内存 %2%　·　占当前可用 %3%")
+                                 .arg(want).arg(pTotal).arg(pAvail);
         if (avail) {
             const uint64_t left = static_cast<uint64_t>(want) < avail
                                       ? avail - static_cast<uint64_t>(want) : 0;
@@ -1340,11 +1751,15 @@ private:
         memPreview_->setText(line);
         if (gameStat_) {
             const MemColors mc = memColors(palette());
-            gameStat_->setText(QString("<span style='color:%1'>■</span> 游戏 -Xmx <b>%2</b>")
-                                   .arg(mc.game.name(), fmtMem(static_cast<uint64_t>(want))));
+            gameStat_->setText(autoMode
+                                   ? QString("<span style='color:%1'>■</span> 游戏 -Xmx <b>JVM 自动</b>")
+                                         .arg(mc.game.name())
+                                   : QString("<span style='color:%1'>■</span> 游戏 -Xmx <b>%2</b>")
+                                         .arg(mc.game.name(), fmtMem(static_cast<uint64_t>(want))));
         }
         if (memBar_) memBar_->setStats(memInfo_, want);
         if (!memWarn_) return;
+        if (autoMode) { memWarn_->hide(); return; }
         const bool dark = palette().color(QPalette::Window).lightness() < 128;
         if (avail && static_cast<uint64_t>(want) > avail) {
             memWarn_->setText(QString("注意：超出当前可用内存 %1（仅可用 %2），启动后可能被系统 OOM 杀掉")
@@ -1376,6 +1791,11 @@ private:
             if (!extraArgsEdit_->text().isEmpty()) extraArgsEdit_->setText(extraArgsEdit_->text() + " ");
             extraArgsEdit_->setText(extraArgsEdit_->text() + QString::fromStdString(a));
         }
+        memAuto_->setChecked(cfg_.autoMemory);
+        memSlider_->setEnabled(!cfg_.autoMemory);
+        memSpin_->setEnabled(!cfg_.autoMemory);
+        xmsCheck_->setEnabled(!cfg_.autoMemory);
+        xmsSpin_->setEnabled(!cfg_.autoMemory && cfg_.minMemoryMb > 0);
         memSpin_->setValue(std::min(cfg_.memoryMb, maxMemoryMb_));
         memSlider_->setValue(memSpin_->value());
         xmsCheck_->setChecked(cfg_.minMemoryMb > 0);
@@ -1389,12 +1809,14 @@ private:
         cfg_.mirror = mirrorCombo_->currentData().toString().toStdString();
         cfg_.jobs = jobsSpin_->value();
         cfg_.arch = core::detectArch();  // 架构不再让用户选，按本机自动判断
+        cfg_.autoMemory = memAuto_->isChecked();
         cfg_.memoryMb = memSpin_->value();
         cfg_.minMemoryMb = xmsCheck_->isChecked() ? xmsSpin_->value() : 0;
         cfg_.components.clear();
         for (auto* cb : compChecks_) if (cb->isChecked()) cfg_.components.push_back(cb->property("comp").toString().toStdString());
         if (runtimeCheck_ && runtimeCheck_->isVisible() && runtimeCheck_->isChecked())
             cfg_.components.push_back("runtime");
+        if (langCombo_) cfg_.language = langCombo_->currentData().toString().toStdString();
         cfg_.extraJvmArgs.clear();
         QString extra = extraArgsEdit_->text().trimmed();
         if (!extra.isEmpty()) for (const QString& s : extra.split(' ', Qt::SkipEmptyParts))
@@ -1427,6 +1849,8 @@ private:
         connect(memSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &LauncherWindow::scheduleAutoSave);
         connect(xmsSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
+                this, &LauncherWindow::scheduleAutoSave);
+        connect(langCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &LauncherWindow::scheduleAutoSave);
         connect(xmsCheck_, &QCheckBox::toggled, this, &LauncherWindow::scheduleAutoSave);
         for (auto* cb : compChecks_)
@@ -1508,6 +1932,39 @@ private:
                 if (guard) guard->applyCompat(items);
             }, Qt::QueuedConnection);
         }).detach();
+    }
+
+    void clearDownloadCache() {
+        const std::filesystem::path cache = layout_.configDir / "cache";
+        int files = 0;
+        uint64_t bytes = 0;
+        dirUsage(cache, files, bytes);
+        if (files == 0) {
+            downloadLog_->appendPlainText("[" + QTime::currentTime().toString("HH:mm:ss") +
+                                         "] 缓存已是空的：" + QString::fromStdString(cache.string()));
+            downloadLabel_->setText("缓存为空");
+            return;
+        }
+        const QString msg = QString("将删除 %1 个缓存文件（%2）：\n%3\n\n只清元数据缓存，已下载的游戏文件（jar / libraries / assets）不受影响。")
+                                .arg(files)
+                                .arg(fmtMem(bytes / (1024 * 1024)))
+                                .arg(QString::fromStdString(cache.string()));
+        if (QMessageBox::question(this, "清除下载缓存", msg, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) !=
+            QMessageBox::Yes)
+            return;
+        std::error_code ec;
+        std::filesystem::remove_all(cache, ec);
+        std::filesystem::create_directories(cache, ec);
+        if (ec) {
+            downloadLog_->appendPlainText("[" + QTime::currentTime().toString("HH:mm:ss") +
+                                         "] 清除失败：" + QString::fromStdString(ec.message()));
+            return;
+        }
+        downloadLog_->appendPlainText(QString("[%1] 已清除下载缓存：%2 个文件，%3")
+                                          .arg(QTime::currentTime().toString("HH:mm:ss"))
+                                          .arg(files)
+                                          .arg(fmtMem(bytes / (1024 * 1024))));
+        downloadLabel_->setText(QString("缓存已清除（%1）").arg(fmtMem(bytes / (1024 * 1024))));
     }
 
     void startDownload() {
@@ -1665,6 +2122,21 @@ private:
     QSpinBox* jobsSpin_ = nullptr;
     std::vector<QCheckBox*> compChecks_;
     QPushButton* downloadBtn_ = nullptr;
+    QPushButton* clearCacheBtn_ = nullptr;
+
+    QLineEdit* modQuery_ = nullptr;
+    QComboBox* modLoader_ = nullptr;
+    QComboBox* modSort_ = nullptr;
+    QComboBox* loaderCombo_ = nullptr;
+    QComboBox* loaderVerCombo_ = nullptr;
+    QPushButton* installLoaderBtn_ = nullptr;
+    QLabel* loaderState_ = nullptr;
+    QLineEdit* modVersionEdit_ = nullptr;
+    QTableWidget* modTable_ = nullptr;
+    QPushButton* modSearchBtn_ = nullptr;
+    QPushButton* modInstallBtn_ = nullptr;
+    QLabel* modState_ = nullptr;
+    QPlainTextEdit* modLog_ = nullptr;
     QPushButton* cancelBtn_ = nullptr;
     QProgressBar* downloadBar_ = nullptr;
     QLabel* downloadLabel_ = nullptr;
@@ -1675,6 +2147,7 @@ private:
     QTableWidget* compatTable_ = nullptr;
     QLabel* compatState_ = nullptr;
     QCheckBox* netCheck_ = nullptr;
+    QCheckBox* memAuto_ = nullptr;
     QSlider* memSlider_ = nullptr;
     QSpinBox* memSpin_ = nullptr;
     QSpinBox* xmsSpin_ = nullptr;
@@ -1691,7 +2164,10 @@ private:
     QLabel* memPreview_ = nullptr;
     QLineEdit* gameDirEdit_ = nullptr;
     QPushButton* browseBtn_ = nullptr;
+    QTableWidget* dirsTable_ = nullptr;
+    QLabel* dirsState_ = nullptr;
     QLineEdit* extraArgsEdit_ = nullptr;
+    QComboBox* langCombo_ = nullptr;
     QTimer* autosaveTimer_ = nullptr;
     bool loadingConfig_ = false;
 };
