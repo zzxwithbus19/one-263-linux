@@ -1,6 +1,10 @@
 # mc263 — Minecraft 26.3 Linux 启动器（Qt6 / C++23）
 
 > 许可：GPL-3.0-or-later（全文见 [LICENSE](LICENSE)）
+>
+> 分支：`fedora`（本分支）= RHEL / Fedora 的 rpm 线（rpmbuild + COPR）；
+> `main` = Arch 主线（PKGBUILD + pacman 自建源）。两条线的打包产物互不冲突，
+> 源码（`src/` `include/`）两边同步。
 
 HMCL 形态的启动器：**一个 ELF + 旁边的 `minecraft/` 与 `.mc263/`**。
 Qt6 Widgets 原生界面（无 Electron、无内嵌浏览器、无 moc），启动时自动选择
@@ -27,18 +31,20 @@ curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/ins
 ```
 
 - **有 `dnf` / `zypper`**：下载预编译 rpm → 先装 `qt6-qtbase`、`qt6-qtwayland`、`python3` → 再 `sudo dnf install ./mc263-*.rpm`
-- **没有（Arch、Debian…）**：自动退回**独立 ELF**，装到 `~/.local/bin/mc263-qt`（root 则 `/usr/local/bin`）
+- **`pacman`（Arch）**：下载 `.pkg.tar.zst` → `sudo pacman -U`
+- **都没有（Debian…）**：自动退回**独立 ELF**，装到 `~/.local/bin/mc263-qt`（root 则 `/usr/local/bin`）
 - 完整性：优先用 GitHub 给每个 asset 自动附的 `sha256:` digest 校验，拿不到再退回 `SHA256SUMS`
 - 签名：发布里带 `mc263-signing-key.asc` 就先 `rpmkeys --import`；未签名时按 Fedora 45 的规则自动降级（见 [第 7 节](#7-fedora-45--rpm-61-的签名要求)）
-- 资产名不固定也没关系：脚本走 GitHub API 按规则挑（`*.rpm` / `mc263-qt*`），所以 release 里叫什么都能装上
+- 资产名不固定也没关系：脚本走 GitHub API 按规则挑（`*.rpm` / `*.pkg.tar.zst` / `mc263-qt*`），所以 release 里叫什么都能装上
 
 强制走某条路 / 装指定 tag（含 pre-release）/ 卸载：
 
 ```sh
 sh install.sh --elf          # 只装独立 ELF，不碰包管理器
 sh install.sh --rpm          # 只装 rpm
+sh install.sh --pacman       # 只装 Arch 的 .pkg.tar.zst
 sh install.sh --tag pre非生产  # 装指定 tag（pre-release 也支持）
-sh install.sh --uninstall    # 卸载（rpm 与 ELF 都会处理）
+sh install.sh --uninstall    # 卸载（pacman 包 / rpm / ELF 都会处理）
 ```
 
 > 注意：`releases/latest` 只指向**非 pre-release**。仓库里只有 pre-release 时，
@@ -49,7 +55,15 @@ sh install.sh --uninstall    # 卸载（rpm 与 ELF 都会处理）
 | 发行版 / 方式 | 文件 | 做法 |
 |---|---|---|
 | Fedora / openSUSE | `mc263-26.3-1.<arch>.rpm` | `sudo dnf install ./mc263-26.3-1.x86_64.rpm` |
+| Arch | `mc263-26.3-1-x86_64.pkg.tar.zst` | `sudo pacman -U ./mc263-26.3-1-x86_64.pkg.tar.zst` |
 | 其它 / 免安装 | `mc263-qt-26.3-<arch>` | `chmod +x` 后直接跑 |
+
+Fedora 也可以直接用 COPR 源（自动签名，`dnf` 会验签）：
+
+```sh
+sudo dnf copr enable cxc123/one-263-linux
+sudo dnf install mc263
+```
 
 独立 ELF 没有菜单项和图标，需要自己准备 Qt6 运行时与 python3：
 
@@ -67,10 +81,14 @@ sudo apt install qt6-base-dev python3            # Debian / Ubuntu
 sudo dnf install gcc-c++ make qt6-qtbase-devel qt6-qtwayland python3
 # openSUSE Tumbleweed
 sudo zypper install gcc-c++ make qt6-qtbase-devel libQt6WaylandClient6 python3
+# Arch
+sudo pacman -S --needed base-devel qt6-base qt6-wayland python curl
 
 make                 # 编译 build/mc263-qt
 make check           # 57 项核心单测 + 7 项内嵌下载器自测（全部离线）
 make info            # 编译器 / Qt6 / 产物路径
+make rpm             # 出 rpm（本分支主线）
+make arch            # 出 Arch 包（调 packaging/build-arch.sh，需 makepkg）
 
 build/mc263-qt                            # 运行
 QT_QPA_PLATFORM=offscreen build/mc263-qt  # 无图形环境冒烟测试
@@ -206,22 +224,23 @@ COPR 是 Fedora 官方的第三方构建服务：不用审核、自动给各 Fed
 
 ```bash
 sudo dnf install copr-cli
-bash packaging/make-source.sh            # → dist/mc263-26.3.tar.gz（源码 + 源码构建版 spec）
-copr-cli create mc263                    # 建一次即可
-copr-cli build mc263 dist/mc263-26.3.tar.gz
+bash packaging/make-srcrpm.sh            # → dist/mc263-26.3-1.fc45.src.rpm
+copr-cli create cxc123/one-263-linux     # 建一次即可（网页建也行）
+copr-cli build cxc123/one-263-linux dist/mc263-26.3-1.fc45.src.rpm
 ```
 
 用户侧：
 
 ```bash
 sudo dnf install dnf-plugins-core
-sudo dnf copr enable @copr/mc263/release/fedora-$(rpm -E %fedora)
+sudo dnf copr enable cxc123/one-263-linux
 sudo dnf install mc263
 ```
 
 注意两份 spec 的分工：`packaging/mc263.spec` 是**塞预编译二进制**的（本地出包快，用户不必装编译环境）；
-COPPR 在 mock 里现编源码，用 `packaging/mc263-source.spec`（`%prep` 解包 + `%build` 跑 `make` + `%check` 跑单测）。
-`make-source.sh` 已经把源码版 spec 一起打进 tarball。
+COPR 在 mock 里现编源码，用 `packaging/mc263-source.spec`（`%prep` 解包 + `%build` 跑 `make` + `%check` 跑单测）。
+COPR 的 v3 API **只收 `.src.rpm` / `.nosrc.rpm` / `.spec`**，所以由 `make-srcrpm.sh` 把 spec 与 tarball
+装进 src.rpm 再上传（直接传 tarball 会报 `You can upload only .src.rpm, .nosrc.rpm, and .spec files`）。
 
 **B. 自建仓库（最快，不需要账号）**
 
@@ -310,9 +329,9 @@ bash packaging/build-rpm.sh --sign <密钥指纹或邮箱>
 
 ```
 mc26-one/
-├── Makefile                    all / check / rpm / info / clean
+├── Makefile                    all / check / rpm / arch / info / clean
 ├── README.md
-├── install.sh                  一键安装（rpm / ELF 自动选择 + 摘要校验）
+├── install.sh                  一键安装（rpm / pacman / ELF 自动选择 + 摘要校验）
 ├── include/
 │   ├── launcher_core.hpp       布局 / 配置 / Java 探测 / 兼容性 / 启动 / meminfo / 版本隔离 / 加载器 / 目录扫描
 │   ├── download.hpp            curl 下载后端 + SHA1 + 并发池（兼容性网络检查用）
@@ -332,7 +351,11 @@ mc26-one/
 │   ├── make-source.sh          生成源码包 dist/mc263-<版本>.tar.gz
 │   ├── make-repo.sh            用 createrepo_c 生成 dnf 仓库目录
 │   ├── mc263.repo.example      用户侧 repo 文件模板
-│   ├── PKGBUILD                Arch 打包模板（主线）
+│   ├── PKGBUILD                Arch 打包模板（main 分支主线）
+│   ├── build-arch.sh           源码包 → PKGBUILD → makepkg → 校验 → 冒烟
+│   ├── make-repo-arch.sh       用 repo-add 生成自建 pacman 仓库
+│   ├── mc263.metainfo.xml      AppStream 元数据（GNOME Software / KDE Discover）
+│   ├── make-srcrpm.sh          把 spec + tarball 装进 src.rpm（COPR 只收这个）
 │   ├── build-rpm.sh            make → rpmbuild → dist/*.rpm + 独立 ELF + SHA256SUMS
 │   ├── mc263.desktop           应用菜单项（Exec=mc263-qt）
 │   └── mc263.svg               图标

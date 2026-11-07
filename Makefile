@@ -3,6 +3,7 @@
 #   make           编译 build/mc263-qt
 #   make check     核心单测 + 内嵌下载器自测（全部离线）
 #   make rpm       调 packaging/build-rpm.sh 打 rpm
+#   make arch      调 packaging/build-arch.sh 打 pacman 包（PKGBUILD，不走 AUR）
 #   make info      显示编译器 / Qt6 状态
 
 CXX      ?= g++
@@ -25,7 +26,7 @@ ifeq ($(QT6_LIBS),)
 $(warning 未找到 Qt6 开发包；Fedora: sudo dnf install qt6-qtbase-devel / openSUSE: sudo zypper install qt6-qtbase-devel)
 endif
 
-.PHONY: all check qt rpm info clean help
+.PHONY: all check qt rpm arch info clean help
 
 all: $(QT_APP)
 
@@ -49,6 +50,9 @@ check: $(CORE_TEST)
 rpm: all
 	bash packaging/build-rpm.sh
 
+arch:
+	bash packaging/build-arch.sh $(ARCH_ARGS)
+
 info:
 	@$(CXX) --version | head -1
 	@printf '标准      : %s\n' '$(STD)'
@@ -60,9 +64,10 @@ clean:
 	rm -rf $(BUILD) $(DIST)
 
 help:
-	@printf '目标: all / check / rpm / info / clean\n'
+	@printf '目标: all / check / rpm / arch / info / clean\n'
 	@printf '  make              编译 Qt6 启动器 build/mc263-qt\n'
 	@printf '  make check        核心单测 + 内嵌下载器（mock CDN）自测\n'
 	@printf '  make rpm          调 packaging/build-rpm.sh 打 rpm\n'
+	@printf '  make arch [ARCH_ARGS=--nodeps]  打 pacman 包（源码构建，不走 AUR）\n'
 	@printf '  make clean        删除 build/ 与 dist/\n'
 	@printf '变量: CXX=clang++ 换编译器；MC263_SANDBOX_ROOT=<dir> 改沙箱根\n'
