@@ -24,13 +24,17 @@ Name:           mc263
 Version:        26.3
 Release:        1%{?dist}
 Summary:        Minecraft 26.3 single-file Linux launcher (self-extracting, bundled JRE)
-License:        MIT
-URL:            https://github.com/example/mc26-one
+# 本仓库源码采用 GPL-3.0-or-later（见仓库根目录 LICENSE）。
+# 上游 zhanbalao/mc26-one 未声明许可证，且其唯一的脚本 build_262.py 已在本仓库移除；
+# 本仓库现有代码为全新 C++23 实现，不含上游代码。
+License:        GPL-3.0-or-later
+URL:            https://github.com/zzxwithbus19/one-263-linux
 BuildArch:      %{payload_arch}
 
 Source0:        mc263-payload
 Source1:        mc263.desktop
 Source2:        mc263.svg
+Source3:        LICENSE
 
 # 运行时依赖（libzstd.so.1 / libstdc++.so.6 / libc）由 rpm 自动扫描 DT_NEEDED 生成，
 # 无需手写；Fedora 与 openSUSE Tumbleweed 的库名差异也因此自动规避。
@@ -54,6 +58,7 @@ install -d -m 0755 %{buildroot}%{mc263_prefix}
 install -m 0755 %{SOURCE0} %{buildroot}%{mc263_prefix}/mc263
 install -m 0644 %{SOURCE1} %{buildroot}%{mc263_prefix}/mc263.desktop
 install -m 0644 %{SOURCE2} %{buildroot}%{mc263_prefix}/mc263.svg
+install -m 0644 %{SOURCE3} %{buildroot}%{mc263_prefix}/LICENSE
 %if "%{mc263_system_links}" == "1"
 install -d -m 0755 %{buildroot}%{_bindir}
 ln -s %{mc263_prefix}/mc263 %{buildroot}%{_bindir}/mc263
@@ -64,6 +69,7 @@ install -m 0644 %{SOURCE2} %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/m
 %endif
 
 %files
+%license %{mc263_prefix}/LICENSE
 %dir %{mc263_prefix}
 %{mc263_prefix}/mc263
 %{mc263_prefix}/mc263.desktop

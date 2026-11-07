@@ -96,9 +96,14 @@ echo "payload : $PAYLOAD ($(du -h "$PAYLOAD" | cut -f1))"
 echo "架构    : $ARCH | rpm 版本: $(rpm --version)"
 
 mkdir -p "$TOP"/{BUILD,RPMS,SOURCES,SPECS,SRPMS} "$OUT"
+if [[ ! -f "$ROOT/LICENSE" ]]; then
+    echo "错误: 缺少 $ROOT/LICENSE（GPLv3 全文），请保留该文件后再打包" >&2
+    exit 2
+fi
 cp -f "$PAYLOAD" "$TOP/SOURCES/mc263-payload"
 cp -f "$ROOT/packaging/mc263.desktop" "$TOP/SOURCES/"
 cp -f "$ROOT/packaging/mc263.svg" "$TOP/SOURCES/"
+cp -f "$ROOT/LICENSE" "$TOP/SOURCES/LICENSE"
 cp -f "$ROOT/packaging/mc263.spec" "$TOP/SPECS/"
 
 if command -v desktop-file-validate >/dev/null 2>&1; then

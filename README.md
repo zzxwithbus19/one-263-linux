@@ -1,5 +1,7 @@
 # mc26-one — Minecraft 26.3 的 Linux 单文件构建器（C++23）
 
+> **许可：GPL-3.0-or-later**（全文见 [`LICENSE`](LICENSE)）
+
 本仓库是原 Windows 构建脚本 `build_262.py`（Python + .NET/C# 自解压 exe，**已从仓库移除**）的
 **C++23 重写**，源码位于仓库根目录。目标产物是 Linux 上的**一个 ELF 文件**：内置 Java 运行时、
 游戏库、Linux natives、assets 与 mods，双击即玩；也可封装成 `.rpm`，安装后在应用菜单/命令行一键启动。
@@ -378,10 +380,23 @@ A：`make clean && make USE_ZSTD=0`，用该 launcher 重新构建即可产出 v
 
 ---
 
-## 8. 法律声明
+## 8. 许可与法律声明
+
+### 8.1 许可
+
+本仓库的工具链源码采用 **GNU General Public License v3.0 或更高版本**
+（SPDX `GPL-3.0-or-later`），全文见根目录 [`LICENSE`](LICENSE)。
+`packaging/mc263.spec` 的 `License` 字段与打出的 rpm（内含 LICENSE 文件）保持一致。
+
+上游 `zhanbalao/mc26-one` 未声明任何许可证；其唯一的脚本 `build_262.py` 已从本仓库移除，
+README 亦为重写，因此本仓库现有代码是全新的 C++23 实现，不含上游代码。
+本许可仅覆盖本仓库自身代码。
+
+### 8.2 第三方素材
 
 本项目**不包含** Minecraft 游戏文件、Java 运行时或任何 Mojang/Microsoft 版权素材，
 仅提供构建工具。`mc263-fetch` 只从 Mojang 官方 CDN / 公共镜像下载公开资源文件，
 **不提供账号认证、不绕过任何验证**；运行游戏仍需构建者自己拥有正版 Minecraft 账号。
 成品由构建者使用自己通过正版渠道获取的文件生成，分发责任由构建者承担。
-`packaging/mc263.spec` 中的 `License` 字段指本工具链代码，请按你仓库的实际许可证调整。
+打包进单文件的第三方素材（Minecraft jar / assets、Mojang Java 运行时、第三方依赖库与 mods）
+作为独立数据聚合分发，各自适用其原有许可，不因本工具而改为 GPLv3。
