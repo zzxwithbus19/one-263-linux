@@ -427,7 +427,9 @@ QListWidget#nav::item:selected {
     border-left: 3px solid @accent@; padding-left: 11px;
 }
 
-QLabel#pageTitle { font-size: 20px; font-weight: 700; }
+/* 页面大标题与正文同款字体（不单独指定 family，避免中文字形回落不一致），
+   只用字号和 600 字重做层级，700 的合成粗体会让 CJK 笔画糊成一团 */
+QLabel#pageTitle { font-size: 19px; font-weight: 600; }
 QLabel#pageSubtitle { color: @muted@; font-size: 12px; }
 QLabel#muted { color: @muted@; }
 
@@ -1349,7 +1351,7 @@ private:
     QWidget* pageDirs() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        addPageHeader(v, "游戏目录", "自动扫描常见位置（ELF 旁 / rpm 的 XDG 目录 / ~/.minecraft），避免两套装各用一份、重复下载");
+        addPageHeader(v, "游戏目录", "自动扫描常见位置（ELF 旁 / rpm 的 XDG 目录 / ~/.minecraft，只列真实存在的），避免两套装各用一份、重复下载");
 
         auto* box = new QGroupBox("目录", w);
         auto* bv = new QVBoxLayout(box);

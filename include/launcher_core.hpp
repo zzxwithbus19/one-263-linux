@@ -294,14 +294,23 @@ struct GameDirInfo {
 };
 
 // 扫一圈可能被当成游戏目录的位置（ELF 旁边的 minecraft/、rpm 装完的 XDG 目录、~/.minecraft 等）
+// 只列真实存在的目录，避免列出「虚空目录」；当前生效目录例外——首次运行它可能还没建出来
 inline std::vector<GameDirInfo> scanGameDirs(const Layout& l, const std::string& currentCfg) {
+    auto existsDir = [](const fs::path& p) {
+        std::error_code ec;
+        return fs::is_directory(p, ec);
+    };
+
     std::vector<fs::path> cands;
-    if (!currentCfg.empty()) cands.emplace_back(currentCfg);
-    cands.push_back(l.gameDir);
+    if (!currentCfg.empty() && (existsDir(currentCfg) || currentCfg == l.gameDir.string()))
+        cands.push_back(currentCfg);
+    cands.push_back(l.gameDir);  // 永远保留：正在用的目录，哪怕还没创建
     const fs::path home = fsx::env("HOME").empty() ? fs::path(".") : fs::path(fsx::env("HOME"));
-    cands.push_back(home / ".minecraft");
+    if (existsDir(home / ".minecraft")) cands.push_back(home / ".minecraft");
     const std::string xdg = fsx::env("XDG_DATA_HOME");
-    cands.push_back((xdg.empty() ? home / ".local" / "share" : fs::path(xdg)) / "mc263" / "minecraft");
+    const fs::path xdgDir =
+        (xdg.empty() ? home / ".local" / "share" : fs::path(xdg)) / "mc263" / "minecraft";
+    if (existsDir(xdgDir)) cands.push_back(xdgDir);
 
     std::vector<fs::path> seen;
     std::vector<GameDirInfo> out;
