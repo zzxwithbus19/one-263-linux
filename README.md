@@ -165,8 +165,9 @@ HiDPI、分数缩放、多屏交给 Qt6；打开链接走 `xdg-open` / portal。
 > **主线是 Arch**：`packaging/PKGBUILD` + `packaging/build-arch.sh`，从源码构建，
 > **不走 AUR**——不需要账号、不需要审核，全部命令行完成。交接说明见
 > [docs/arch-handoff.md](docs/arch-handoff.md)。
-> rpm 线（`build-rpm.sh` / 完整 spec / COPR）在 `fedora` 分支维护，
-> `main` 上只留 `packaging/mc263.spec` 作参考。
+> rpm 线（`build-rpm.sh` / 完整 spec / COPR）在 `fedora` 分支维护，发版走 COPR：
+> 会自动给各 Fedora 版本构建，但**排队慢**——等不及就本地 `bash packaging/build-rpm.sh`，
+> 或在 CI 里直接出 rpm。`main` 上只留 `packaging/mc263.spec` 作参考。
 
 ### 6.1 Arch Linux：pacman 包（主线）
 
@@ -227,7 +228,7 @@ sudo pacman -Sy && sudo pacman -S mc263
 | `SHA256SUMS`（可选） | 离线核对；GitHub 自带 digest 时可不传 |
 | `mc263-26.3-1.fc45.x86_64.rpm`（可选） | Fedora / openSUSE，见 `fedora` 分支 |
 
-### 6.4 rpm（Fedora / openSUSE，参考）
+### 6.4 rpm（Fedora / openSUSE，COPR 发布 + 本地快出）
 
 rpm 里放的是**预编译二进制**：打包装包机要 Qt6 开发包（编译用），
 **安装的人不需要**，`dnf` / `zypper` 会自动拉 Qt6 运行时。
@@ -325,7 +326,7 @@ mc26-one/
 │   ├── make-source.sh          生成 dist/mc263-<版本>.tar.gz（PKGBUILD 的 source）
 │   ├── make-repo-arch.sh       用 repo-add 生成自建 pacman 仓库
 │   ├── mc263.metainfo.xml      AppStream 元数据（GNOME Software / KDE Discover）
-│   ├── mc263.spec              rpm spec（参考，主线在 fedora 分支）
+│   ├── mc263.spec              rpm spec（参考；完整线与 COPR 在 fedora 分支）
 │   ├── build-rpm.sh            make → rpmbuild → dist/*.rpm + 独立 ELF + SHA256SUMS
 │   ├── mc263.desktop           应用菜单项（Exec=mc263-qt）
 │   └── mc263.svg               图标

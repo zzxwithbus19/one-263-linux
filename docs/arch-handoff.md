@@ -47,7 +47,7 @@ packaging/                  打包相关（见下文）
 | `packaging/make-source.sh` | 生成 `dist/mc263-<版本>.tar.gz`（PKGBUILD 的 `source`） | 主线 |
 | `packaging/make-repo-arch.sh` | `repo-add` 生成静态 pacman 仓库 | 主线 |
 | `packaging/mc263.metainfo.xml` | AppStream 元数据（GNOME Software / KDE Discover） | 主线 |
-| `packaging/build-rpm.sh`、`mc263.spec` | rpm（预编译二进制） | 参考，完整版在 `fedora` 分支 |
+| `packaging/build-rpm.sh`、`mc263.spec` | rpm（预编译二进制） | 在 `fedora` 分支维护，发版走 COPR（排队慢，急用就本地出） |
 | `packaging/mc263.desktop` / `mc263.svg` | 桌面项与图标 | 直接复用 |
 
 ---
@@ -201,7 +201,8 @@ bsdtar -tf dist/arch/repo/mc263.db.tar.zst              # 期望有 mc263-26.3-1
 3. **gh-pages 当源**：把 `dist/arch/repo/` 推到 `gh-pages`，用户加一节 `[mc263]` 就能
    `pacman -S mc263`（不需要账号、不需要审核，替换 AUR 的位置）。
 4. **签名**：`repo-add --sign` + 公钥分发，把 `SigLevel` 提到 `Required`。
-5. **README**：保持"Arch 主线、rpm 折叠到参考"的结构；`fedora` 分支内容不要回流 main。
+5. **README**：保持"Arch 主线、rpm 在 `fedora` 分支 + COPR 发布"的结构；COPR 排队慢，
+   Arch 这边别等它，`fedora` 分支内容也不要回流 main。
 
 ---
 
