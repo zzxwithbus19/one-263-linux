@@ -7,7 +7,7 @@ Qt6 Widgets 原生界面（无 Electron、无内嵌浏览器、无 moc），启�
 Wayland / XWayland，KDE Plasma 6 这类只给 Wayland 的桌面也能原生运行。
 
 ```
-mc263-qt                 ← 唯一可执行文件（约 400 KB）
+mc263-qt                 ← 唯一可执行文件（约 530 KB）
 minecraft/               ← 游戏目录（首次运行自动建，可在设置里改）
 .mc263/
 ├── config.json          版本 / 内存 / Java / 镜像 / 组件（改完即存）
@@ -26,8 +26,9 @@ minecraft/               ← 游戏目录（首次运行自动建，可在设置
 curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh | sh
 ```
 
+- **Arch（有 `pacman`）**：下载 `.pkg.tar.zst` → `sudo pacman -U`，Qt6 / python / curl 从官方源补
 - **有 `dnf` / `zypper`**：下载预编译 rpm → 先装 `qt6-qtbase`、`qt6-qtwayland`、`python3` → 再 `sudo dnf install ./mc263-*.rpm`
-- **没有（Arch、Debian…）**：自动退回**独立 ELF**，装到 `~/.local/bin/mc263-qt`（root 则 `/usr/local/bin`）
+- **都没有**：自动退回**独立 ELF**，装到 `~/.local/bin/mc263-qt`（root 则 `/usr/local/bin`）
 - 完整性：优先用 GitHub 给每个 asset 自动附的 `sha256:` digest 校验，拿不到再退回 `SHA256SUMS`
 - 签名：发布里带 `mc263-signing-key.asc` 就先 `rpmkeys --import`；未签名时按 Fedora 45 的规则自动降级（见 [第 7 节](#7-fedora-45--rpm-61-的签名要求)）
 - 资产名不固定也没关系：脚本走 GitHub API 按规则挑（`*.rpm` / `mc263-qt*`），所以 release 里叫什么都能装上
@@ -37,8 +38,9 @@ curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/ins
 ```sh
 sh install.sh --elf          # 只装独立 ELF，不碰包管理器
 sh install.sh --rpm          # 只装 rpm
+sh install.sh --pacman       # 只装 Arch 的 .pkg.tar.zst（sudo pacman -U）
 sh install.sh --tag pre非生产  # 装指定 tag（pre-release 也支持）
-sh install.sh --uninstall    # 卸载（rpm 与 ELF 都会处理）
+sh install.sh --uninstall    # 卸载（rpm / pacman 包 / ELF 都会处理）
 ```
 
 > 注意：`releases/latest` 只指向**非 pre-release**。仓库里只有 pre-release 时，
@@ -48,6 +50,7 @@ sh install.sh --uninstall    # 卸载（rpm 与 ELF 都会处理）
 
 | 发行版 / 方式 | 文件 | 做法 |
 |---|---|---|
+| Arch Linux | `mc263-26.3-1-x86_64.pkg.tar.zst` | `sudo pacman -U ./mc263-26.3-1-x86_64.pkg.tar.zst` |
 | Fedora / openSUSE | `mc263-26.3-1.<arch>.rpm` | `sudo dnf install ./mc263-26.3-1.x86_64.rpm` |
 | 其它 / 免安装 | `mc263-qt-26.3-<arch>` | `chmod +x` 后直接跑 |
 
@@ -63,6 +66,8 @@ sudo apt install qt6-base-dev python3            # Debian / Ubuntu
 ## 2. 从源码构建
 
 ```bash
+# Arch
+sudo pacman -S --needed base-devel qt6-base qt6-wayland python curl
 # Fedora
 sudo dnf install gcc-c++ make qt6-qtbase-devel qt6-qtwayland python3
 # openSUSE Tumbleweed
@@ -155,7 +160,74 @@ HiDPI、分数缩放、多屏交给 Qt6；打开链接走 `xdg-open` / portal。
 
 ---
 
-## 6. 打包成 rpm
+## 6. 打包与分发
+
+> **主线是 Arch**：`packaging/PKGBUILD` + `packaging/build-arch.sh`，从源码构建，
+> **不走 AUR**——不需要账号、不需要审核，全部命令行完成。交接说明见
+> [docs/arch-handoff.md](docs/arch-handoff.md)。
+> rpm 线（`build-rpm.sh` / 完整 spec / COPR）在 `fedora` 分支维护，
+> `main` 上只留 `packaging/mc263.spec` 作参考。
+
+### 6.1 Arch Linux：pacman 包（主线）
+
+构建依赖自己装（脚本只构建，**不联网、不替你 `pacman -S`**）：
+
+```bash
+sudo pacman -S --needed base-devel qt6-base qt6-wayland python curl
+bash packaging/build-arch.sh          # 等价：make arch
+#   → dist/arch/mc263-26.3-1-x86_64.pkg.tar.zst
+#   流程：make-source.sh 出 dist/mc263-26.3.tar.gz → 算 sha256 填进 PKGBUILD 副本
+#         → makepkg（跑 make check）→ 校验包内容 → offscreen 冒烟（退出码 124 为正常）
+```
+
+装到本机：
+
+```bash
+sudo pacman -U dist/arch/mc263-26.3-1-x86_64.pkg.tar.zst
+```
+
+常用开关（都是 `build-arch.sh` 的参数）：
+
+| 开关 | 作用 |
+|------|------|
+| `MC263_REL=2` | 内容改了但版本号不变：`pkgrel` +1，否则 pacman 认为还是同一个包 |
+| `--repo` | 顺带用 `repo-add` 建本地 pacman 仓库（见 6.2） |
+| `--nodeps` | 跳过依赖检查（缺包但想先出包时用；依旧不联网） |
+| `--no-check` | 跳过 `make check`（不推荐） |
+| `--clean` | 先清空 `dist/arch/` |
+
+包内容：`/usr/bin/mc263-qt`、desktop 文件、hicolor 图标、`LICENSE`、AppStream 元数据；
+`depends=('qt6-base' 'qt6-wayland' 'python' 'curl')`，`optdepends` 里是 `java-runtime`。
+依赖由 pacman 从官方源解析，包本身不静态链接 Qt。
+
+### 6.2 自建 pacman 仓库（没有 AUR 账号也能装）
+
+```bash
+bash packaging/build-arch.sh --repo   # 或：bash packaging/make-repo-arch.sh
+#   → dist/arch/repo/：mc263.db.tar.zst、mc263.files.tar.zst、*.pkg.tar.zst、mc263.conf
+```
+
+把 `dist/arch/repo/` 整个目录丢到任意静态托管（GitHub Pages / nginx / 对象存储），
+用户把 `mc263.conf` 里那三行追加到 `/etc/pacman.conf`（`Server` 换成实际 URL，
+`$arch` 保留），然后：
+
+```bash
+sudo pacman -Sy && sudo pacman -S mc263
+```
+
+仓库不签名，所以用 `SigLevel = Optional TrustAll`；要签名就 `repo-add --sign`，
+把公钥一起发，用户 `pacman-key --add` 后再调高 `SigLevel`。
+
+### 6.3 Release 该传哪些
+
+| 资产 | 用途 |
+|------|------|
+| `mc263-26.3-1-x86_64.pkg.tar.zst` | Arch 主发布物，`install.sh` 自动挑这个 |
+| `mc263-qt-26.3-x86_64` | 独立 ELF，免安装；无菜单项、需自备 Qt6 与 python3 |
+| `SHA256SUMS`（可选） | 离线核对；GitHub 自带 digest 时可不传 |
+| `mc263-26.3-1.fc45.x86_64.rpm`（可选） | Fedora / openSUSE，见 `fedora` 分支 |
+
+### 6.4 rpm（Fedora / openSUSE，参考）
 
 rpm 里放的是**预编译二进制**：打包装包机要 Qt6 开发包（编译用），
 **安装的人不需要**，`dnf` / `zypper` 会自动拉 Qt6 运行时。
@@ -181,7 +253,7 @@ bash packaging/build-rpm.sh
 Qt 的库依赖由 rpm 从 ELF 的 `DT_NEEDED` 自动生成；另加 `Requires: python3`，
 `Recommends: qt6-qtwayland`（openSUSE 分支写 `libQt6WaylandClient6`）。
 
-**Release 该传哪些**
+**rpm 线的 Release 资产**
 
 | 资产 | 用途 |
 |------|------|
@@ -232,9 +304,9 @@ bash packaging/build-rpm.sh --sign <密钥指纹或邮箱>
 
 ```
 mc26-one/
-├── Makefile                    all / check / rpm / info / clean
+├── Makefile                    all / check / rpm / arch / info / clean
 ├── README.md
-├── install.sh                  一键安装（rpm / ELF 自动选择 + 摘要校验）
+├── install.sh                  一键安装（pacman / rpm / ELF 自动选择 + 摘要校验）
 ├── include/
 │   ├── launcher_core.hpp       布局 / 配置 / Java 探测 / 兼容性 / 启动 / meminfo / 版本隔离 / 加载器 / 目录扫描
 │   ├── download.hpp            curl 下载后端 + SHA1 + 并发池（兼容性网络检查用）
@@ -245,8 +317,15 @@ mc26-one/
 │   └── fs_util.hpp             目录 / 文件 / 环境变量小工具
 ├── src/
 │   └── mc263_qt.cpp            Qt6 主窗口（6 页，内嵌 python3 下载脚本）
+├── docs/
+│   └── arch-handoff.md         Arch 打包与分发交接（无 AUR 的命令行路线）
 ├── packaging/
-│   ├── mc263.spec              rpm spec（装预编译二进制）
+│   ├── PKGBUILD                Arch 包模板（主线，源码构建）
+│   ├── build-arch.sh           源码包 → PKGBUILD → makepkg → 校验 → 冒烟
+│   ├── make-source.sh          生成 dist/mc263-<版本>.tar.gz（PKGBUILD 的 source）
+│   ├── make-repo-arch.sh       用 repo-add 生成自建 pacman 仓库
+│   ├── mc263.metainfo.xml      AppStream 元数据（GNOME Software / KDE Discover）
+│   ├── mc263.spec              rpm spec（参考，主线在 fedora 分支）
 │   ├── build-rpm.sh            make → rpmbuild → dist/*.rpm + 独立 ELF + SHA256SUMS
 │   ├── mc263.desktop           应用菜单项（Exec=mc263-qt）
 │   └── mc263.svg               图标

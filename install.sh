@@ -1,7 +1,7 @@
 #!/bin/sh
 # mc263 一键安装
-#   默认：有 dnf/zypper 就装预编译 rpm（自动解 Qt6 运行时依赖），否则装独立 ELF
-#   --elf / --rpm / --uninstall / --tag <tag>
+#   默认按包管理器走：dnf/zypper 装 rpm，pacman 装 .pkg.tar.zst，都没有才装独立 ELF
+#   --elf / --rpm / --pacman / --uninstall / --tag <tag>
 #
 #   curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --tag pre非生产     # 装某个 pre-release
@@ -11,6 +11,7 @@ set -eu
 
 REPO="${MC263_REPO:-zzxwithbus19/one-263-linux}"
 VER="${MC263_VER:-26.3}"
+PKGREL="${MC263_PKGREL:-1}"
 TAG="${MC263_TAG:-}"
 ARCH="$(uname -m)"
 API="https://api.github.com/repos/$REPO"
@@ -25,6 +26,7 @@ BIN_DIR="${MC263_BIN_DIR:-$DEFAULT_BIN}"
 
 if command -v dnf >/dev/null 2>&1; then PM=dnf
 elif command -v zypper >/dev/null 2>&1; then PM=zypper
+elif command -v pacman >/dev/null 2>&1; then PM=pacman
 else PM=""; fi
 
 MODE="auto"
@@ -32,10 +34,11 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --elf) MODE=elf ;;
         --rpm) MODE=rpm ;;
+        --pacman) MODE=pacman ;;
         -u|--uninstall) MODE=uninstall ;;
         --tag) TAG="${2:-}"; shift ;;
-        -h|--help) sed -n '2,10p' "$0" 2>/dev/null || true; exit 0 ;;
-        *) die "未知参数: $1（可用 --elf / --rpm / --tag <tag> / --uninstall）" ;;
+        -h|--help) sed -n '2,9p' "$0" 2>/dev/null || true; exit 0 ;;
+        *) die "未知参数: $1（可用 --elf / --rpm / --pacman / --tag <tag> / --uninstall）" ;;
     esac
     shift
 done
@@ -52,8 +55,11 @@ fetch() {  # fetch URL DEST
 
 uninstall() {
     step "卸载 mc263"
-    if [ -n "$PM" ] && rpm -q mc263 >/dev/null 2>&1; then
+    if command -v rpm >/dev/null 2>&1 && rpm -q mc263 >/dev/null 2>&1; then
         if [ "$PM" = dnf ]; then $SUDO dnf remove -y mc263; else $SUDO zypper --non-interactive remove mc263; fi
+    fi
+    if command -v pacman >/dev/null 2>&1 && pacman -Q mc263 >/dev/null 2>&1; then
+        $SUDO pacman -R --noconfirm mc263
     fi
     for p in "$HOME/.local/bin/mc263-qt" "/usr/local/bin/mc263-qt"; do
         [ -e "$p" ] && { $SUDO rm -f "$p"; echo "  已删除 $p"; }
@@ -71,7 +77,11 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 
 if [ "$MODE" = uninstall ]; then uninstall; exit 0; fi
 if [ "$MODE" = auto ]; then
-    if [ -n "$PM" ]; then MODE=rpm; else MODE=elf; fi
+    case "$PM" in
+        pacman) MODE=pacman ;;
+        "")     MODE=elf ;;
+        *)      MODE=rpm ;;
+    esac
 fi
 
 # ---------- 通过 GitHub API 找资产：支持 prerelease、任意资产名 ----------
@@ -92,9 +102,9 @@ resolve_via_api() {
         # 仓库只有 prerelease 时 /releases/latest 会 404，退回列表取最新一个
         fetch "$API/releases?per_page=1" "$TMP/rel.json" 2>/dev/null || return 1
     fi
-    out="$(python3 - "$TMP/rel.json" "$MODE" "$VER" "$ARCH" <<'PY'
+    out="$(python3 - "$TMP/rel.json" "$MODE" "$VER" "$ARCH" "$PKGREL" <<'PY'
 import json, sys
-path, mode, ver, arch = sys.argv[1:5]
+path, mode, ver, arch, pkgrel = sys.argv[1:6]
 try:
     data = json.load(open(path))
 except Exception:
@@ -111,6 +121,14 @@ def pick():
         return next((a for a in assets
                      if a.get("name", "").startswith("mc263-")
                      and a.get("name", "").endswith(".rpm")), None)
+    if mode == "pacman":
+        exact = f"mc263-{ver}-{pkgrel}-{arch}.pkg.tar.zst"
+        hit = next((a for a in assets if a.get("name") == exact), None)
+        if hit:
+            return hit
+        return next((a for a in assets
+                     if a.get("name", "").startswith("mc263-")
+                     and a.get("name", "").endswith(".pkg.tar.zst")), None)
     exact = f"mc263-qt-{ver}-{arch}"
     hit = next((a for a in assets if a.get("name") == exact), None)
     if hit:
@@ -138,7 +156,9 @@ if resolve_via_api; then
     ASSET="$RES_NAME"
     [ -n "$TAG" ] && echo "  使用 tag: $TAG"
 else
-    if [ "$MODE" = rpm ]; then ASSET="mc263-$VER-1.$ARCH.rpm"; else ASSET="mc263-qt-$VER-$ARCH"; fi
+    if [ "$MODE" = rpm ]; then ASSET="mc263-$VER-1.$ARCH.rpm"
+    elif [ "$MODE" = pacman ]; then ASSET="mc263-$VER-$PKGREL-$ARCH.pkg.tar.zst"
+    else ASSET="mc263-qt-$VER-$ARCH"; fi
     URL="$BASE/$ASSET"
     warn "拿不到 release 元数据（API 不可达或没有 python3），按固定文件名下载：$ASSET"
 fi
@@ -202,6 +222,14 @@ install_dnf() {
 
 if [ "$MODE" = elf ]; then
     install_elf
+elif [ "$MODE" = pacman ]; then
+    step "安装 mc263（pacman 本地包，依赖从官方源补）"
+    if ! $SUDO pacman -U --noconfirm "$TMP/$ASSET"; then
+        warn "pacman -U 失败。若是缺依赖，先自己装："
+        echo "  sudo pacman -S --needed qt6-base qt6-wayland python curl" >&2
+        echo "然后重跑：sh install.sh --pacman" >&2
+        die "安装失败：$ASSET"
+    fi
 else
     if fetch "$BASE/mc263-signing-key.asc" "$TMP/key.asc" 2>/dev/null; then
         step "导入签名公钥"
