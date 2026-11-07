@@ -34,7 +34,6 @@ minecraft/               ← 游戏目录（首次运行自动建，可在设置
 依赖自己装——构建脚本只构建，**不联网、不替你 `pacman -S`**：
 
 ```bash
-# 运行依赖：Qt6 运行时 + 内嵌下载器要的 python3 + 下载后端系统 curl（不链 libcurl）
 sudo pacman -S --needed qt6-base qt6-wayland python curl
 
 bash packaging/build-arch.sh                      # 等价：make arch
@@ -101,8 +100,7 @@ C++23 + Qt6 Widgets 手写界面，**不用 CMake、不用 moc**，`make` 一条
 |---|---|---|
 | 编译 | `base-devel`、`qt6-base` | g++ / make 与 `pkg-config(Qt6Widgets)` |
 | 运行 | `qt6-wayland` | Wayland 原生；不装会回退 XWayland |
-| 运行 | `python` | 内嵌的 `mc263_downloader.py`（多线程 + SHA1 + 断点续传）要靠 `python3` 跑 |
-| 运行 | `curl` | 所有下载都 `fork/exec` 系统 `curl`，故意不链 libcurl；缺了下载功能不可用 |
+| 运行 | `python`、`curl` | 内嵌下载器与下载后端（都 exec 系统命令，不链 libcurl） |
 | 可选 | `java-runtime` | 不装也能用启动器自己下的 Mojang 运行时 |
 
 ```bash
