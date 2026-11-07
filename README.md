@@ -20,68 +20,116 @@ minecraft/               ← 游戏目录（首次运行自动建，可在设置
 
 ## 1. 安装
 
-### 一条命令
+主线是 **Arch Linux**。AUR 上没有（也不打算上），装法全部走命令行：
+
+| 方式 | 适合 | 怎么做 |
+|---|---|---|
+| 本机出包再装 | 最快，版本自己控 | `bash packaging/build-arch.sh` → `sudo pacman -U dist/arch/mc263-*.pkg.tar.zst` |
+| 自建 pacman 源 | 多机、要能 `pacman -Sy` 升级 | 见 [第 6 节](#6-打包与分发) |
+| `install.sh` | Release 里已有 `.pkg.tar.zst` | `sh install.sh`（Arch 自动走 pacman） |
+| 独立 ELF | 免安装 / 非 Arch | 下 `mc263-qt-26.3-x86_64`，`chmod +x` 直接跑 |
+
+### 1.1 Arch Linux（推荐）
+
+依赖自己装——构建脚本只构建，**不联网、不替你 `pacman -S`**：
+
+```bash
+sudo pacman -S --needed base-devel qt6-base qt6-wayland python curl
+
+bash packaging/build-arch.sh                      # 等价：make arch
+sudo pacman -U dist/arch/mc263-26.3-1-x86_64.pkg.tar.zst
+```
+
+装完有：`/usr/bin/mc263-qt`、应用菜单项、图标、`LICENSE`、AppStream 元数据。
+卸载 `sudo pacman -R mc263`；用户数据在 `~/.local/share/mc263/`，卸载不会删。
+
+配过自建源（[第 6 节](#6-打包与分发)）的话更省事：
+
+```bash
+sudo pacman -Sy && sudo pacman -S mc263
+```
+
+### 1.2 一条命令（从 Release 装）
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh | sh
 ```
 
-- **Arch（有 `pacman`）**：下载 `.pkg.tar.zst` → `sudo pacman -U`，Qt6 / python / curl 从官方源补
-- **有 `dnf` / `zypper`**：下载预编译 rpm → 先装 `qt6-qtbase`、`qt6-qtwayland`、`python3` → 再 `sudo dnf install ./mc263-*.rpm`
-- **都没有**：自动退回**独立 ELF**，装到 `~/.local/bin/mc263-qt`（root 则 `/usr/local/bin`）
-- 完整性：优先用 GitHub 给每个 asset 自动附的 `sha256:` digest 校验，拿不到再退回 `SHA256SUMS`
-- 签名：发布里带 `mc263-signing-key.asc` 就先 `rpmkeys --import`；未签名时按 Fedora 45 的规则自动降级（见 [第 7 节](#7-fedora-45--rpm-61-的签名要求)）
-- 资产名不固定也没关系：脚本走 GitHub API 按规则挑（`*.rpm` / `mc263-qt*`），所以 release 里叫什么都能装上
+- **Arch（有 `pacman`）**：下 `.pkg.tar.zst` → `sudo pacman -U`，Qt6 / python / curl 从官方源补
+- **Fedora / openSUSE（`dnf` / `zypper`）**：下 rpm → `sudo dnf install`（COPR 版排队慢，见 [第 6 节](#6-打包与分发)）
+- **都没有**：退回**独立 ELF**，装到 `~/.local/bin/mc263-qt`（root 则 `/usr/local/bin`）
+- 完整性：优先用 GitHub 给每个 asset 附的 `sha256:` digest，拿不到再退回 `SHA256SUMS`
+- 资产名不固定也没关系：脚本走 GitHub API 按规则挑，release 里叫什么都能装上
 
-强制走某条路 / 装指定 tag（含 pre-release）/ 卸载：
+强制走某条路 / 指定 tag（含 pre-release）/ 卸载：
 
 ```sh
-sh install.sh --elf          # 只装独立 ELF，不碰包管理器
-sh install.sh --rpm          # 只装 rpm
 sh install.sh --pacman       # 只装 Arch 的 .pkg.tar.zst（sudo pacman -U）
+sh install.sh --rpm          # 只装 rpm
+sh install.sh --elf          # 只装独立 ELF，不碰包管理器
 sh install.sh --tag pre非生产  # 装指定 tag（pre-release 也支持）
-sh install.sh --uninstall    # 卸载（rpm / pacman 包 / ELF 都会处理）
+sh install.sh --uninstall    # 卸载（pacman 包 / rpm / ELF 都会处理）
 ```
 
-> 注意：`releases/latest` 只指向**非 pre-release**。仓库里只有 pre-release 时，
-> 脚本会自动退回 `/releases` 列表取最新一个；也可以用 `--tag` 明确指定。
+> `releases/latest` 只指向**非 pre-release**；仓库里只有 pre-release 时脚本会自动退回
+> `/releases` 列表取最新一个，也可以用 `--tag` 明确指定。
+> 想马上装但 release 里还没 `.pkg.tar.zst`：走 1.1，本机出包当场就能装。
 
-### 手动下载
+### 1.3 免安装 ELF
 
-| 发行版 / 方式 | 文件 | 做法 |
-|---|---|---|
-| Arch Linux | `mc263-26.3-1-x86_64.pkg.tar.zst` | `sudo pacman -U ./mc263-26.3-1-x86_64.pkg.tar.zst` |
-| Fedora / openSUSE | `mc263-26.3-1.<arch>.rpm` | `sudo dnf install ./mc263-26.3-1.x86_64.rpm` |
-| 其它 / 免安装 | `mc263-qt-26.3-<arch>` | `chmod +x` 后直接跑 |
+`mc263-qt-26.3-x86_64` 是单独一个二进制，没有菜单项和图标，运行时自己备：
 
-独立 ELF 没有菜单项和图标，需要自己准备 Qt6 运行时与 python3：
-
-```sh
-sudo pacman -S qt6-base qt6-wayland python       # Arch
-sudo apt install qt6-base-dev python3            # Debian / Ubuntu
+```bash
+sudo pacman -S --needed qt6-base qt6-wayland python curl   # Arch
+chmod +x mc263-qt-26.3-x86_64
+./mc263-qt-26.3-x86_64
 ```
+
+> 自备了 Qt6 运行时的其它发行版也能这么跑；但它们目前**不提供打包支持**，
+> Fedora / openSUSE 请用 rpm。
 
 ---
 
 ## 2. 从源码构建
 
+C++23 + Qt6 Widgets 手写界面，**不用 CMake、不用 moc**，`make` 一条命令的活。
+
+### 2.1 依赖
+
+| 用途 | Arch 包 | 说明 |
+|---|---|---|
+| 编译 | `base-devel`、`qt6-base` | g++ / make 与 `pkg-config(Qt6Widgets)` |
+| 运行 | `qt6-wayland` | Wayland 原生；不装会回退 XWayland |
+| 运行 | `python`、`curl` | 内嵌下载器与下载后端（都 exec 系统命令） |
+| 可选 | `java-runtime` | 不装也能用启动器自己下的 Mojang 运行时 |
+
 ```bash
-# Arch
 sudo pacman -S --needed base-devel qt6-base qt6-wayland python curl
-# Fedora
-sudo dnf install gcc-c++ make qt6-qtbase-devel qt6-qtwayland python3
-# openSUSE Tumbleweed
-sudo zypper install gcc-c++ make qt6-qtbase-devel libQt6WaylandClient6 python3
-
-make                 # 编译 build/mc263-qt
-make check           # 57 项核心单测 + 7 项内嵌下载器自测（全部离线）
-make info            # 编译器 / Qt6 / 产物路径
-
-build/mc263-qt                            # 运行
-QT_QPA_PLATFORM=offscreen build/mc263-qt  # 无图形环境冒烟测试
 ```
 
-编译只链接 `Qt6Widgets / Qt6Gui / Qt6Core`，不需要 moc。
+Fedora / openSUSE 对应：`qt6-qtbase-devel`、`qt6-qtwayland` / `libQt6WaylandClient6`、`python3`、`curl`。
+
+### 2.2 编译、测试、运行
+
+```bash
+make                 # → build/mc263-qt
+make check           # 57 项核心单测 + 7 项内嵌下载器自测（全部离线，不联网）
+make info            # 编译器 / Qt6 / 产物路径
+
+build/mc263-qt                                        # 运行
+QT_QPA_PLATFORM=offscreen timeout 3 build/mc263-qt    # 无图形环境冒烟；退出码 124 = 正常跑着
+```
+
+编译只链接 `Qt6Widgets / Qt6Gui / Qt6Core`：单个 ELF，没有 moc 产物、没有外部资源文件。
+
+### 2.3 出包
+
+```bash
+make arch            # pacman 包：源码包 → sha256 → makepkg（见第 6 节）
+make rpm             # rpm：调 packaging/build-rpm.sh（rpm 主线在 fedora 分支）
+```
+
+改代码前先翻 [docs/arch-handoff.md](docs/arch-handoff.md)：分层、约定、验收清单都在里面。
 
 ---
 
