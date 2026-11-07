@@ -23,9 +23,16 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  gcc-c++
 BuildRequires:  make
-BuildRequires:  pkgconfig(Qt6Widgets)
 BuildRequires:  python3
+%if 0%{?fedora}
+BuildRequires:  pkgconfig(Qt6Widgets)
 BuildRequires:  qt6-qtbase-devel
+%endif
+%if 0%{?suse_version}
+# openSUSE 的 Qt6 开发包叫 qt6-base-devel，且没有 pkgconfig(Qt6Widgets) 这个 provide
+BuildRequires:  qt6-base-devel
+BuildRequires:  cmake(Qt6Widgets)
+%endif
 
 # 运行时依赖：Qt6 库由 rpm 从 ELF 的 DT_NEEDED 自动生成，这里写死也行
 Requires:       python3
