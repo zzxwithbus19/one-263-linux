@@ -11,6 +11,7 @@
 # 配置不进系统目录：/usr/bin 不可写时启动器自动改用 ~/.local/share/mc263/。
 
 %{!?mc263_version: %global mc263_version 26.3}
+%{!?mc263_release: %global mc263_release 1}
 %{!?payload_arch: %global payload_arch x86_64}
 # 不生成 -debuginfo 子包：省掉 debugedit / eu-strip 依赖
 %global debug_package %{nil}
@@ -18,7 +19,7 @@
 
 Name:           mc263
 Version:        %{mc263_version}
-Release:        1%{?dist}
+Release:        %{mc263_release}%{?dist}
 Summary:        Minecraft 26.3 launcher (Qt6 native, Wayland-ready)
 License:        GPL-3.0-or-later
 URL:            https://github.com/zzxwithbus19/one-263-linux

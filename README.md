@@ -154,6 +154,12 @@ bash packaging/build-rpm.sh
 
 不需要 root 跑 rpmbuild（`_topdir` 固定到项目内 `build/rpmbuild`）。
 
+两个常用开关：
+
+- `--release 2`：版本号不变但内容改了，必须 +1，否则 `dnf` 认为是同一个包、不会升级
+- `--sign <指纹>`：加 GPG 签名（RPM 6 内置，不需要 `rpm-sign`）；不加就是未签名包，
+  Fedora 45 装的时候要走 `--nogpgcheck`（`install.sh` 会自动处理）
+
 包内容：`/usr/bin/mc263-qt`、desktop 文件、hicolor 图标、`LICENSE`。
 Qt 的库依赖由 rpm 从 ELF 的 `DT_NEEDED` 自动生成；另加 `Requires: python3`，
 `Recommends: qt6-qtwayland`（openSUSE 分支写 `libQt6WaylandClient6`）。

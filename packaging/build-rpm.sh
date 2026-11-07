@@ -9,6 +9,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="26.3"
+RELEASE="1"
 OUT="$ROOT/dist"
 TOP="$ROOT/build/rpmbuild"
 ARCH="$(uname -m)"
@@ -16,10 +17,11 @@ SIGN_KEY=""
 
 usage() {
     cat <<'EOF'
-用法: build-rpm.sh [--out DIR] [--version VER] [--arch ARCH] [--topdir DIR] [--sign KEYID]
+用法: build-rpm.sh [--out DIR] [--version VER] [--release N] [--arch ARCH] [--topdir DIR] [--sign KEYID]
 
   --out DIR        rpm 输出目录（默认 dist/）
   --version VER    包版本号（默认 26.3）
+  --release N      包 release 号（默认 1；同版本改了内容要 +1，否则 dnf 视为已装）
   --arch ARCH      目标架构（默认 uname -m）
   --topdir DIR     rpmbuild 工作目录（默认 build/rpmbuild）
   --sign KEYID     用 GPG 密钥给 rpm 签名。RPM 6 内置 OpenPGP 签名（%_openpgp_sign gpg），
@@ -35,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --out) OUT="$2"; shift 2;;
         --version) VERSION="$2"; shift 2;;
+        --release) RELEASE="$2"; shift 2;;
         --arch) ARCH="$2"; shift 2;;
         --topdir) TOP="$2"; shift 2;;
         --sign) SIGN_KEY="$2"; shift 2;;
@@ -68,6 +71,7 @@ fi
 rpmbuild -bb "$ROOT/packaging/mc263.spec" \
     --define "_topdir $TOP" \
     --define "mc263_version $VERSION" \
+    --define "mc263_release $RELEASE" \
     --define "payload_arch $ARCH" \
     "${SIGN_DEFS[@]}"
 
@@ -75,8 +79,8 @@ mkdir -p "$OUT"
 find "$TOP/RPMS" -name '*.rpm' -exec cp -v {} "$OUT"/ \;
 
 # 额外产出一份不带发行版后缀的别名，方便 install.sh 用固定 URL 下载
-STABLE="$OUT/mc263-$VERSION-1.$ARCH.rpm"
-SRC_RPM="$(find "$TOP/RPMS" -name "mc263-$VERSION-1.*.rpm" | head -1)"
+STABLE="$OUT/mc263-$VERSION-$RELEASE.$ARCH.rpm"
+SRC_RPM="$(find "$TOP/RPMS" -name "mc263-$VERSION-$RELEASE.*.rpm" | head -1)"
 [[ -n "$SRC_RPM" ]] && cp -f "$SRC_RPM" "$STABLE"
 
 # 独立 ELF：给没有 dnf/zypper 或不想走包管理的人（install.sh --elf）
