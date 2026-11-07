@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Minecraft 26.3
+GenericName=Minecraft
+Comment=一键启动 Minecraft 26.3（内置 Java 运行时）
+Exec=/opt/mc263/mc263
+Icon=mc263
+Terminal=false
+Categories=Game;
+Keywords=minecraft;mc;sandbox;
+StartupNotify=true

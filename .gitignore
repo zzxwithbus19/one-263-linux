@@ -1,0 +1,9 @@
+# 本地工具/桌面产生的目录：只忽略，不删除
+.Trash-0/
+.workbuddy/
+*.log
+*.rpm
+
+# 构建产物（mc263-linux 内部还有更细的 .gitignore）
+build/
+dist/

@@ -1,5 +1,15 @@
 # 单文件 Minecraft 26.2 启动器（纯净原版）
 
+> **Linux / Minecraft 26.3 / C++23 版本请看 [`mc263-linux/`](mc263-linux/README.md)**
+> 该目录用 C++23 重写了 `build_262.py`（构建器 + 自解压启动器），目标产物是 Linux 单文件 ELF：
+> 内置 Linux JRE、库、`-natives-linux` 的 `.so`、assets 与 mods，双击即玩；
+> 也可打成 `.rpm`（`bash packaging/build-rpm.sh --payload <单文件>`），安装后从应用菜单/命令一键启动。
+> 另含 `mc263-fetch`（从官方 CDN 自动下载 26.3 的 jar / 库 / assets / Java 25 运行时，SHA1 校验 + 并发缓存）
+> 与 `make gui` 的 winetricks 风格图形化配置页（组件勾选 → 下载 → 构建 → 打 rpm，含 zenity 回退）。
+> 编译 `make`、自测 `make check`（42 项，含离线 mock CDN），面向 Fedora 43+ / openSUSE Tumbleweed。
+>
+> 下方内容仍是原 Windows 26.2 版（`build_262.py`）的说明，保留作历史参考。
+
 将 Minecraft 26.2（1.21.x）打包成一个**零依赖的 .exe 文件**——内置 Java 25 运行时、所有库和资源文件，扔到任何 Windows x64 电脑上直接运行。
 
 ## 成品效果

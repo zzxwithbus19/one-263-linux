@@ -1,0 +1,12 @@
+# 构建产物与运行期数据（工具链源码需提交）
+build/
+dist/
+*.rpm
+_data/
+*.log
+*.tmp-*
+# 默认输出目录（全部限制在项目沙箱内，绝不含游戏版权素材）
+gamefiles/
+.mc263/
+runtime-data/
+.cache/
