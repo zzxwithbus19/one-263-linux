@@ -11,6 +11,7 @@
 // 显式 QT_QPA_PLATFORM=... 或 -platform ... 始终优先；「关于」页会显示当前实际后端。
 #include "launcher_core.hpp"
 #include "modrinth.hpp"
+#include "wayland_blur.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -1043,6 +1044,20 @@ private:
     }
 
     // 玻璃外观：无边框 + 透明底色；模糊本身由合成器做，客户端只负责「透」
+    void updateGlassHint() {
+        if (!glassHint_) return;
+        if (!glass_ || !mc263::blur::available()) {
+            glassHint_->setText("玻璃外观已关闭。开启后窗口变无边框 + 半透明，模糊由合成器提供。");
+            return;
+        }
+        glassHint_->setText(
+            mc263::blur::active()
+                ? "合成器已接管背景模糊（ext-background-effect-v1）：这时候磨砂强度调低到 20 左右，"
+                  "能透出糊掉的壁纸，最接近 Aero。"
+                : "当前 Wayland 会话没有提供背景模糊（合成器太旧或不支持 ext-background-effect-v1）："
+                  "只能靠磨砂强度自己做砂面。");
+    }
+
     void applyGlass(bool on, bool persist = false) {
         glass_ = on;
         setWindowFlag(Qt::FramelessWindowHint, on);
@@ -1053,6 +1068,13 @@ private:
         if (auto* sb = statusBar()) sb->setVisible(!on);
         qApp->setStyleSheet(buildStyleSheet(themeFor(darkUi_, on), chevronPath_, on));
         if (isVisible()) show();
+        mc263::blur::apply(this, on);
+        QTimer::singleShot(400, this, [this] { updateGlassHint(); });
+        if (qEnvironmentVariableIsSet("MC263_BLUR_DEBUG"))
+            QTimer::singleShot(1200, this, [] {
+                fprintf(stderr, "[blur] wayland=%d active=%d\n",
+                        int(mc263::blur::available()), int(mc263::blur::active()));
+            });
         if (persist) { cfg_.glass = on; saveConfigQuietly(); }
     }
 
@@ -1084,6 +1106,8 @@ protected:
             if (ev->type() == QEvent::MouseMove) {
                 const auto* me = static_cast<QMouseEvent*>(ev);
                 shell_->setCursor(cursorForEdges(edgesAt(me->position())));
+            } else if (ev->type() == QEvent::Resize || ev->type() == QEvent::Show) {
+                if (glass_) mc263::blur::apply(this, true);
             } else if (ev->type() == QEvent::MouseButtonPress) {
                 const auto* me = static_cast<QMouseEvent*>(ev);
                 const Qt::Edges e = edgesAt(me->position());
@@ -1793,12 +1817,10 @@ public:
             cfg_.glassFrost = v;
             saveConfigQuietly();
         });
-        auto* glassHint = new QLabel(
-            "需要合成器配合才有模糊；桌面上没有模糊能力时，只是半透明（可读性会下降）。"
-            "改完立即生效，窗口会重新显示一次。", w);
-        glassHint->setObjectName("muted");
-        glassHint->setWordWrap(true);
-        aform->addRow(glassHint);
+        glassHint_ = new QLabel(w);
+        glassHint_->setObjectName("muted");
+        glassHint_->setWordWrap(true);
+        aform->addRow(glassHint_);
         v->addWidget(abox);
         connect(glassCheck_, &QCheckBox::toggled, this, [this](bool on) {
             if (frostSlider_) frostSlider_->setEnabled(on);
@@ -2430,6 +2452,7 @@ public:
     QCheckBox* glassCheck_ = nullptr;
     QSlider* frostSlider_ = nullptr;
     QLabel* frostLabel_ = nullptr;
+    QLabel* glassHint_ = nullptr;
     QListWidget* nav_ = nullptr;
     QStackedWidget* stack_ = nullptr;
     QStackedWidget* rootStack_ = nullptr;

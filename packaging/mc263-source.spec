@@ -24,6 +24,8 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  gcc-c++
 BuildRequires:  make
 BuildRequires:  python3
+# 背景模糊走 ext-background-effect-v1，需要 wayland-client；缺了会编译成无模糊版本
+BuildRequires:  pkgconfig(wayland-client)
 %if 0%{?fedora}
 BuildRequires:  pkgconfig(Qt6Widgets)
 BuildRequires:  qt6-qtbase-devel
