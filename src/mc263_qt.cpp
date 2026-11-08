@@ -553,7 +553,7 @@ QStatusBar::item { border: none; }
     if (glass) qss += QStringLiteral(R"QSS(
 /* 玻璃模式：窗口无边框且透明，圆角和底色由 #shell 自己画，模糊由合成器垫在下面 */
 QMainWindow, QStackedWidget, QDialog { background: transparent; }
-QWidget#shell { background: @window@; border: 1px solid @border@; border-radius: 14px; }
+QWidget#shell { background: transparent; }
 QWidget#titleBar { background: transparent; border-bottom: 1px solid @border@; }
 QListWidget#nav {
     background: rgba(255, 255, 255, 0.20); border: 1px solid @border@;
@@ -686,6 +686,100 @@ protected:
 private:
     core::MemInfo mem_;
     int planned_ = 0;
+};
+
+// 磨砂玻璃底板：奶白底 + 细颗粒 + 顶部微光。
+// 真·背景模糊只能由合成器做（niri 26.04+ 的 ext-background-effect / KWin 的 blur），
+// 但"磨砂"这件事可以在客户端自己画：颗粒纹理 + 半透明奶白 + 上亮下暗的sheen，
+// 就算桌面完全不支持模糊，也不会是那种一眼假的纯透明玻璃。
+class GlassShell : public QWidget {
+public:
+    explicit GlassShell(QWidget* parent = nullptr) : QWidget(parent) {
+        setAttribute(Qt::WA_StyledBackground, false);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+    }
+
+    void setGlass(bool on, bool dark) {
+        on_ = on;
+        dark_ = dark;
+        update();
+    }
+
+    // 磨砂强度 0..100：同时控制奶白底厚度与颗粒密度。
+    // 0   = 几乎纯透明（适合合成器已经做了模糊的桌面）
+    // 100 = 厚奶白砂面（桌面没有模糊时也能看出是磨砂而不是清玻璃）
+    void setFrost(int percent) {
+        frost_ = qBound(0, percent, 100);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        if (!on_) return;  // 非玻璃模式交给 QMainWindow 的底色
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        const qreal rad = 14.0;
+        QPainterPath path;
+        path.addRoundedRect(r, rad, rad);
+        p.setClipPath(path);
+
+        // 1) 奶白底：磨砂的"雾面"靠它，强度由滑块控制
+        const qreal milk = (dark_ ? 0.26 : 0.20) + (dark_ ? 0.60 : 0.62) * frost_ / 100.0;
+        QColor base = dark_ ? QColor(28, 30, 35) : QColor(250, 251, 254);
+        base.setAlphaF(milk);
+        p.fillPath(path, base);
+
+        // 2) sheen：上亮下暗，模仿玻璃反光
+        QLinearGradient g(r.topLeft(), r.bottomLeft());
+        g.setColorAt(0.0, QColor(255, 255, 255, dark_ ? 30 : 90));
+        g.setColorAt(0.45, QColor(255, 255, 255, 0));
+        g.setColorAt(1.0, QColor(0, 0, 0, dark_ ? 45 : 12));
+        p.fillPath(path, g);
+
+        // 3) 磨砂颗粒：64×64 噪点平铺，密度约 2/3 像素
+        if (noise_.isNull()) noise_ = makeNoiseTile();
+        p.setOpacity(dark_ ? 0.10 + 0.30 * frost_ / 100.0 : 0.08 + 0.34 * frost_ / 100.0);
+        p.drawTiledPixmap(rect(), noise_);
+        p.setOpacity(1.0);
+
+        // 4) 边框 + 内侧高光
+        p.setClipping(false);
+        p.setPen(QPen(dark_ ? QColor(255, 255, 255, 38) : QColor(255, 255, 255, 200), 1));
+        p.drawPath(path);
+        p.setPen(QPen(dark_ ? QColor(0, 0, 0, 60) : QColor(15, 23, 42, 28), 1));
+        p.drawRoundedRect(r.adjusted(1, 1, -1, -1), rad - 1, rad - 1);
+    }
+
+private:
+    static QPixmap makeNoiseTile() {
+        const int s = 64;
+        QPixmap pm(s, s);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        quint32 seed = 0x9e3779b9u;
+        for (int y = 0; y < s; ++y) {
+            for (int x = 0; x < s; ++x) {
+                seed = seed * 1664525u + 1013904223u;
+                const int k = int((seed >> 16) & 0xFF);
+                if (k < 100) {  // 亮点
+                    p.setPen(QColor(255, 255, 255, 18 + (k & 31)));
+                    p.drawPoint(x, y);
+                } else if (k < 190) {  // 暗点
+                    p.setPen(QColor(0, 0, 0, 10 + ((k * 7) & 23)));
+                    p.drawPoint(x, y);
+                }
+            }
+        }
+        p.end();
+        return pm;
+    }
+
+    QPixmap noise_;
+    bool on_ = false;
+    bool dark_ = false;
+    int frost_ = 60;
 };
 
 // 无边框窗口的自绘标题栏：拖动交给 startSystemMove（Wayland 下由合成器接管），双击最大化。
@@ -927,9 +1021,8 @@ private:
         rootStack_->addWidget(mainPage_);
         rootStack_->addWidget(gatePage_);
         // 外层壳：玻璃模式下这一层画圆角半透明底，模糊由合成器垫在它下面
-        shell_ = new QWidget(this);
+        shell_ = new GlassShell(this);
         shell_->setObjectName("shell");
-        shell_->setAttribute(Qt::WA_StyledBackground, true);
         shell_->setMouseTracking(true);
         shell_->installEventFilter(this);
         auto* sv = new QVBoxLayout(shell_);
@@ -954,6 +1047,7 @@ private:
         glass_ = on;
         setWindowFlag(Qt::FramelessWindowHint, on);
         setAttribute(Qt::WA_TranslucentBackground, on);
+        if (shell_) shell_->setGlass(on, darkUi_);
         if (titleBar_) titleBar_->setVisible(on);
         if (shellFooter_) shellFooter_->setVisible(on);
         if (auto* sb = statusBar()) sb->setVisible(!on);
@@ -1680,6 +1774,25 @@ public:
             "  KDE Plasma 6：在窗口规则里给它开模糊（或代码侧申请）\n"
             "  Hyprland / swayfx：默认就模糊半透明窗口");
         aform->addRow(glassCheck_);
+        auto* frostRow = new QHBoxLayout();
+        frostSlider_ = new QSlider(Qt::Horizontal, w);
+        frostSlider_->setRange(0, 100);
+        frostSlider_->setValue(cfg_.glassFrost);
+        frostSlider_->setToolTip(
+            "0 = 几乎纯透明，适合合成器已经做了背景模糊（niri 窗口规则 / KWin blur）\n"
+            "60 = 默认的磨砂雾面\n"
+            "100 = 厚奶白砂面，背后几乎看不清");
+        frostLabel_ = new QLabel(QString::number(cfg_.glassFrost) + "%", w);
+        frostLabel_->setMinimumWidth(40);
+        frostRow->addWidget(frostSlider_, 1);
+        frostRow->addWidget(frostLabel_);
+        aform->addRow("磨砂强度", frostRow);
+        connect(frostSlider_, &QSlider::valueChanged, this, [this](int v) {
+            frostLabel_->setText(QString::number(v) + "%");
+            if (shell_) shell_->setFrost(v);
+            cfg_.glassFrost = v;
+            saveConfigQuietly();
+        });
         auto* glassHint = new QLabel(
             "需要合成器配合才有模糊；桌面上没有模糊能力时，只是半透明（可读性会下降）。"
             "改完立即生效，窗口会重新显示一次。", w);
@@ -1687,8 +1800,11 @@ public:
         glassHint->setWordWrap(true);
         aform->addRow(glassHint);
         v->addWidget(abox);
-        connect(glassCheck_, &QCheckBox::toggled, this,
-                [this](bool on) { applyGlass(on, true); });
+        connect(glassCheck_, &QCheckBox::toggled, this, [this](bool on) {
+            if (frostSlider_) frostSlider_->setEnabled(on);
+            applyGlass(on, true);
+        });
+        frostSlider_->setEnabled(glassCheck_->isChecked());
 
         v->addWidget(aboutSection());
         v->addStretch(1);
@@ -2001,6 +2117,11 @@ public:
         xmsCheck_->setChecked(cfg_.minMemoryMb > 0);
         xmsSpin_->setValue(cfg_.minMemoryMb > 0 ? cfg_.minMemoryMb : 512);
         if (glassCheck_) glassCheck_->setChecked(cfg_.glass);
+        if (frostSlider_) {
+            frostSlider_->setValue(cfg_.glassFrost);
+            frostLabel_->setText(QString::number(cfg_.glassFrost) + "%");
+        }
+        if (shell_) shell_->setFrost(cfg_.glassFrost);
         updateMemPreview();
     }
     void collectUiToConfig() {
@@ -2019,6 +2140,7 @@ public:
             cfg_.components.push_back("runtime");
         if (langCombo_) cfg_.language = langCombo_->currentData().toString().toStdString();
         if (glassCheck_) cfg_.glass = glassCheck_->isChecked();
+        if (frostSlider_) cfg_.glassFrost = frostSlider_->value();
         cfg_.extraJvmArgs.clear();
         QString extra = extraArgsEdit_->text().trimmed();
         if (!extra.isEmpty()) for (const QString& s : extra.split(' ', Qt::SkipEmptyParts))
@@ -2302,10 +2424,12 @@ public:
     QString buffer_;
     QProcess* downloadProc_ = nullptr;
     QProcess* launchProc_ = nullptr;
-    QWidget* shell_ = nullptr;
+    GlassShell* shell_ = nullptr;
     TitleBar* titleBar_ = nullptr;
     QLabel* shellFooter_ = nullptr;
     QCheckBox* glassCheck_ = nullptr;
+    QSlider* frostSlider_ = nullptr;
+    QLabel* frostLabel_ = nullptr;
     QListWidget* nav_ = nullptr;
     QStackedWidget* stack_ = nullptr;
     QStackedWidget* rootStack_ = nullptr;
