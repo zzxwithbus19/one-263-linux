@@ -1,19 +1,2 @@
-# 本地工具/桌面产生的目录：只忽略，不删除
-.Trash-0/
 .workbuddy/
-*.log
-*.rpm
-*.tmp-*
-
-# 构建产物与运行期数据（工具已全部上移到仓库根，都限制在项目沙箱内）
-build/
-dist/
-_data/
-gamefiles/
-.mc263/
-runtime-data/
-.cache/
-minecraft/
-__pycache__/
-*.pyc
 mc26-one.code-workspace
