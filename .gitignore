@@ -16,3 +16,4 @@ runtime-data/
 minecraft/
 __pycache__/
 *.pyc
+mc26-one.code-workspace/
