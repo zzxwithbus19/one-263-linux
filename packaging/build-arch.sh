@@ -14,7 +14,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VER="${MC263_VER:-26.3}"
-REL="${MC263_REL:-1}"
+# pkgrel 以 PKGBUILD 为唯一来源，MC263_REL 可临时覆盖
+REL="${MC263_REL:-$(sed -n 's/^pkgrel=//p' "$(dirname "$0")/PKGBUILD" | head -1)}"
+REL="${REL:-1}"
 OUT="${MC263_ARCH_OUT:-$ROOT/dist/arch}"
 
 step() { printf '\033[1m==> %s\033[0m\n' "$*"; }

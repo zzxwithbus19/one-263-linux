@@ -90,7 +90,7 @@ bash packaging/build-arch.sh          # 等价：make arch
 5. 把包里的 `usr/bin/mc263-qt` 解到临时目录，`QT_QPA_PLATFORM=offscreen timeout 3` 冒烟
    （退出码 124 = 正常跑着）
 
-产物：`dist/arch/mc263-26.3-1-x86_64.pkg.tar.zst`（约 260 KB）。
+产物：`dist/arch/mc263-26.3-<pkgrel>-x86_64.pkg.tar.zst`（约 260 KB）。
 
 ### 4.3 常用开关
 
@@ -105,7 +105,7 @@ bash packaging/build-arch.sh          # 等价：make arch
 ### 4.4 本地安装 / 冒烟
 
 ```bash
-sudo pacman -U dist/arch/mc263-26.3-1-x86_64.pkg.tar.zst
+sudo pacman -U dist/arch/mc263-26.3-*.pkg.tar.zst
 pacman -Ql mc263                 # 期望五个文件都在
 mc263-qt                         # 启动
 QT_QPA_PLATFORM=offscreen timeout 3 mc263-qt; echo $?   # 期望 124
@@ -168,20 +168,20 @@ make && make check                     # 期望：57 项 + 7 项全过
 
 # 2) 出包（不联网、不装依赖）
 bash packaging/build-arch.sh --nodeps
-#   期望：dist/arch/mc263-26.3-1-x86_64.pkg.tar.zst + 冒烟 OK（124）
+#   期望：dist/arch/mc263-26.3-*.pkg.tar.zst + 冒烟 OK（124）
 
 # 3) 包内容
-pacman -Qlp dist/arch/mc263-26.3-1-x86_64.pkg.tar.zst
+pacman -Qlp dist/arch/mc263-26.3-*.pkg.tar.zst
 #   期望：/usr/bin/mc263-qt、applications/mc263.desktop、
 #         icons/hicolor/scalable/apps/mc263.svg、licenses/mc263/LICENSE、metainfo/mc263.metainfo.xml
 
 # 4) 安装 + 冒烟（要有 root）
-sudo pacman -U dist/arch/mc263-26.3-1-x86_64.pkg.tar.zst
+sudo pacman -U dist/arch/mc263-26.3-*.pkg.tar.zst
 QT_QPA_PLATFORM=offscreen timeout 3 mc263-qt; echo $?   # 期望 124
 
 # 5) 仓库（可选）
 bash packaging/build-arch.sh --repo
-bsdtar -tf dist/arch/repo/mc263.db.tar.zst              # 期望有 mc263-26.3-1/desc
+bsdtar -tf dist/arch/repo/mc263.db.tar.zst              # 期望有 mc263-26.3-<pkgrel>/desc
 
 # 6) 功能抽查（图形界面里点一遍）
 #    - 启动页：Java 不达标会被闸门拦住
