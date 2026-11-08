@@ -67,6 +67,18 @@ if [ -n "$missing" ]; then
     [ "$NODEPS" = 0 ] && warn "（不想现在装，可加 --nodeps 先出包，但该包在这些依赖齐之前装不上）"
 fi
 
+# ---------- 3.5 打包者信息（.PKGINFO 的 packager 字段）----------
+if [ -z "${PACKAGER:-}" ]; then
+    _name="$(git -C "$ROOT" config user.name 2>/dev/null || true)"
+    _mail="$(git -C "$ROOT" config user.email 2>/dev/null || true)"
+    if [ -n "$_name" ] && [ -n "$_mail" ]; then
+        export PACKAGER="$_name <$_mail>"
+    else
+        export PACKAGER="mc263 <mc263@users.noreply.github.com>"
+    fi
+fi
+echo "  packager = $PACKAGER"
+
 # ---------- 4. makepkg ----------
 step "makepkg（只构建，不安装、不联网拉依赖）"
 args=(-f --noconfirm)
