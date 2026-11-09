@@ -93,6 +93,17 @@ uninstall() {
     echo "已卸载。用户数据（~/.local/share/mc263）保留，需要时手动删。"
 }
 
+# 装包要用 root：先把 sudo 凭证拿到手，别等下载完 20 MB 才在最后一步弹密码
+# （curl … | sh 时标准输入是脚本本身，中途再问密码很容易卡住或失败）
+ask_for_root() {
+    [ -n "$SUDO" ] || return 0            # 已经是 root
+    step "需要管理员权限，先确认 sudo"
+    if ! $SUDO -v; then
+        die "拿不到 sudo 权限。可以改成用 root 跑：
+  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sudo sh -s -- --$MODE"
+    fi
+}
+
 guide_copr() {
     step "检测到 Fedora 系（${DISTRO_IDS:-unknown}）"
     cat <<EOF
@@ -143,6 +154,10 @@ if [ "$MODE" = auto ]; then
             ;;
     esac
 fi
+
+case "$MODE" in
+    rpm|pacman) ask_for_root ;;
+esac
 
 # ---------- 通过 GitHub API 找资产：支持 prerelease、任意资产名 ----------
 RES_URL=""
@@ -224,7 +239,14 @@ else
 fi
 
 step "下载 $ASSET"
-fetch "$URL" "$TMP/$ASSET" || die "下载失败：$URL"
+if ! fetch "$URL" "$TMP/$ASSET"; then
+    if [ "$MODE" = pacman ]; then
+        die "下载失败：$URL
+Arch 的 .pkg.tar.zst 由 main 分支的打包脚本产出，release 里不一定有。确认后重试，或改走：
+  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh"
+    fi
+    die "下载失败：$URL"
+fi
 
 # ---------- 校验：优先 GitHub digest，其次 SHA256SUMS ----------
 step "校验下载完整性"
