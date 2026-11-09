@@ -40,6 +40,18 @@ sh install.sh --tag pre非生产  # 装指定 tag（pre-release 也支持）
 sh install.sh --uninstall    # 卸载（rpm 与 ELF 都会处理）
 ```
 
+脚本先读 `/etc/os-release` 判断发行版再决定路线（不看 `uname`——Fedora 上可以装
+CachyOS 内核，`uname -r` 里带 cachyos，但系统还是 Fedora）：
+
+| 系统 | 默认动作 |
+|---|---|
+| Fedora 系 | **不下载，直接打印 COPR 的两条命令**（未签名 rpm 在 45+ 会被拒装） |
+| Arch 系（含 CachyOS / Manjaro） | `pacman -U` 装 `.pkg.tar.zst` |
+| SUSE 系 | `zypper` 装 rpm |
+| 其它 | 退回独立 ELF |
+
+想强制走某条路就加参数（例如 Fedora 上 `--rpm` 会真的下 rpm，`--elf` 装免安装版）。
+
 **签名失败就失败**：脚本不会自动 `--nogpgcheck`、不会退化到 `rpm --nosignature`、
 也不会改 `/etc/rpm`，只把可选命令打出来让你自己决定（见第 6.4 节）。
 
