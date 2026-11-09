@@ -3,7 +3,7 @@
 #   按发行版分流（不是按"装了哪个包管理器"）：
 #     Arch 系  → pacman 装 .pkg.tar.zst
 #     Fedora 系 → 不装，打印 COPR 的 dnf 命令后退出（COPR 用 Fedora 密钥签名）
-#     SUSE 系  → zypper 装 rpm
+#     SUSE 系  → 不装，打印 COPR 的 zypper addrepo 命令后退出（同一个项目有 Tumbleweed chroot）
 #     其它     → 独立 ELF
 #   --elf / --rpm / --pacman / --uninstall / --tag <tag> 可强制指定路线
 #
@@ -105,8 +105,31 @@ ask_for_root() {
 }
 
 guide_copr() {
-    step "检测到 Fedora 系（${DISTRO_IDS:-unknown}）"
-    cat <<EOF
+    case "$DISTRO_FAMILY" in
+        suse)
+            step "检测到 openSUSE 系（${DISTRO_IDS:-unknown}）"
+            cat <<EOF
+
+openSUSE 的包在同一个 COPR 项目里（opensuse-tumbleweed chroot，用 Fedora 密钥签名）：
+
+  sudo zypper addrepo https://download.copr.fedorainfracloud.org/results/cxc123/one-263-linux/opensuse-tumbleweed-x86_64/ one-263-linux
+  sudo zypper --gpg-auto-import-keys refresh one-263-linux
+  sudo zypper install mc263
+
+这条路不需要本脚本，也不需要 --allow-unsigned-rpm。
+
+只想拿一个二进制、不碰包管理器：
+
+  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --elf
+
+非要装未签名的 rpm：
+
+  sh install.sh --rpm
+EOF
+            ;;
+        *)
+            step "检测到 Fedora 系（${DISTRO_IDS:-unknown}）"
+            cat <<EOF
 
 Fedora 的包走 COPR 源，用 Fedora 官方密钥签名，dnf 会自动验签：
 
@@ -123,6 +146,8 @@ Fedora 的包走 COPR 源，用 Fedora 官方密钥签名，dnf 会自动验签�
 
   sh install.sh --rpm
 EOF
+            ;;
+    esac
 }
 
 case "$ARCH" in
@@ -146,8 +171,8 @@ if [ "$MODE" = auto ]; then
             exit 0
             ;;
         suse)
-            command -v zypper >/dev/null 2>&1 || die "检测到 SUSE 系（$DISTRO_IDS），但没找到 zypper"
-            MODE=rpm
+            guide_copr
+            exit 0
             ;;
         *)
             if [ -n "$PM" ]; then MODE=rpm; else MODE=elf; fi
