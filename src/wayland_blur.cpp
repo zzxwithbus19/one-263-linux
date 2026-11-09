@@ -6,6 +6,7 @@
 #include <QWindow>
 
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 
@@ -77,6 +78,8 @@ void pushRegion() {
         wl_region_add(region, 0, 0, w, h);
     }
 
+    if (qEnvironmentVariableIsSet("MC263_BLUR_DEBUG"))
+        fprintf(stderr, "[blur] region %dx%d (win %dx%d)\n", w, h, s.width, s.height);
     ext_background_effect_surface_v1_set_blur_region(s.effect, region);
     wl_region_destroy(region);
     // 不自己 wl_surface_commit：那会把 Qt 的待提交状态提前推出去，

@@ -716,15 +716,10 @@ protected:
         path.addRoundedRect(r, rad, rad);
         p.setClipPath(path);
 
+        // 只铺底色，不描边：任何一圈线在无边框窗口上都会像"残留的窗口边框"
         QColor base = dark_ ? QColor(26, 28, 33) : QColor(250, 251, 254);
-        base.setAlphaF(dark_ ? 0.62 : 0.58);
+        base.setAlphaF(dark_ ? 0.50 : 0.42);
         p.fillPath(path, base);
-
-        p.setClipping(false);
-        p.setPen(QPen(dark_ ? QColor(255, 255, 255, 38) : QColor(255, 255, 255, 190), 1));
-        p.drawPath(path);
-        p.setPen(QPen(dark_ ? QColor(0, 0, 0, 60) : QColor(15, 23, 42, 26), 1));
-        p.drawRoundedRect(r.adjusted(1, 1, -1, -1), rad - 1, rad - 1);
     }
 
 private:
