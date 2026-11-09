@@ -45,9 +45,9 @@ CachyOS 内核，`uname -r` 里带 cachyos，但系统还是 Fedora）：
 
 | 系统 | 默认动作 |
 |---|---|
-| Fedora 系 | **不下载，直接打印 COPR 的两条命令**（未签名 rpm 在 45+ 会被拒装） |
+| Fedora 系 | **不下载，直接打印 COPR 的 `dnf copr enable` 两条命令**（未签名 rpm 在 45+ 会被拒装） |
 | Arch 系（含 CachyOS / Manjaro） | `pacman -U` 装 `.pkg.tar.zst` |
-| SUSE 系 | `zypper` 装 rpm |
+| openSUSE 系 | **不下载，直接打印 COPR 的 `zypper addrepo` 三条命令**（同一个项目有 Tumbleweed chroot） |
 | 其它 | 退回独立 ELF |
 
 想强制走某条路就加参数（例如 Fedora 上 `--rpm` 会真的下 rpm，`--elf` 装免安装版）。
@@ -63,7 +63,17 @@ sudo dnf install mc263
 ```
 
 `dnf` 会自动导入并验证签名，不需要 `--nogpgcheck`。
-项目里同时有 `fedora-45` 与 `opensuse-tumbleweed` 两个 chroot。
+
+**openSUSE Tumbleweed** 用同一个项目的 `opensuse-tumbleweed` chroot：
+
+```sh
+sudo zypper addrepo https://download.copr.fedorainfracloud.org/results/cxc123/one-263-linux/opensuse-tumbleweed-x86_64/ one-263-linux
+sudo zypper --gpg-auto-import-keys refresh one-263-linux
+sudo zypper install mc263
+```
+
+`--gpg-auto-import-keys` 只是首次导入 COPR 的签名公钥，不是跳过校验；
+之后升级走 `zypper dup` 或 `zypper update mc263` 都行。
 
 ### 1.3 手动下载 / 免安装 ELF
 
