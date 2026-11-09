@@ -704,17 +704,24 @@ public:
     }
 
 protected:
-    // 只画一层薄奶白 + 描边：模糊完全交给合成器（ext-background-effect-v1）。
-    // 这里不做任何"假砂面"（颗粒 / sheen），合成器不支持模糊时就是干净半透明。
+    // 只铺一层薄奶白，模糊完全交给合成器（ext-background-effect-v1）。
+    //
+    // 关键：本类设了 WA_NoSystemBackground（Qt 不会自动擦背景），所以每帧必须自己
+    // 把整块清成透明。否则圆角路径外面那四块永远保持着上一帧/上一个尺寸的像素，
+    // 缩放或重绘之后就变成"擦不掉的边框拖影"（要其它窗口盖一下才消失）。
     void paintEvent(QPaintEvent*) override {
-        if (!on_) return;  // 非玻璃模式交给 QMainWindow 的底色
         QPainter p(this);
+        p.setCompositionMode(QPainter::CompositionMode_Source);
+        p.fillRect(rect(), Qt::transparent);
+        p.setCompositionMode(QPainter::CompositionMode_SourceOver);
+
+        if (!on_) return;  // 非玻璃模式：清成透明即可，底色由 QMainWindow 画
+
         p.setRenderHint(QPainter::Antialiasing, true);
         const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
         const qreal rad = 14.0;
         QPainterPath path;
         path.addRoundedRect(r, rad, rad);
-        p.setClipPath(path);
 
         // 只铺底色，不描边：任何一圈线在无边框窗口上都会像"残留的窗口边框"
         QColor base = dark_ ? QColor(26, 28, 33) : QColor(250, 251, 254);
@@ -825,11 +832,12 @@ public:
         refreshJava();
         // 冒烟/文档用：MC263_SHOT=/tmp/x.png 时把首屏抓成 PNG（无合成器时没有模糊，只有布局与 alpha）
         const QByteArray shotPath = qgetenv("MC263_SHOT");
-        if (!shotPath.isEmpty())
+        if (!shotPath.isEmpty()) {
             QTimer::singleShot(1500, this, [this, shotPath] {
                 grab().save(QString::fromLocal8Bit(shotPath));
                 qApp->quit();
             });
+        }
         statusBar()->showMessage("游戏目录 " + QString::fromStdString(layout_.gameDir.string()) +
                                  " | 配置 " + QString::fromStdString(layout_.configFile.string()) +
                                  "（改动即自动保存）");
@@ -1005,7 +1013,10 @@ private:
         glass_ = on;
         setWindowFlag(Qt::FramelessWindowHint, on);
         setAttribute(Qt::WA_TranslucentBackground, on);
-        if (shell_) shell_->setGlass(on, darkUi_);
+        if (shell_) {
+            shell_->setGlass(on, darkUi_);
+            shell_->update();  // 开关/尺寸变化后整块重画，别留上一帧的边
+        }
         if (titleBar_) titleBar_->setVisible(on);
         if (shellFooter_) shellFooter_->setVisible(on);
         if (auto* sb = statusBar()) sb->setVisible(!on);
