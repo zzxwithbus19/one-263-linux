@@ -19,6 +19,7 @@
 #include <QDialog>
 #include <QDir>
 #include <QFileDialog>
+#include <QDesktopServices>
 #include <QFileSystemWatcher>
 #include <QFont>
 #include <QFormLayout>
@@ -1212,7 +1213,7 @@ private:
         modSearchBtn_->setObjectName("primary");
         auto* srow = new QHBoxLayout();
         srow->addWidget(modSearchBtn_);
-        auto* hint = new QLabel("按下载量排序，取前 20 个；双击结果可直接安装", sbox);
+        auto* hint = new QLabel("按下载量排序，取前 20 个；双击结果可直接安装（会自动补齐 required 前置）", sbox);
         hint->setObjectName("muted");
         srow->addWidget(hint);
         srow->addStretch(1);
@@ -1338,6 +1339,8 @@ private:
                                         : QString("找到 %1 个，双击或点「安装选中 Mod」").arg(hits.size()));
     }
 
+    // ---- 安装 Mod：先解析 required 前置，确认后一起下载 ----
+    // 解析（网络）在后台线程；弹框在主线程；下载再开一个后台线程，避免界面卡住。
     void installSelectedMod() {
         const int row = modTable_->currentRow();
         if (row < 0) { modState_->setText("先在列表里选一个 Mod"); return; }
@@ -1347,40 +1350,141 @@ private:
         const std::string loader = modLoader_->currentData().toString().toStdString();
         const std::string ver = modVersionEdit_->text().trimmed().toStdString();
         modInstallBtn_->setEnabled(false);
-        modState_->setText("安装 " + title + " …");
+        modState_->setText("解析 " + title + " 的前置…");
         const auto cache = layout_.configDir / "cache";
         const auto mods = core::isolatedGameDir(layout_, cfg_) / "mods";  // 版本隔离：mods 跟着版本走
         QPointer<LauncherWindow> guard(this);
         std::thread([guard, project, loader, ver, cache, mods, title] {
             std::vector<mc263::modrinth::Version> list;
             std::string err;
-            bool ok = false;
             QString msg;
+            bool ok = false;
             if (!mc263::modrinth::versions(project, loader, ver, cache, list, err)) {
                 msg = "查版本失败：" + QString::fromStdString(err);
             } else if (list.empty()) {
                 msg = "没有适配该版本 / 加载器的文件";
-            } else if (const auto* f = mc263::modrinth::primaryFile(list.front()); !f) {
-                msg = "该版本没有可下载文件";
             } else {
-                std::error_code ec;
-                std::filesystem::create_directories(mods, ec);
-                const auto dest = mods / f->filename;
-                mc263::dl::Task t{f->url, dest, f->sha1, 0644, f->filename};
-                bool cached = false;
-                ok = mc263::dl::fetchOne(t, "", 120, true, err, cached);
-                msg = ok ? QString("%1 → %2%3")
-                               .arg(QString::fromStdString(list.front().number),
-                                    QString::fromStdString(dest.string()),
-                                    cached ? "（已存在，跳过）" : "")
-                         : "下载失败：" + QString::fromStdString(err);
+                ok = true;
             }
-            QMetaObject::invokeMethod(qApp, [guard, ok, msg, title] {
+            mc263::modrinth::DepPlan plan;
+            if (ok && mc263::modrinth::primaryFile(list.front())) {
+                mc263::modrinth::resolveDependencies(list.front(), loader, ver, cache, plan, err);
+            } else if (ok) {
+                ok = false;
+                msg = "NOFILE";
+            }
+            QMetaObject::invokeMethod(qApp, [guard, ok, msg, plan, list, title, mods, project] {
+                if (!guard) return;
+                if (!ok) {
+                    guard->modInstallBtn_->setEnabled(true);
+                    guard->modState_->setText("失败");
+                    if (msg == "NOFILE") {
+                        guard->promptManualMod(title,
+                            QString::fromStdString("https://modrinth.com/mod/" + project));
+                    } else {
+                        guard->modLog_->appendPlainText(QString("[%1] %2  %3")
+                            .arg(QTime::currentTime().toString("HH:mm:ss"), title, msg));
+                    }
+                    return;
+                }
+                guard->askInstallPlan(title, list.front(), plan, mods);
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    // 连本体都拿不到文件：按 Prism 的做法提示手动下载 + 打开模组网页
+    void promptManualMod(const QString& title, const QString& url) {
+        QMessageBox box(this);
+        box.setWindowTitle("需要手动下载");
+        box.setIcon(QMessageBox::Warning);
+        box.setText(QString("%1 没有可用的下载文件（作者可能禁止了 API 分发）。\n\n"
+                            "请到模组网页手动下载后放进 mods 目录：\n%2").arg(title, url));
+        auto* open = box.addButton("打开网页", QMessageBox::ActionRole);
+        box.addButton("关闭", QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == open)
+            QDesktopServices::openUrl(QUrl(url));
+        modState_->setText("需要手动下载");
+    }
+
+    void askInstallPlan(const QString& title, const mc263::modrinth::Version& root,
+                        const mc263::modrinth::DepPlan& plan, const std::filesystem::path& mods) {
+        QString text = QString("安装 %1（%2）到 %3")
+                           .arg(title, QString::fromStdString(root.number),
+                                QString::fromStdString(mods.string()));
+        if (!plan.resolved.empty()) {
+            text += QString("\n\n会自动补齐 %1 个前置：").arg(plan.resolved.size());
+            for (const auto& d : plan.resolved)
+                text += QString("\n  • %1 %2").arg(QString::fromStdString(d.title),
+                                                    QString::fromStdString(d.versionNumber));
+        }
+        if (!plan.manual.empty()) {
+            text += "\n\n以下前置无法自动下载，需要手动处理：";
+            for (const auto& d : plan.manual)
+                text += QString("\n  • %1（%2）\n    %3").arg(QString::fromStdString(d.title),
+                                                               QString::fromStdString(d.reason),
+                                                               QString::fromStdString(d.url));
+        }
+        QMessageBox box(this);
+        box.setWindowTitle(plan.manual.empty() ? "安装 Mod" : "确认安装 / 需要手动下载前置");
+        box.setIcon(plan.manual.empty() ? QMessageBox::Question : QMessageBox::Warning);
+        box.setText(text);
+        box.setTextFormat(Qt::PlainText);
+        auto* go = box.addButton("安装", QMessageBox::AcceptRole);
+        QAbstractButton* open = nullptr;
+        if (!plan.manual.empty()) open = box.addButton("打开网页", QMessageBox::ActionRole);
+        box.addButton("取消", QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == open && open) {
+            QDesktopServices::openUrl(QUrl(QString::fromStdString(plan.manual.front().url)));
+        } else if (box.clickedButton() != go) {
+            modInstallBtn_->setEnabled(true);
+            modState_->setText("已取消");
+            return;
+        }
+        startModDownload(title, root, plan, mods);
+    }
+
+    void startModDownload(const QString& title, const mc263::modrinth::Version& root,
+                          const mc263::modrinth::DepPlan& plan, const std::filesystem::path& mods) {
+        struct Item { mc263::modrinth::File file; };
+        std::vector<Item> items;
+        if (const auto* f = mc263::modrinth::primaryFile(root)) items.push_back({*f});
+        for (const auto& d : plan.resolved) items.push_back({d.file});
+
+        QStringList manualNotes;
+        for (const auto& d : plan.manual)
+            manualNotes << QString("需要手动下载：%1  %2").arg(QString::fromStdString(d.title),
+                                                           QString::fromStdString(d.url));
+
+        modState_->setText(QString("下载 %1 个文件…").arg(items.size()));
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, items, mods, title, manualNotes] {
+            std::error_code ec;
+            std::filesystem::create_directories(mods, ec);
+            QStringList lines;
+            int failed = 0;
+            for (const auto& it : items) {
+                std::string err;
+                bool cached = false;
+                mc263::dl::Task t{it.file.url, mods / it.file.filename, it.file.sha1, 0644,
+                                  it.file.filename};
+                if (mc263::dl::fetchOne(t, "", 180, true, err, cached)) {
+                    lines << QString("  %1%2").arg(QString::fromStdString(it.file.filename),
+                                                   cached ? "（已存在，跳过）" : "");
+                } else {
+                    ++failed;
+                    lines << QString("  %1 失败：%2").arg(QString::fromStdString(it.file.filename),
+                                                          QString::fromStdString(err));
+                }
+            }
+            lines += manualNotes;
+            QMetaObject::invokeMethod(qApp, [guard, failed, lines, title, manualNotes] {
                 if (!guard) return;
                 guard->modInstallBtn_->setEnabled(true);
-                guard->modState_->setText(ok ? "完成" : "失败");
-                guard->modLog_->appendPlainText(QString("[%1] %2  %3")
-                                                    .arg(QTime::currentTime().toString("HH:mm:ss"), title, msg));
+                guard->modState_->setText(failed == 0 ? "完成" : "部分失败");
+                guard->modLog_->appendPlainText(QString("[%1] %2\n%3")
+                    .arg(QTime::currentTime().toString("HH:mm:ss"), title, lines.join("\n")));
             }, Qt::QueuedConnection);
         }).detach();
     }
