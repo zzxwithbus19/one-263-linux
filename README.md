@@ -174,7 +174,7 @@ bash packaging/build-rpm.sh
 
 - `--release 2`：版本号不变但内容改了，必须 +1，否则 `dnf` 认为是同一个包、不会升级
 - `--sign <指纹>`：加 GPG 签名（RPM 6 内置，不需要 `rpm-sign`）；不加就是未签名包，
-  Fedora 45 装的时候要走 `--nogpgcheck`（`install.sh` 会自动处理）
+  Fedora 45 会直接拒装。`install.sh` **不会**自动绕过，它会把可选命令打给你自己决定
 
 包内容：`/usr/bin/mc263-qt`、desktop 文件、hicolor 图标、`LICENSE`。
 Qt 的库依赖由 rpm 从 ELF 的 `DT_NEEDED` 自动生成；另加 `Requires: python3`，
@@ -272,22 +272,17 @@ sudo dnf install mc263
 Fedora 45 起 RPM 默认 `%_pkgverify_level all`：未签名包不再只是 `NOKEY` 警告，
 而是 `package … does not verify` **直接拒绝**。
 
-`install.sh` 已做四级降级：
+`install.sh` 遇到这种拒绝**就停下来**，不自动降级：不跳过 GPG 检查、不退化到
+`rpm --nosignature`、也不改任何系统级配置。它会把三条路打印出来，由你决定：
 
-```
-dnf install → --nogpgcheck → --no-gpgchecks（DNF5 本地包回归 issue #2614）
-           → rpm -Uvh --replacepkgs --nosignature
-```
+| 选 | 做法 | 代价 |
+|---|---|---|
+| 1（推荐） | 用已签名的 COPR 源：`sudo dnf copr enable cxc123/one-263-linux && sudo dnf install mc263` | 需要联网，首次会拉 repodata |
+| 2 | 装免安装 ELF：`sh install.sh --elf` | 没有菜单项，要自己准备 Qt6 运行时 |
+| 3 | 你确认过来源，只对这一次放宽：`sudo dnf install --nogpgcheck ./mc263-26.3-1.x86_64.rpm` | 这一个包不验签，其它包不受影响 |
 
-手动等价：
-
-```bash
-sudo dnf install --nogpgcheck ./mc263-26.3-1.x86_64.rpm
-sudo dnf install --no-gpgchecks ./mc263-26.3-1.x86_64.rpm
-sudo rpm --define '_pkgverify_level digest' -Uvh --nosignature ./mc263-26.3-1.x86_64.rpm
-# 永久放宽本机：
-echo '%_pkgverify_level digest' | sudo tee /etc/rpm/macros.verify
-```
+> **不要**为了装一个包去改 `/etc/rpm/macros.verify`（或 `--define '%_pkgverify_level digest'`）——
+> 那等于给这台机器上**所有** rpm 永久放行，装上什么东西都不会再被拦。
 
 想自己签名（RPM 6 内置，不需要 `rpm-sign`）：
 

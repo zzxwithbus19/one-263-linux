@@ -205,19 +205,37 @@ install_elf() {
 }
 
 # ---------- rpm ----------
+# 签名校验失败就失败：不自动跳过 GPG、不退化到 rpm --nosignature、不碰 /etc/rpm。
+# 要不要冒这个险是用户自己的决定，脚本只负责把可复制的命令摆出来。
 install_dnf() {
-    rpm_path="$1"
-    step "安装 mc263"
-    if $SUDO dnf install -y "$rpm_path"; then return 0; fi
-    echo
-    echo "首次安装被拒——Fedora 45 起 RPM 默认要求签名（%_pkgverify_level all）。"
-    echo "这个包没有 GPG 签名，改用放宽校验的方式重试……"
-    $SUDO dnf install -y --nogpgcheck "$rpm_path" && return 0
-    echo "→ --nogpgcheck 无效，试 DNF5 的 --no-gpgchecks"
-    $SUDO dnf install -y --no-gpgchecks "$rpm_path" && return 0
-    echo "→ 仍不行，用 rpm 直接装（--nosignature，依赖已由 dnf 装好）"
-    $SUDO rpm -Uvh --replacepkgs --nosignature "$rpm_path" && return 0
-    return 1
+    step "安装 mc263（dnf 会校验签名）"
+    $SUDO dnf install -y "$1"
+}
+
+sig_help() {  # sig_help <保留下来的包路径>
+    keep="$1"
+    printf '\n安装未完成：dnf / zypper 拒绝了这个包（签名或校验没通过）。\n\n' >&2
+    printf 'Fedora 45 起 RPM 默认 %%_pkgverify_level all，未签名包会被直接拒绝，\n' >&2
+    printf '这是系统的安全策略。本脚本不会替你绕过，也不会改动 /etc/rpm 的全局配置。\n\n' >&2
+    printf '三条路，自己挑：\n\n' >&2
+    printf '  1) 用已签名的 COPR 源（推荐，dnf 自动验签）\n' >&2
+    printf '       sudo dnf copr enable cxc123/one-263-linux\n' >&2
+    printf '       sudo dnf install mc263\n\n' >&2
+    printf '  2) 装免安装 ELF（不经过 rpm，仍然做过 SHA256 校验）\n' >&2
+    printf '       curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | sh -s -- --elf\n\n' "$REPO" >&2
+    printf '  3) 你确认过来源、愿意自己承担风险，只对这一次放宽校验：\n' >&2
+    printf '       sudo dnf install --nogpgcheck %s\n' "$keep" >&2
+    printf '     这个包已留在上面这个路径。请不要为此修改 /etc/rpm/macros.verify。\n' >&2
+}
+
+keep_pkg() {  # keep_pkg <文件名>：失败时把包留在用户能找到的地方，临时目录会被清掉
+    keep_dir="${MC263_KEEP_DIR:-$PWD}"
+    [ -w "$keep_dir" ] || keep_dir="$HOME"
+    if cp -f "$TMP/$1" "$keep_dir/$1" 2>/dev/null; then
+        printf '%s/%s\n' "$keep_dir" "$1"
+    else
+        printf '%s\n' "$1"
+    fi
 }
 
 if [ "$MODE" = elf ]; then
@@ -233,19 +251,24 @@ elif [ "$MODE" = pacman ]; then
 else
     if fetch "$BASE/mc263-signing-key.asc" "$TMP/key.asc" 2>/dev/null; then
         step "导入签名公钥"
-        $SUDO rpmkeys --import "$TMP/key.asc" 2>/dev/null || echo "公钥导入失败，继续（按未签名包处理）"
+        $SUDO rpmkeys --import "$TMP/key.asc" 2>/dev/null ||
+            warn "公钥导入失败：签名将无法验证，安装会被拒绝（脚本不会绕过）"
     fi
 
     if [ "$PM" = dnf ]; then
         step "安装 Qt6 运行时依赖（qt6-qtbase / qt6-qtwayland / python3）"
         $SUDO dnf install -y qt6-qtbase qt6-qtwayland python3 || \
             $SUDO dnf install -y qt6-qtbase python3 || die "依赖安装失败，请检查网络或软件源"
-        install_dnf "$TMP/$ASSET" || die "安装失败。可手动执行：
-  sudo rpm --define '_pkgverify_level digest' -Uvh --nosignature '$TMP/$ASSET'
-或永久放行未签名包：echo '%_pkgverify_level digest' | sudo tee /etc/rpm/macros.verify"
+        if ! install_dnf "$TMP/$ASSET"; then
+            sig_help "$(keep_pkg "$ASSET")"
+            exit 1
+        fi
     else
         step "安装 mc263（zypper 会自动拉 Qt6 运行时）"
-        $SUDO zypper --non-interactive install --allow-unsigned-rpm "$TMP/$ASSET"
+        if ! $SUDO zypper --non-interactive install "$TMP/$ASSET"; then
+            sig_help "$(keep_pkg "$ASSET")"
+            exit 1
+        fi
     fi
 fi
 
