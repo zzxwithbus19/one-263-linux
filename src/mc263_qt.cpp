@@ -819,6 +819,11 @@ public:
         requiredJava_ = core::requiredJavaMajor(layout_, cfg_.version);
         saveDownloaderScript();
         buildUi();
+        // 缩放命中检测要看子控件范围内的鼠标移动：装应用级过滤器 + 打开子控件鼠标跟踪
+        qApp->installEventFilter(this);
+        if (shell_) {
+            for (auto* w : shell_->findChildren<QWidget*>()) w->setMouseTracking(true);
+        }
         chevronPath_ = makeChevron(QString::fromStdString(layout_.configDir.string()),
                                    QColor(themeFor(darkUi_).muted));
         qApp->setStyleSheet(buildStyleSheet(themeFor(darkUi_, cfg_.glass), chevronPath_, cfg_.glass));
@@ -1055,18 +1060,28 @@ private:
 
 protected:
     bool eventFilter(QObject* obj, QEvent* ev) override {
-        // 无边框窗口没有系统给的拉伸边框，自己盯四个边（8px）转 startSystemResize
-        if (obj == shell_ && glass_) {
+        // 尺寸/显示变化后重设模糊区域（只关心壳自己）
+        if (obj == shell_ && glass_ &&
+            (ev->type() == QEvent::Resize || ev->type() == QEvent::Show)) {
+            mc263::blur::apply(this, true);
+        }
+
+        // 无边框窗口没有系统给的拉伸边框，四边 8px 自己转 startSystemResize。
+        // 注意事件可能来自任意子控件（标题栏 / 页脚 / 表格…），必须用全局坐标换算，
+        // 只盯 shell_ 的话上下右三条边全都会被子控件挡住。
+        auto* w = qobject_cast<QWidget*>(obj);
+        const bool mine = glass_ && w && w->window() == this &&
+                          (w == shell_ || (shell_ && shell_->isAncestorOf(w)));
+        if (mine && (ev->type() == QEvent::MouseMove || ev->type() == QEvent::MouseButtonPress)) {
+            auto* me = static_cast<QMouseEvent*>(ev);
+            const QPoint local = shell_->mapFromGlobal(me->globalPosition().toPoint());
+            const Qt::Edges e = edgesAt(QPointF(local));
             if (ev->type() == QEvent::MouseMove) {
-                const auto* me = static_cast<QMouseEvent*>(ev);
-                shell_->setCursor(cursorForEdges(edgesAt(me->position())));
-            } else if (ev->type() == QEvent::Resize || ev->type() == QEvent::Show) {
-                if (glass_) mc263::blur::apply(this, true);
-            } else if (ev->type() == QEvent::MouseButtonPress) {
-                const auto* me = static_cast<QMouseEvent*>(ev);
-                const Qt::Edges e = edgesAt(me->position());
-                if (me->button() == Qt::LeftButton && e != Qt::Edges() && windowHandle())
-                    windowHandle()->startSystemResize(e);
+                if (e != Qt::Edges()) w->setCursor(cursorForEdges(e));
+                else w->unsetCursor();
+            } else if (me->button() == Qt::LeftButton && e != Qt::Edges() && windowHandle()) {
+                windowHandle()->startSystemResize(e);
+                return true;  // 吃掉，别再让标题栏同时开始拖动
             }
         }
         return QMainWindow::eventFilter(obj, ev);
