@@ -379,6 +379,11 @@ static MemColors memColors(const QPalette& pal) {
             QColor("#eceef1"), QColor("#b45309")};
 }
 
+// 窗口圆角半径（px）。默认 12：niri 这类只为客户端画焦点环/阴影的合成器不会再裁圆角，
+// 所以由客户端自己画。想改就改这里（不做图形化开关）；设 0 回到直角窗口。
+// 只在「没有系统装饰」的会话启用——有标题栏时只圆客户端区域反而更难看。
+static constexpr int kWindowRadius = 12;
+
 // ---------------------------------------------------------------- 主题 ----
 // 一套 tokens 生成 QSS；所有颜色都从 QPalette 推，这样换配色只需要换 palette：
 //   - 系统主题（Breeze / GTK / 自定义配色）→ Qt 给的默认 palette
@@ -474,7 +479,8 @@ static QString makeChevron(const QString& dir, const QColor& color) {
 static QString buildStyleSheet(const Theme& t, const QString& chevron) {
     QString qss = QStringLiteral(R"QSS(
 QWidget { color: @text@; }
-QMainWindow, QStackedWidget, QDialog { background: @window@; }
+QMainWindow, QStackedWidget, QStatusBar { background: transparent; }
+QDialog { background: @window@; }
 QToolTip { background: @card@; color: @text@; border: 1px solid @border@; padding: 4px 6px; }
 
 /* 左侧导航：无边框、选中态是浅蓝药丸 */
@@ -584,7 +590,7 @@ QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 
 /* 状态栏 */
-QStatusBar { background: @window@; color: @muted@; border-top: 1px solid @border@; }
+QStatusBar { background: transparent; color: @muted@; border-top: 1px solid @border@; }
 QStatusBar::item { border: none; }
 )QSS");
 
@@ -834,7 +840,33 @@ private:
         return p.isEmpty() ? QStringLiteral("python3") : p;
     }
 
+    // 圆角窗口：paintEvent 自己画一层圆角背景，QSS 里 QMainWindow 是透明的。
+    // 只在没有系统装饰时启用（niri 的 prefer-no-csd / QT_WAYLAND_DISABLE_WINDOWDECORATION=1）：
+    // 有 CSD/SSD 时圆角只作用在客户端区域，反而难看，保持系统外观。
+    static bool noServerDecorations() {
+        if (qEnvironmentVariableIntValue("QT_WAYLAND_DISABLE_WINDOWDECORATION") == 1) return true;
+        return core::isNiriSession();
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(Qt::NoPen);
+        p.setBrush(theme_.window.isEmpty() ? palette().color(QPalette::Window)
+                                           : QColor(theme_.window));
+        if (roundedCorners_) {
+            p.drawRoundedRect(QRectF(rect()), kWindowRadius, kWindowRadius);
+        } else {
+            p.fillRect(rect(), p.brush());
+        }
+    }
+
     void buildUi() {
+        roundedCorners_ = kWindowRadius > 0 && noServerDecorations();
+        if (roundedCorners_) {
+            setAttribute(Qt::WA_TranslucentBackground, true);
+            setAttribute(Qt::WA_NoSystemBackground, true);
+        }
         setWindowTitle("mc263 · Minecraft 26.3 启动器");
         resize(980, 680);
         auto* central = new QWidget(this);
@@ -1867,6 +1899,8 @@ private:
     void applyStyleSheet() {
         if (!qApp) return;
         const Theme th = themeFor(qApp->palette());
+        theme_ = th;
+        if (roundedCorners_) update();   // 背景是自绘的，换色后要重画
         if (qEnvironmentVariableIntValue("MC263_DEBUG_THEME") == 1)
             std::fprintf(stderr, "mc263-qt: 配色=%s 色板=%s window=%s accent=%s\n",
                          cfg_.themeSource.c_str(),
@@ -2321,6 +2355,8 @@ private:
     QFileSystemWatcher* paletteWatch_ = nullptr;
     QPalette defaultPalette_;
     core::M3Palette m3_;
+    Theme theme_;
+    bool roundedCorners_ = false;
     QTimer* autosaveTimer_ = nullptr;
     bool loadingConfig_ = false;
 };

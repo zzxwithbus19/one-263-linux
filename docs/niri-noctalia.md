@@ -66,6 +66,20 @@ surface_container_low = "#f2f3fb"
 
 ---
 
+## 4. 窗口圆角
+
+niri 默认不给客户端窗口裁圆角（只画焦点环和阴影），所以由启动器自己画：
+
+- 半径写死在源码里：`src/mc263_qt.cpp` 顶部的 `static constexpr int kWindowRadius = 12;`
+  —— **不做图形化开关**，想改就改这个常量，设 `0` 回到直角窗口。
+- 只在「没有系统装饰」的会话启用：`QT_WAYLAND_DISABLE_WINDOWDECORATION=1` 或 niri 会话。
+  有 CSD/SSD 的桌面（KDE 等）保持系统外观，不然只圆客户端区域反而难看。
+- 实现：窗口设 `WA_TranslucentBackground`，QSS 里 `QMainWindow / QStackedWidget / QStatusBar`
+  背景透明，由 `LauncherWindow::paintEvent()` 画一层圆角矩形；状态栏必须一起透明，
+  否则底部两个圆角会被它盖成直角。
+- niri 26.04 也支持在合成器侧裁圆角：`window-rule { geometry-corner-radius 12; }`。
+  两边都开时半径要一致，否则会出现双圆角；用客户端这套就不需要在 niri 里再开。
+
 ## 4. niri 窗口规则
 
 见 `packaging/niri-mc263.kdl`：把启动器设成浮动、宽度 55%、高度 72%。
