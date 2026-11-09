@@ -110,10 +110,12 @@ guide_copr() {
             step "检测到 openSUSE 系（${DISTRO_IDS:-unknown}）"
             cat <<EOF
 
-openSUSE 的包在同一个 COPR 项目里（opensuse-tumbleweed chroot，用 Fedora 密钥签名）：
+openSUSE 的包在同一个 COPR 项目里（opensuse-tumbleweed chroot）。
+rpm 由 COPR 的密钥签名，但仓库元数据（repomd.xml）没有 .asc，所以先把公钥导入：
 
+  sudo rpm --import https://download.copr.fedorainfracloud.org/results/cxc123/one-263-linux/pubkey.gpg
   sudo zypper addrepo https://download.copr.fedorainfracloud.org/results/cxc123/one-263-linux/opensuse-tumbleweed-x86_64/ one-263-linux
-  sudo zypper --gpg-auto-import-keys refresh one-263-linux
+  sudo zypper refresh one-263-linux
   sudo zypper install mc263
 
 这条路不需要本脚本，也不需要 --allow-unsigned-rpm。
