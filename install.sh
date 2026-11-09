@@ -1,7 +1,11 @@
 #!/bin/sh
 # mc263 一键安装
-#   默认按包管理器走：dnf/zypper 装 rpm，pacman 装 .pkg.tar.zst，都没有才装独立 ELF
-#   --elf / --rpm / --pacman / --uninstall / --tag <tag>
+#   按发行版分流（不是按"装了哪个包管理器"）：
+#     Arch 系  → pacman 装 .pkg.tar.zst
+#     Fedora 系 → 不装，打印 COPR 的 dnf 命令后退出（COPR 用 Fedora 密钥签名）
+#     SUSE 系  → zypper 装 rpm
+#     其它     → 独立 ELF
+#   --elf / --rpm / --pacman / --uninstall / --tag <tag> 可强制指定路线
 #
 #   curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --tag pre非生产     # 装某个 pre-release
@@ -23,6 +27,28 @@ die()  { printf '错误: %s\n' "$*" >&2; exit 1; }
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; DEFAULT_BIN="/usr/local/bin"; else SUDO="sudo"; DEFAULT_BIN="$HOME/.local/bin"; fi
 BIN_DIR="${MC263_BIN_DIR:-$DEFAULT_BIN}"
+
+# ---------- 发行版识别 ----------
+# 不能只看 uname：Fedora 上可以装 CachyOS 内核（uname -r 里带 cachyos），系统仍是
+# Fedora；Arch 上也能装 dnf，Fedora 上也能装 pacman。所以优先 /etc/os-release，
+# uname 只在没有 os-release 时兜底（而且只用来区分大类，不用来判断具体发行版）。
+os_release_file="${MC263_OS_RELEASE:-/etc/os-release}"
+distro_ids() (
+    if [ -r "$os_release_file" ]; then
+        # shellcheck disable=SC1090
+        . "$os_release_file" 2>/dev/null || true
+        printf '%s %s\n' "${ID:-}" "${ID_LIKE:-}"
+    else
+        uname -s 2>/dev/null || true
+    fi
+)
+DISTRO_IDS="$(distro_ids | tr '[:upper:]' '[:lower:]')"
+case "$DISTRO_IDS" in
+    *arch*|*manjaro*|*endeavouros*|*garuda*) DISTRO_FAMILY=arch ;;
+    *fedora*|*rhel*|*centos*|*rocky*|*alma*)  DISTRO_FAMILY=fedora ;;
+    *suse*)                                   DISTRO_FAMILY=suse ;;
+    *)                                        DISTRO_FAMILY=other ;;
+esac
 
 if command -v dnf >/dev/null 2>&1; then PM=dnf
 elif command -v zypper >/dev/null 2>&1; then PM=zypper
@@ -67,6 +93,27 @@ uninstall() {
     echo "已卸载。用户数据（~/.local/share/mc263）保留，需要时手动删。"
 }
 
+guide_copr() {
+    step "检测到 Fedora 系（${DISTRO_IDS:-unknown}）"
+    cat <<EOF
+
+Fedora 的包走 COPR 源，用 Fedora 官方密钥签名，dnf 会自动验签：
+
+  sudo dnf copr enable cxc123/one-263-linux
+  sudo dnf install mc263
+
+这条路不需要本脚本，也不需要放宽任何校验。
+
+只想拿一个二进制、不碰包管理器：
+
+  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --elf
+
+非要用未签名的 rpm（Fedora 45+ 会拒装，见 README 6.4）：
+
+  sh install.sh --rpm
+EOF
+}
+
 case "$ARCH" in
     x86_64|aarch64) ;;
     *) die "暂不支持架构 $ARCH（只有 x86_64 / aarch64）" ;;
@@ -77,10 +124,23 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 
 if [ "$MODE" = uninstall ]; then uninstall; exit 0; fi
 if [ "$MODE" = auto ]; then
-    case "$PM" in
-        pacman) MODE=pacman ;;
-        "")     MODE=elf ;;
-        *)      MODE=rpm ;;
+    case "$DISTRO_FAMILY" in
+        arch)
+            command -v pacman >/dev/null 2>&1 || die "检测到 Arch 系（$DISTRO_IDS），但没找到 pacman"
+            MODE=pacman
+            ;;
+        fedora)
+            # Fedora 45 起拒装未签名 rpm；COPR 那条线是官方密钥签名，直接导过去
+            guide_copr
+            exit 0
+            ;;
+        suse)
+            command -v zypper >/dev/null 2>&1 || die "检测到 SUSE 系（$DISTRO_IDS），但没找到 zypper"
+            MODE=rpm
+            ;;
+        *)
+            if [ -n "$PM" ]; then MODE=rpm; else MODE=elf; fi
+            ;;
     esac
 fi
 
@@ -205,19 +265,37 @@ install_elf() {
 }
 
 # ---------- rpm ----------
+# 签名校验失败就失败：不自动跳过 GPG、不退化到 rpm --nosignature、不碰 /etc/rpm。
+# 要不要冒这个险是用户自己的决定，脚本只负责把可复制的命令摆出来。
 install_dnf() {
-    rpm_path="$1"
-    step "安装 mc263"
-    if $SUDO dnf install -y "$rpm_path"; then return 0; fi
-    echo
-    echo "首次安装被拒——Fedora 45 起 RPM 默认要求签名（%_pkgverify_level all）。"
-    echo "这个包没有 GPG 签名，改用放宽校验的方式重试……"
-    $SUDO dnf install -y --nogpgcheck "$rpm_path" && return 0
-    echo "→ --nogpgcheck 无效，试 DNF5 的 --no-gpgchecks"
-    $SUDO dnf install -y --no-gpgchecks "$rpm_path" && return 0
-    echo "→ 仍不行，用 rpm 直接装（--nosignature，依赖已由 dnf 装好）"
-    $SUDO rpm -Uvh --replacepkgs --nosignature "$rpm_path" && return 0
-    return 1
+    step "安装 mc263（dnf 会校验签名）"
+    $SUDO dnf install -y "$1"
+}
+
+sig_help() {  # sig_help <保留下来的包路径>
+    keep="$1"
+    printf '\n安装未完成：dnf / zypper 拒绝了这个包（签名或校验没通过）。\n\n' >&2
+    printf 'Fedora 45 起 RPM 默认 %%_pkgverify_level all，未签名包会被直接拒绝，\n' >&2
+    printf '这是系统的安全策略。本脚本不会替你绕过，也不会改动 /etc/rpm 的全局配置。\n\n' >&2
+    printf '三条路，自己挑：\n\n' >&2
+    printf '  1) 用已签名的 COPR 源（推荐，dnf 自动验签）\n' >&2
+    printf '       sudo dnf copr enable cxc123/one-263-linux\n' >&2
+    printf '       sudo dnf install mc263\n\n' >&2
+    printf '  2) 装免安装 ELF（不经过 rpm，仍然做过 SHA256 校验）\n' >&2
+    printf '       curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | sh -s -- --elf\n\n' "$REPO" >&2
+    printf '  3) 你确认过来源、愿意自己承担风险，只对这一次放宽校验：\n' >&2
+    printf '       sudo dnf install --nogpgcheck %s\n' "$keep" >&2
+    printf '     这个包已留在上面这个路径。请不要为此修改 /etc/rpm/macros.verify。\n' >&2
+}
+
+keep_pkg() {  # keep_pkg <文件名>：失败时把包留在用户能找到的地方，临时目录会被清掉
+    keep_dir="${MC263_KEEP_DIR:-$PWD}"
+    [ -w "$keep_dir" ] || keep_dir="$HOME"
+    if cp -f "$TMP/$1" "$keep_dir/$1" 2>/dev/null; then
+        printf '%s/%s\n' "$keep_dir" "$1"
+    else
+        printf '%s\n' "$1"
+    fi
 }
 
 if [ "$MODE" = elf ]; then
@@ -233,19 +311,24 @@ elif [ "$MODE" = pacman ]; then
 else
     if fetch "$BASE/mc263-signing-key.asc" "$TMP/key.asc" 2>/dev/null; then
         step "导入签名公钥"
-        $SUDO rpmkeys --import "$TMP/key.asc" 2>/dev/null || echo "公钥导入失败，继续（按未签名包处理）"
+        $SUDO rpmkeys --import "$TMP/key.asc" 2>/dev/null ||
+            warn "公钥导入失败：签名将无法验证，安装会被拒绝（脚本不会绕过）"
     fi
 
     if [ "$PM" = dnf ]; then
         step "安装 Qt6 运行时依赖（qt6-qtbase / qt6-qtwayland / python3）"
         $SUDO dnf install -y qt6-qtbase qt6-qtwayland python3 || \
             $SUDO dnf install -y qt6-qtbase python3 || die "依赖安装失败，请检查网络或软件源"
-        install_dnf "$TMP/$ASSET" || die "安装失败。可手动执行：
-  sudo rpm --define '_pkgverify_level digest' -Uvh --nosignature '$TMP/$ASSET'
-或永久放行未签名包：echo '%_pkgverify_level digest' | sudo tee /etc/rpm/macros.verify"
+        if ! install_dnf "$TMP/$ASSET"; then
+            sig_help "$(keep_pkg "$ASSET")"
+            exit 1
+        fi
     else
         step "安装 mc263（zypper 会自动拉 Qt6 运行时）"
-        $SUDO zypper --non-interactive install --allow-unsigned-rpm "$TMP/$ASSET"
+        if ! $SUDO zypper --non-interactive install "$TMP/$ASSET"; then
+            sig_help "$(keep_pkg "$ASSET")"
+            exit 1
+        fi
     fi
 fi
 
