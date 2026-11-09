@@ -1,0 +1,18 @@
+// mc263 启动器在 niri 下的建议窗口规则（可选，程序本身不依赖它）
+//
+// 用法：把 window-rule 一段粘进 ~/.config/niri/rules.kdl 或 __custom__.kdl，
+//       然后 `niri msg action reload-config`。
+// app-id 来自 QGuiApplication::setDesktopFileName("mc263-qt")。
+//
+// 背景：niri 的 prefer-no-csd + 环境里的 QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+//       会让 Qt 窗口没有标题栏（niri 只画焦点环和阴影）：
+//         拖动窗口 = Mod + 左键     关闭窗口 = Mod+Q
+//       想恢复标题栏，就把 QT_WAYLAND_DISABLE_WINDOWDECORATION 从 niri 的
+//       environment 段里去掉（或设成 0），Qt 会自己画 CSD。
+window-rule {
+    match app-id=r"^mc263-qt$"
+    // 启动器是工具窗口：浮动、约 55% 宽、72% 高，别占满整列
+    open-floating true
+    default-column-width { proportion 0.55; }
+    default-window-height { proportion 0.72; }
+}

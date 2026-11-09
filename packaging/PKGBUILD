@@ -3,7 +3,7 @@
 # 分发路线：命令行构建，不走 AUR（不需要账号，也不需要审核）
 #   bash packaging/build-arch.sh                 # 源码包 → sha256 → makepkg
 #   bash packaging/build-arch.sh --repo          # 顺带 repo-add 建本地 pacman 仓库
-#   sudo pacman -U dist/arch/mc263-26.3-3-x86_64.pkg.tar.zst
+#   sudo pacman -U dist/arch/mc263-26.3-4-x86_64.pkg.tar.zst
 #
 # 构建依赖自己装（脚本不联网、不替你 pacman -S）：
 #   sudo pacman -S --needed base-devel qt6-base qt6-wayland python curl
@@ -13,7 +13,7 @@
 
 pkgname=mc263
 pkgver=26.3
-pkgrel=3
+pkgrel=4
 pkgdesc="Minecraft 26.3 launcher (Qt6 native, Wayland-ready)"
 arch=('x86_64')
 url="https://github.com/zzxwithbus19/one-263-linux"

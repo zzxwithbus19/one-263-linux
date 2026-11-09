@@ -19,6 +19,7 @@
 #include <QDialog>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileSystemWatcher>
 #include <QFont>
 #include <QFormLayout>
 #include <QFrame>
@@ -379,17 +380,77 @@ static MemColors memColors(const QPalette& pal) {
 }
 
 // ---------------------------------------------------------------- 主题 ----
-// 一套 tokens 生成 QSS；深浅色都从 palette 推，避免写死颜色在换主题时糊掉
+// 一套 tokens 生成 QSS；所有颜色都从 QPalette 推，这样换配色只需要换 palette：
+//   - 系统主题（Breeze / GTK / 自定义配色）→ Qt 给的默认 palette
+//   - Noctalia（Material You）→ paletteFromM3() 从 ~/.cache/nyxuri/palette.toml 造一份
 struct Theme {
     QString window, card, border, text, muted, accent, accentHover, accentSoft, input, log, hover;
 };
 
+static QString rgbaOf(const QColor& c, double alpha) {
+    return QStringLiteral("rgba(%1,%2,%3,%4)")
+        .arg(c.red()).arg(c.green()).arg(c.blue()).arg(int(alpha * 255));
+}
+
+static QColor mixColor(const QColor& a, const QColor& b, double t) {
+    return QColor::fromRgbF(a.redF() * (1 - t) + b.redF() * t,
+                            a.greenF() * (1 - t) + b.greenF() * t,
+                            a.blueF() * (1 - t) + b.blueF() * t);
+}
+
 static Theme themeFor(const QPalette& pal) {
-    if (pal.color(QPalette::Window).lightness() < 128)
-        return {"#1b1d21", "#232629", "#33373d", "#e6e8eb", "#9aa4b2", "#4f9bff",
-                "#6cb0ff", "#1e2b3f", "#1b1d21", "#17191c", "#2a2e34"};
-    return {"#f4f5f7", "#ffffff", "#e4e7ec", "#1f2328", "#6b7280", "#2563eb",
-            "#1d4ed8", "#e8f0fe", "#ffffff", "#fbfcfd", "#eef1f5"};
+    const bool dark = pal.color(QPalette::Window).lightness() < 128;
+    const QColor win = pal.color(QPalette::Window);
+    const QColor base = pal.color(QPalette::Base);
+    const QColor text = pal.color(QPalette::WindowText);
+
+    QColor muted = pal.color(QPalette::PlaceholderText);
+    if (!muted.isValid()) muted = mixColor(text, win, 0.45);
+    QColor accent = pal.color(QPalette::Accent);
+    if (!accent.isValid()) accent = pal.color(QPalette::Highlight);
+
+    const QColor border = mixColor(win, text, 0.16);
+    const QColor log = mixColor(base, win, 0.5);
+
+    return {
+        win.name(),
+        base.name(),
+        border.name(),
+        text.name(),
+        muted.name(),
+        accent.name(),
+        (dark ? accent.lighter(115) : accent.darker(112)).name(),
+        rgbaOf(accent, 0.16),
+        base.name(),
+        log.name(),
+        rgbaOf(text, 0.07),
+    };
+}
+
+// Material You 色板 → QPalette。之后 themeFor()、MemoryBar、各处内联颜色都按它走。
+// 找不到某个角色时退回 Material 的近似角色，避免整块变黑。
+static QPalette paletteFromM3(const core::M3Palette& m) {
+    auto c = [&](const char* key, const char* fallbackKey) {
+        return QColor(QString::fromStdString(m.get(key, m.get(fallbackKey))));
+    };
+    QPalette p;
+    const QColor text = c("on_surface", "on_background");
+    const QColor accent = c("primary", "on_surface");
+    p.setColor(QPalette::Window, c("background", "surface"));
+    p.setColor(QPalette::WindowText, text);
+    p.setColor(QPalette::Base, c("surface_container_lowest", "surface"));
+    p.setColor(QPalette::AlternateBase, c("surface_container", "surface"));
+    p.setColor(QPalette::Text, text);
+    p.setColor(QPalette::Button, c("surface_container", "surface"));
+    p.setColor(QPalette::ButtonText, text);
+    p.setColor(QPalette::Highlight, accent);
+    p.setColor(QPalette::HighlightedText, c("on_primary", "on_surface"));
+    p.setColor(QPalette::PlaceholderText, c("on_surface_variant", "on_surface"));
+    p.setColor(QPalette::Accent, accent);
+    p.setColor(QPalette::BrightText, c("error", "on_surface"));
+    p.setColor(QPalette::ToolTipBase, c("surface_container_high", "surface"));
+    p.setColor(QPalette::ToolTipText, text);
+    return p;
 }
 
 // QSS 里没法画三角形，就现生成一张 14x14 的尖角图给 QComboBox 用（跟随主题色）
@@ -672,13 +733,12 @@ public:
         if (!layout_.ensure(err)) {
             QMessageBox::critical(this, "路径被拒绝", QString::fromStdString(err));
         }
+        defaultPalette_ = qApp->palette();
         requiredJava_ = core::requiredJavaMajor(layout_, cfg_.version);
         saveDownloaderScript();
+        applyPalette();   // 先定调色板：buildUi 里的内联颜色会跟着它走
         buildUi();
-        const Theme th = themeFor(palette());
-        const QString chevron = makeChevron(QString::fromStdString(layout_.configDir.string()),
-                                            QColor(th.muted));
-        qApp->setStyleSheet(buildStyleSheet(th, chevron));
+        applyStyleSheet();
         QTimer::singleShot(700, this, [this] { checkGameDirs(); });
         loadingConfig_ = true;
         loadConfigToUi();
@@ -1492,6 +1552,20 @@ private:
             langCombo_->addItem(QString::fromLatin1(code), QString::fromLatin1(code));
         form->addRow("游戏语言", langCombo_);
         v->addWidget(gbox);
+
+        auto* abox = new QGroupBox("外观", w);
+        auto* aform = new QFormLayout(abox);
+        setCardTitle(abox, aform, "外观");
+        themeCombo_ = new QComboBox(w);
+        themeCombo_->addItem("自动（找到 Noctalia 色板就用）", "auto");
+        themeCombo_->addItem("跟随系统调色板", "system");
+        themeCombo_->addItem("Noctalia / Material You", "noctalia");
+        aform->addRow("配色来源", themeCombo_);
+        themeHint_ = new QLabel(w);
+        themeHint_->setWordWrap(true);
+        themeHint_->setObjectName("pageSubtitle");
+        aform->addRow("", themeHint_);
+        v->addWidget(abox);
         v->addWidget(aboutSection());
         v->addStretch(1);
         connect(memAuto_, &QCheckBox::toggled, this, [this] {
@@ -1773,6 +1847,66 @@ private:
         }
     }
 
+    // ---- 配色来源：系统调色板 / Noctalia（Material You）色板 ----
+    // niri 下没有系统级的强调色概念，Noctalia 会把壁纸算出来的 M3 色板渲染成
+    // 一份扁平 TOML（本机 ~/.cache/nyxuri/palette.toml），启动器直接读它。
+    void applyPalette() {
+        if (!qApp) return;
+        m3_ = core::findM3Palette();
+        const std::string src = cfg_.themeSource;
+        const bool useNoctalia =
+            m3_.valid() && (src == "noctalia" || (src == "auto" && !m3_.path.empty()));
+        if (useNoctalia)
+            qApp->setPalette(paletteFromM3(m3_));
+        else
+            qApp->setPalette(defaultPalette_);
+        updateThemeHint();
+        setupPaletteWatch();
+    }
+
+    void applyStyleSheet() {
+        if (!qApp) return;
+        const Theme th = themeFor(qApp->palette());
+        if (qEnvironmentVariableIntValue("MC263_DEBUG_THEME") == 1)
+            std::fprintf(stderr, "mc263-qt: 配色=%s 色板=%s window=%s accent=%s\n",
+                         cfg_.themeSource.c_str(),
+                         m3_.valid() ? m3_.path.c_str() : "(系统调色板)",
+                         th.window.toUtf8().constData(), th.accent.toUtf8().constData());
+        const QString chevron = makeChevron(QString::fromStdString(layout_.configDir.string()),
+                                            QColor(th.muted));
+        qApp->setStyleSheet(buildStyleSheet(th, chevron));
+        updateThemeHint();
+    }
+
+    void updateThemeHint() {
+        if (!themeHint_) return;
+        QString txt;
+        if (m3_.valid())
+            txt = QStringLiteral("读的是 %1（%2）")
+                      .arg(QString::fromStdString(m3_.path),
+                           m3_.dark() ? QStringLiteral("深色") : QStringLiteral("浅色"));
+        else
+            txt = QStringLiteral("没找到 Noctalia 色板（会依次找 %1）")
+                      .arg(QString::fromStdString(core::paletteCandidates().front()));
+        if (core::isNiriSession()) txt += QStringLiteral(" · niri 会话");
+        themeHint_->setText(txt);
+    }
+
+    // 壁纸一换 Noctalia 会重渲染色板：盯着文件，变了就重新上色（不用重启）
+    void setupPaletteWatch() {
+        if (!paletteWatch_) {
+            paletteWatch_ = new QFileSystemWatcher(this);
+            connect(paletteWatch_, &QFileSystemWatcher::fileChanged, this, [this](const QString&) {
+                applyPalette();
+                applyStyleSheet();
+            });
+        }
+        const QStringList watched = paletteWatch_->files();
+        if (!watched.isEmpty()) paletteWatch_->removePaths(watched);
+        if (m3_.valid())
+            paletteWatch_->addPath(QString::fromStdString(m3_.path));
+    }
+
     void loadConfigToUi() {
         usernameEdit_->setText(QString::fromStdString(cfg_.username));
         launchVersion_->setCurrentText(QString::fromStdString(cfg_.version));
@@ -1792,6 +1926,10 @@ private:
         for (const auto& a : cfg_.extraJvmArgs) {
             if (!extraArgsEdit_->text().isEmpty()) extraArgsEdit_->setText(extraArgsEdit_->text() + " ");
             extraArgsEdit_->setText(extraArgsEdit_->text() + QString::fromStdString(a));
+        }
+        if (themeCombo_) {
+            const int ti = themeCombo_->findData(QString::fromStdString(cfg_.themeSource));
+            themeCombo_->setCurrentIndex(ti >= 0 ? ti : 0);
         }
         memAuto_->setChecked(cfg_.autoMemory);
         memSlider_->setEnabled(!cfg_.autoMemory);
@@ -1819,6 +1957,7 @@ private:
         if (runtimeCheck_ && runtimeCheck_->isVisible() && runtimeCheck_->isChecked())
             cfg_.components.push_back("runtime");
         if (langCombo_) cfg_.language = langCombo_->currentData().toString().toStdString();
+        if (themeCombo_) cfg_.themeSource = themeCombo_->currentData().toString().toStdString();
         cfg_.extraJvmArgs.clear();
         QString extra = extraArgsEdit_->text().trimmed();
         if (!extra.isEmpty()) for (const QString& s : extra.split(' ', Qt::SkipEmptyParts))
@@ -1854,6 +1993,13 @@ private:
                 this, &LauncherWindow::scheduleAutoSave);
         connect(langCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &LauncherWindow::scheduleAutoSave);
+        connect(themeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
+            if (loadingConfig_) return;
+            cfg_.themeSource = themeCombo_->currentData().toString().toStdString();
+            applyPalette();
+            applyStyleSheet();
+            scheduleAutoSave();
+        });
         connect(xmsCheck_, &QCheckBox::toggled, this, &LauncherWindow::scheduleAutoSave);
         for (auto* cb : compChecks_)
             connect(cb, &QCheckBox::toggled, this, &LauncherWindow::scheduleAutoSave);
@@ -2170,6 +2316,11 @@ private:
     QLabel* dirsState_ = nullptr;
     QLineEdit* extraArgsEdit_ = nullptr;
     QComboBox* langCombo_ = nullptr;
+    QComboBox* themeCombo_ = nullptr;
+    QLabel* themeHint_ = nullptr;
+    QFileSystemWatcher* paletteWatch_ = nullptr;
+    QPalette defaultPalette_;
+    core::M3Palette m3_;
     QTimer* autosaveTimer_ = nullptr;
     bool loadingConfig_ = false;
 };
