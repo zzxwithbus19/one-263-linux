@@ -210,7 +210,6 @@ struct Config {
     std::string profile;  // 加载器 profile 名（如 fabric），空 = 原版
     std::string language;  // 游戏语言（en_us / zh_cn…）；空 = 跟随系统
     std::vector<std::string> extraJvmArgs;
-    bool glass = false;  // 玻璃外观：无边框 + 半透明，模糊由合成器提供
     std::vector<std::string> components = {"jar", "libraries", "assets", "runtime"};
 
     JValue toJson() const {
@@ -231,7 +230,6 @@ struct Config {
         JValue a = JValue::arrayV();
         for (const auto& s : extraJvmArgs) a.push(JValue::stringV(s));
         j.set("extraJvmArgs", a);
-        j.set("glass", JValue::booleanV(glass));
         JValue c = JValue::arrayV();
         for (const auto& s : components) c.push(JValue::stringV(s));
         j.set("components", c);
@@ -251,7 +249,6 @@ struct Config {
         const JValue* jobs = j.find("jobs"); if (jobs) c.jobs = static_cast<int>(jobs->number(10));
         const JValue* f = j.find("fabric"); if (f) c.fabric = f->boolean(false);
         s("profile", c.profile); s("language", c.language);
-        const JValue* gl = j.find("glass"); if (gl) c.glass = gl->boolean(false);
         const JValue* a = j.find("extraJvmArgs");
         if (a && a->isArray()) { c.extraJvmArgs.clear(); for (const auto& v : a->array()) if (v.isString()) c.extraJvmArgs.push_back(v.str()); }
         const JValue* cc = j.find("components");

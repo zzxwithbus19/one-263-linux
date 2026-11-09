@@ -11,7 +11,6 @@
 // 显式 QT_QPA_PLATFORM=... 或 -platform ... 始终优先；「关于」页会显示当前实际后端。
 #include "launcher_core.hpp"
 #include "modrinth.hpp"
-#include "wayland_blur.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -60,7 +59,6 @@
 #include <QTableWidgetItem>
 #include <QTime>
 #include <QTimer>
-#include <QToolButton>
 #include <QWindow>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -390,30 +388,46 @@ struct Theme {
 
 // dark 必须在窗口变透明之前算好再传进来：开了 WA_TranslucentBackground 之后，
 // Qt 会把 palette 的 Window 角色设成透明黑，再读 palette() 会一直误判成暗色主题。
-static Theme themeFor(bool dark, bool glass = false) {
-    Theme t = dark ? Theme{"#1b1d21", "#232629", "#33373d", "#e6e8eb", "#9aa4b2", "#4f9bff",
-                           "#6cb0ff", "#1e2b3f", "#1b1d21", "#17191c", "#2a2e34"}
-                   : Theme{"#f4f5f7", "#ffffff", "#e4e7ec", "#1f2328", "#6b7280", "#2563eb",
-                           "#1d4ed8", "#e8f0fe", "#ffffff", "#fbfcfd", "#eef1f5"};
-    if (!glass) return t;
-    // 玻璃模式：底色换成带 alpha 的 rgba，模糊交给合成器（niri 26.04+ / KWin / Hyprland）。
-    // 卡片不能太透，否则正文压着壁纸读不清，所以卡片比窗口底色更实一点。
-    if (dark) {
-        t.window = "rgba(22, 24, 28, 0.62)";
-        t.card = "rgba(38, 41, 46, 0.80)";
-        t.border = "rgba(255, 255, 255, 0.14)";
-        t.input = "rgba(28, 31, 36, 0.86)";
-        t.log = "rgba(18, 20, 23, 0.86)";
-        t.hover = "rgba(255, 255, 255, 0.10)";
-    } else {
-        t.window = "rgba(246, 248, 252, 0.58)";
-        t.card = "rgba(255, 255, 255, 0.82)";
-        t.border = "rgba(15, 23, 42, 0.12)";
-        t.input = "rgba(255, 255, 255, 0.92)";
-        t.log = "rgba(252, 253, 255, 0.90)";
-        t.hover = "rgba(15, 23, 42, 0.06)";
-    }
-    return t;
+static QString rgbaOf(const QColor& c, double alpha) {
+    return QStringLiteral("rgba(%1,%2,%3,%4)")
+        .arg(c.red()).arg(c.green()).arg(c.blue()).arg(int(alpha * 255));
+}
+
+static QColor mixColor(const QColor& a, const QColor& b, double t) {
+    return QColor::fromRgbF(a.redF() * (1 - t) + b.redF() * t,
+                            a.greenF() * (1 - t) + b.greenF() * t,
+                            a.blueF() * (1 - t) + b.blueF() * t);
+}
+
+// 配色全部从系统调色板来：KDE 的 Breeze / 自定义配色、明暗切换都直接生效，
+// 强调色用 QPalette::Accent（Qt 6.6+，KDE 系统设置里的"突出显示色"）。
+static Theme themeFor(const QPalette& pal) {
+    const bool dark = pal.color(QPalette::Window).lightness() < 128;
+    const QColor win = pal.color(QPalette::Window);
+    const QColor base = pal.color(QPalette::Base);
+    const QColor text = pal.color(QPalette::WindowText);
+
+    QColor muted = pal.color(QPalette::PlaceholderText);
+    if (!muted.isValid()) muted = mixColor(text, win, 0.45);
+    QColor accent = pal.color(QPalette::Accent);
+    if (!accent.isValid()) accent = pal.color(QPalette::Highlight);
+
+    const QColor border = mixColor(win, text, 0.16);
+    const QColor log = mixColor(base, win, 0.5);
+
+    return {
+        win.name(),
+        base.name(),
+        border.name(),
+        text.name(),
+        muted.name(),
+        accent.name(),
+        (dark ? accent.lighter(115) : accent.darker(112)).name(),
+        rgbaOf(accent, 0.16),
+        base.name(),
+        log.name(),
+        rgbaOf(text, 0.07),
+    };
 }
 
 // QSS 里没法画三角形，就现生成一张 14x14 的尖角图给 QComboBox 用（跟随主题色）
@@ -434,7 +448,7 @@ static QString makeChevron(const QString& dir, const QColor& color) {
     return path;
 }
 
-static QString buildStyleSheet(const Theme& t, const QString& chevron, bool glass) {
+static QString buildStyleSheet(const Theme& t, const QString& chevron) {
     QString qss = QStringLiteral(R"QSS(
 QWidget { color: @text@; }
 QMainWindow, QStackedWidget, QDialog { background: @window@; }
@@ -549,26 +563,6 @@ QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 /* 状态栏 */
 QStatusBar { background: @window@; color: @muted@; border-top: 1px solid @border@; }
 QStatusBar::item { border: none; }
-)QSS");
-
-    if (glass) qss += QStringLiteral(R"QSS(
-/* 玻璃模式：窗口无边框且透明，圆角和底色由 #shell 自己画，模糊由合成器垫在下面 */
-QMainWindow, QStackedWidget, QDialog { background: transparent; }
-QWidget#shell { background: transparent; }
-QWidget#titleBar { background: transparent; border-bottom: 1px solid @border@; }
-QListWidget#nav {
-    background: rgba(255, 255, 255, 0.20); border: 1px solid @border@;
-    border-radius: 10px; padding: 10px 6px;
-}
-QLabel#winTitle { color: @muted@; font-size: 12px; }
-QToolButton#winBtn {
-    background: transparent; border: none; border-radius: 6px;
-    color: @muted@; font-size: 13px; min-width: 30px; min-height: 22px;
-}
-QToolButton#winBtn:hover { background: @hover@; color: @text@; }
-QToolButton#winBtn[role="close"]:hover { background: #e24b4a; color: #ffffff; }
-QLabel#shellFooter { color: @muted@; font-size: 11px; padding: 2px 12px 6px 12px; }
-QStatusBar { background: transparent; border: none; }
 )QSS");
 
     const std::vector<std::pair<QString, QString>> tokens = {
@@ -689,110 +683,10 @@ private:
     int planned_ = 0;
 };
 
-// 玻璃底板：只画一层薄奶白 + 描边，模糊由合成器做（src/wayland_blur.cpp 申请）。
-class GlassShell : public QWidget {
-public:
-    explicit GlassShell(QWidget* parent = nullptr) : QWidget(parent) {
-        setAttribute(Qt::WA_StyledBackground, false);
-        setAttribute(Qt::WA_NoSystemBackground, true);
-    }
-
-    void setGlass(bool on, bool dark) {
-        on_ = on;
-        dark_ = dark;
-        update();
-    }
-
-protected:
-    // 只铺一层薄奶白，模糊完全交给合成器（ext-background-effect-v1）。
-    //
-    // 关键：本类设了 WA_NoSystemBackground（Qt 不会自动擦背景），所以每帧必须自己
-    // 把整块清成透明。否则圆角路径外面那四块永远保持着上一帧/上一个尺寸的像素，
-    // 缩放或重绘之后就变成"擦不掉的边框拖影"（要其它窗口盖一下才消失）。
-    void paintEvent(QPaintEvent*) override {
-        QPainter p(this);
-        p.setCompositionMode(QPainter::CompositionMode_Source);
-        p.fillRect(rect(), Qt::transparent);
-        p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-
-        if (!on_) return;  // 非玻璃模式：清成透明即可，底色由 QMainWindow 画
-
-        p.setRenderHint(QPainter::Antialiasing, true);
-        const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
-        const qreal rad = 14.0;
-        QPainterPath path;
-        path.addRoundedRect(r, rad, rad);
-
-        // 只铺底色，不描边：任何一圈线在无边框窗口上都会像"残留的窗口边框"
-        QColor base = dark_ ? QColor(26, 28, 33) : QColor(250, 251, 254);
-        base.setAlphaF(dark_ ? 0.50 : 0.42);
-        p.fillPath(path, base);
-    }
-
-private:
-    bool on_ = false;
-    bool dark_ = false;
-};
-
-// 无边框窗口的自绘标题栏：拖动交给 startSystemMove（Wayland 下由合成器接管），双击最大化。
-// 系统标题栏是不透明的，做不出 Vista 那种整扇窗玻璃，所以玻璃模式必须自己画一条。
-class TitleBar : public QWidget {
-public:
-    explicit TitleBar(QWidget* parent) : QWidget(parent) {
-        setObjectName("titleBar");
-        setFixedHeight(38);
-        auto* h = new QHBoxLayout(this);
-        h->setContentsMargins(14, 0, 8, 0);
-        h->setSpacing(2);
-        auto* title = new QLabel("mc263 · Minecraft 26.3 启动器", this);
-        title->setObjectName("winTitle");
-        h->addWidget(title);
-        h->addStretch(1);
-
-        auto* min = new QToolButton(this);
-        min->setText("—");
-        min->setToolTip("最小化");
-        min->setObjectName("winBtn");
-        connect(min, &QToolButton::clicked, this, [this] { window()->showMinimized(); });
-        h->addWidget(min);
-
-        auto* max = new QToolButton(this);
-        max->setText("□");
-        max->setToolTip("最大化 / 还原");
-        max->setObjectName("winBtn");
-        connect(max, &QToolButton::clicked, this, [this] { toggleMax(); });
-        h->addWidget(max);
-
-        auto* close = new QToolButton(this);
-        close->setText("✕");
-        close->setToolTip("关闭");
-        close->setObjectName("winBtn");
-        close->setProperty("role", "close");
-        connect(close, &QToolButton::clicked, this, [this] { window()->close(); });
-        h->addWidget(close);
-    }
-
-protected:
-    void mousePressEvent(QMouseEvent* e) override {
-        if (e->button() == Qt::LeftButton && window()->windowHandle())
-            window()->windowHandle()->startSystemMove();
-    }
-    void mouseDoubleClickEvent(QMouseEvent* e) override {
-        if (e->button() == Qt::LeftButton) toggleMax();
-    }
-
-private:
-    void toggleMax() {
-        if (window()->isMaximized()) window()->showNormal();
-        else window()->showMaximized();
-    }
-};
-
 // ---------------------------------------------------------------- 主窗口 ----
 class LauncherWindow : public QMainWindow {
 public:
     explicit LauncherWindow(QWidget* parent = nullptr) : QMainWindow(parent) {
-        darkUi_ = palette().color(QPalette::Window).lightness() < 128;
         const std::string exe = QCoreApplication::applicationFilePath().toStdString();
         // 应用目录 = ELF 所在目录；装进 /usr/bin 这类只读位置时退回 XDG 数据目录，
         // 否则 .mc263/ 与 minecraft/ 根本建不出来。
@@ -819,15 +713,9 @@ public:
         requiredJava_ = core::requiredJavaMajor(layout_, cfg_.version);
         saveDownloaderScript();
         buildUi();
-        // 缩放命中检测要看子控件范围内的鼠标移动：装应用级过滤器 + 打开子控件鼠标跟踪
-        qApp->installEventFilter(this);
-        if (shell_) {
-            for (auto* w : shell_->findChildren<QWidget*>()) w->setMouseTracking(true);
-        }
         chevronPath_ = makeChevron(QString::fromStdString(layout_.configDir.string()),
-                                   QColor(themeFor(darkUi_).muted));
-        qApp->setStyleSheet(buildStyleSheet(themeFor(darkUi_, cfg_.glass), chevronPath_, cfg_.glass));
-        applyGlass(cfg_.glass);
+                                   QColor(themeFor(palette()).muted));
+        qApp->setStyleSheet(buildStyleSheet(themeFor(palette()), chevronPath_));
         QTimer::singleShot(700, this, [this] { checkGameDirs(); });
         loadingConfig_ = true;
         loadConfigToUi();
@@ -978,113 +866,24 @@ private:
         rootStack_ = new QStackedWidget(this);
         rootStack_->addWidget(mainPage_);
         rootStack_->addWidget(gatePage_);
-        // 外层壳：玻璃模式下这一层画圆角半透明底，模糊由合成器垫在它下面
-        shell_ = new GlassShell(this);
-        shell_->setObjectName("shell");
-        shell_->setMouseTracking(true);
-        shell_->installEventFilter(this);
-        auto* sv = new QVBoxLayout(shell_);
-        sv->setContentsMargins(0, 0, 0, 0);
-        sv->setSpacing(0);
-        titleBar_ = new TitleBar(shell_);
-        sv->addWidget(titleBar_);
-        sv->addWidget(rootStack_, 1);
-        shellFooter_ = new QLabel(shell_);
-        shellFooter_->setObjectName("shellFooter");
-        shellFooter_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        connect(statusBar(), &QStatusBar::messageChanged, shellFooter_, &QLabel::setText);
-        sv->addWidget(shellFooter_);
-        setCentralWidget(shell_);
+        setCentralWidget(rootStack_);
         rootStack_->setCurrentWidget(gatePage_);
         connect(nav_, &QListWidget::currentRowChanged, stack_, &QStackedWidget::setCurrentIndex);
         nav_->setCurrentRow(0);
     }
 
-    // 玻璃外观：无边框 + 透明底色；模糊本身由合成器做，客户端只负责「透」
-    void updateGlassHint() {
-        if (!glassHint_) return;
-        if (!glass_ || !mc263::blur::available()) {
-            glassHint_->setText("玻璃外观已关闭。开启后窗口变无边框 + 半透明，模糊由合成器提供。");
-            return;
-        }
-        glassHint_->setText(
-            mc263::blur::active()
-                ? "合成器已接管背景模糊（ext-background-effect-v1），窗口背后是真的糊掉了。"
-                : "当前会话没有提供背景模糊（非 Wayland 或合成器不支持 ext-background-effect-v1），"
-                  "窗口只是半透明。");
+    // 系统主题/配色变了（KDE 换明暗、换配色方案）就重新生成样式表
+    void applyTheme() {
+        if (applyingTheme_) return;  // 设样式表本身会再触发一次，防重入
+        applyingTheme_ = true;
+        qApp->setStyleSheet(buildStyleSheet(themeFor(palette()), chevronPath_));
+        applyingTheme_ = false;
     }
 
-    void applyGlass(bool on, bool persist = false) {
-        glass_ = on;
-        setWindowFlag(Qt::FramelessWindowHint, on);
-        setAttribute(Qt::WA_TranslucentBackground, on);
-        if (shell_) {
-            shell_->setGlass(on, darkUi_);
-            shell_->update();  // 开关/尺寸变化后整块重画，别留上一帧的边
-        }
-        if (titleBar_) titleBar_->setVisible(on);
-        if (shellFooter_) shellFooter_->setVisible(on);
-        if (auto* sb = statusBar()) sb->setVisible(!on);
-        qApp->setStyleSheet(buildStyleSheet(themeFor(darkUi_, on), chevronPath_, on));
-        if (isVisible()) show();
-        mc263::blur::apply(this, on);
-        QTimer::singleShot(400, this, [this] { updateGlassHint(); });
-        if (qEnvironmentVariableIsSet("MC263_BLUR_DEBUG"))
-            QTimer::singleShot(1200, this, [] {
-                fprintf(stderr, "[blur] wayland=%d active=%d\n",
-                        int(mc263::blur::available()), int(mc263::blur::active()));
-            });
-        if (persist) { cfg_.glass = on; saveConfigQuietly(); }
-    }
-
-    Qt::Edges edgesAt(const QPointF& p) const {
-        if (!shell_) return {};
-        const int m = 8;
-        Qt::Edges e;
-        if (p.x() <= m) e |= Qt::LeftEdge;
-        if (p.x() >= shell_->width() - m) e |= Qt::RightEdge;
-        if (p.y() <= m) e |= Qt::TopEdge;
-        if (p.y() >= shell_->height() - m) e |= Qt::BottomEdge;
-        return e;
-    }
-
-    static Qt::CursorShape cursorForEdges(Qt::Edges e) {
-        const bool l = e & Qt::LeftEdge, r = e & Qt::RightEdge;
-        const bool t = e & Qt::TopEdge, b = e & Qt::BottomEdge;
-        if ((l && t) || (r && b)) return Qt::SizeFDiagCursor;
-        if ((r && t) || (l && b)) return Qt::SizeBDiagCursor;
-        if (l || r) return Qt::SizeHorCursor;
-        if (t || b) return Qt::SizeVerCursor;
-        return Qt::ArrowCursor;
-    }
-
-protected:
-    bool eventFilter(QObject* obj, QEvent* ev) override {
-        // 尺寸/显示变化后重设模糊区域（只关心壳自己）
-        if (obj == shell_ && glass_ &&
-            (ev->type() == QEvent::Resize || ev->type() == QEvent::Show)) {
-            mc263::blur::apply(this, true);
-        }
-
-        // 无边框窗口没有系统给的拉伸边框，四边 8px 自己转 startSystemResize。
-        // 注意事件可能来自任意子控件（标题栏 / 页脚 / 表格…），必须用全局坐标换算，
-        // 只盯 shell_ 的话上下右三条边全都会被子控件挡住。
-        auto* w = qobject_cast<QWidget*>(obj);
-        const bool mine = glass_ && w && w->window() == this &&
-                          (w == shell_ || (shell_ && shell_->isAncestorOf(w)));
-        if (mine && (ev->type() == QEvent::MouseMove || ev->type() == QEvent::MouseButtonPress)) {
-            auto* me = static_cast<QMouseEvent*>(ev);
-            const QPoint local = shell_->mapFromGlobal(me->globalPosition().toPoint());
-            const Qt::Edges e = edgesAt(QPointF(local));
-            if (ev->type() == QEvent::MouseMove) {
-                if (e != Qt::Edges()) w->setCursor(cursorForEdges(e));
-                else w->unsetCursor();
-            } else if (me->button() == Qt::LeftButton && e != Qt::Edges() && windowHandle()) {
-                windowHandle()->startSystemResize(e);
-                return true;  // 吃掉，别再让标题栏同时开始拖动
-            }
-        }
-        return QMainWindow::eventFilter(obj, ev);
+    void changeEvent(QEvent* ev) override {
+        if (ev->type() == QEvent::PaletteChange || ev->type() == QEvent::ApplicationPaletteChange)
+            applyTheme();
+        QMainWindow::changeEvent(ev);
     }
 
 public:
@@ -1757,24 +1556,6 @@ public:
         form->addRow("游戏语言", langCombo_);
         v->addWidget(gbox);
 
-        auto* abox = new QGroupBox("外观", w);
-        auto* aform = new QFormLayout(abox);
-        setCardTitle(abox, aform, "外观");
-        glassCheck_ = new QCheckBox("玻璃（毛玻璃）外观：无边框 + 半透明", w);
-        glassCheck_->setToolTip(
-            "模糊由合成器提供，本程序只负责半透明：\n"
-            "  niri 26.04+：window-rule { match app-id=\"^mc263(-qt)?$\" background-effect { blur true } }\n"
-            "  KDE Plasma 6：在窗口规则里给它开模糊（或代码侧申请）\n"
-            "  Hyprland / swayfx：默认就模糊半透明窗口");
-        aform->addRow(glassCheck_);
-        glassHint_ = new QLabel(w);
-        glassHint_->setObjectName("muted");
-        glassHint_->setWordWrap(true);
-        aform->addRow(glassHint_);
-        v->addWidget(abox);
-        connect(glassCheck_, &QCheckBox::toggled, this,
-                [this](bool on) { applyGlass(on, true); });
-
         v->addWidget(aboutSection());
         v->addStretch(1);
         connect(memAuto_, &QCheckBox::toggled, this, [this] {
@@ -2085,7 +1866,6 @@ public:
         memSlider_->setValue(memSpin_->value());
         xmsCheck_->setChecked(cfg_.minMemoryMb > 0);
         xmsSpin_->setValue(cfg_.minMemoryMb > 0 ? cfg_.minMemoryMb : 512);
-        if (glassCheck_) glassCheck_->setChecked(cfg_.glass);
         updateMemPreview();
     }
     void collectUiToConfig() {
@@ -2103,7 +1883,6 @@ public:
         if (runtimeCheck_ && runtimeCheck_->isVisible() && runtimeCheck_->isChecked())
             cfg_.components.push_back("runtime");
         if (langCombo_) cfg_.language = langCombo_->currentData().toString().toStdString();
-        if (glassCheck_) cfg_.glass = glassCheck_->isChecked();
         cfg_.extraJvmArgs.clear();
         QString extra = extraArgsEdit_->text().trimmed();
         if (!extra.isEmpty()) for (const QString& s : extra.split(' ', Qt::SkipEmptyParts))
@@ -2378,8 +2157,7 @@ public:
 
     core::Layout layout_;
     core::Config cfg_;
-    bool glass_ = false;
-    bool darkUi_ = false;  // 构造时定一次：透明窗口会把 palette 的 Window 改成透明黑
+    bool applyingTheme_ = false;
     QString chevronPath_;
     std::vector<core::JavaInfo> javas_;
     std::filesystem::path scriptPath_;
@@ -2387,11 +2165,6 @@ public:
     QString buffer_;
     QProcess* downloadProc_ = nullptr;
     QProcess* launchProc_ = nullptr;
-    GlassShell* shell_ = nullptr;
-    TitleBar* titleBar_ = nullptr;
-    QLabel* shellFooter_ = nullptr;
-    QCheckBox* glassCheck_ = nullptr;
-    QLabel* glassHint_ = nullptr;
     QListWidget* nav_ = nullptr;
     QStackedWidget* stack_ = nullptr;
     QStackedWidget* rootStack_ = nullptr;

@@ -85,7 +85,7 @@ MC263_SHOT=/tmp/ui.png build/mc263-qt     # 抓首屏 PNG 后退出（看布局 
 | 加载器 | Fabric / Quilt 版本列表拉取 + 一键安装：抓 profile json、与原版 json 合并、下载依赖到 `libraries/`，生成 `versions/<版本>+<加载器>/` |
 | Java 与兼容性 | 后台线程扫描配置 / Mojang JRE / `JAVA_HOME` / `PATH` / `/usr/lib/jvm`；11 项查验（架构、Java 版本、依赖库、natives、图形音频库、内存、磁盘、路径守卫，可选网络连通性） |
 | 游戏目录 | 独立一页：自动扫描 ELF 旁 / XDG 数据目录 / `~/.minecraft`，列出各自的版本数与 mods 数，选中即切换，避免两套装各用一份 |
-| 设置 / 内存 | **外观可选玻璃（毛玻璃）**：无边框 + 半透明，模糊交给合成器（见 [5.1](#51-玻璃毛玻璃--aero外观)）；**内存默认交给 JVM 管理**（不传 `-Xmx`/`-Xms`）；关掉自动后可手动拖 `-Xmx`/`-Xms`。四段式内存条：程序占用 → 缓存 → 游戏堆 → 余下可用，2 秒刷新、超可用内存红字提示；额外 JVM 参数；**游戏语言默认跟随系统 locale**（识别不到就 `en_us`）；页底是许可与说明（README 链接、仓库链接、显示后端） |
+| 设置 / 内存 | 配色跟随系统调色板（KDE 的配色方案 / 强调色直接生效，明暗切换即时重绘）；**内存默认交给 JVM 管理**（不传 `-Xmx`/`-Xms`）；关掉自动后可手动拖 `-Xmx`/`-Xms`。四段式内存条：程序占用 → 缓存 → 游戏堆 → 余下可用，2 秒刷新、超可用内存红字提示；额外 JVM 参数；**游戏语言默认跟随系统 locale**（识别不到就 `en_us`）；页底是许可与说明（README 链接、仓库链接、显示后端） |
 
 **版本隔离（始终开启，没有关闭开关）**：启动时 `--gameDir` 指向 `versions/<版本>/`，
 `mods`、`saves`、`resourcepacks`、`shaderpacks`、`logs` 都在该目录下自动建好 ——
@@ -147,41 +147,6 @@ KDE Plasma 6 起默认只有 Wayland 会话，XWayland 可能根本没装。启�
 配套：`setDesktopFileName("mc263-qt")` 让 Wayland 的 `app_id` 与桌面项一致（任务栏分组、图标）；
 HiDPI、分数缩放、多屏交给 Qt6；打开链接走 `xdg-open` / portal。
 「关于」页会显示当前后端与 Qt 版本，可直接确认。
-
----
-
-### 5.1 玻璃（毛玻璃 / Aero）外观
-
-设置 / 内存 → 外观 → 勾选「玻璃（毛玻璃）外观」。开启后窗口变成**无边框 + 半透明**：
-圆角、自绘标题栏（最小化 / 最大化 / 关闭、拖动、四边缩放都走合成器的系统手势）。
-
-**真模糊是程序主动申请的**，不靠用户写窗口规则。
-
-程序走 Wayland 的标准协议 `ext-background-effect-v1`（wayland-protocols staging，2026 年合入）：
-绑定 `ext_background_effect_manager_v1` → 给自己的 `wl_surface` 建 effect 对象 →
-提交一个覆盖整个窗口的 `wl_region`。合成器收到后自己去采样、模糊、贴在窗口下面。
-支持的合成器：**niri 26.04+、KDE Plasma 6、GNOME（Mutter 49+）**。
-
-设置页的提示文字会实时告诉你当前会话有没有接管成功（能拿到协议就是"已接管"）。
-不需要时不用管，非 Wayland / 老合成器上这段代码自动降级，不报错。
-
-底板本身只画一层薄奶白 + 1px 描边，**不做任何假砂面**（没有颗粒纹理、没有渐变 sheen）：
-模糊是合成器真在做的事，程序不自己糊一层东西上去假装。
-
-拿不到协议的桌面（老 niri、X11 等）就是干净半透明，也可以在合成器侧强制，比如 niri：
-
-```kdl
-window-rule {
-    match app-id="^mc263(-qt)?$"   # 桌面项启动是 mc263，终端启动是 mc263-qt
-    background-effect { blur true }
-}
-```
-
-想要「液态玻璃」那种折射 / 镜面效果做不到——需要采样背景像素做位移映射，
-Wayland 的协议只给"模糊这块区域"，不给像素，除非走 portal 截屏（每帧成本不可接受）。
-
-> 构建：装 `wayland-devel`（提供 `pkg-config wayland-client`）就有模糊；
-> 不装也能编，只是没有 `ext-background-effect`，玻璃退化成纯半透明。
 
 ---
 

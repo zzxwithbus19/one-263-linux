@@ -26,32 +26,14 @@ ifeq ($(QT6_LIBS),)
 $(warning 未找到 Qt6 开发包；Fedora: sudo dnf install qt6-qtbase-devel / openSUSE: sudo zypper install qt6-qtbase-devel)
 endif
 
-# 背景模糊（ext-background-effect-v1）需要 wayland-client；没装就自动降级，只影响玻璃观感
-WL_CFLAGS := $(shell pkg-config --cflags wayland-client 2>/dev/null)
-WL_LIBS   := $(shell pkg-config --libs wayland-client 2>/dev/null)
-ifneq ($(WL_LIBS),)
-BLUR_DEF  := -DMC263_HAVE_WAYLAND_BLUR
-BLUR_OBJS := $(BUILD)/wayland_blur.o $(BUILD)/ext-background-effect-protocol.o
-endif
-
 .PHONY: all check qt rpm arch info clean help
 
 all: $(QT_APP)
 
 # Qt6 启动器：无 Q_OBJECT / 无需 moc，单个 ELF
-$(QT_APP): src/mc263_qt.cpp $(HEADERS) include/wayland_blur.hpp $(BLUR_OBJS)
+$(QT_APP): src/mc263_qt.cpp $(HEADERS)
 	@mkdir -p $(BUILD)
-	$(CXX) $(COMMON) -pthread -fPIC $(BLUR_DEF) $(QT6_CFLAGS) src/mc263_qt.cpp $(BLUR_OBJS) \
-	    -o $@ $(QT6_LIBS) $(WL_LIBS)
-
-# 协议绑定（wayland-scanner 生成，见 src/protocol/README）
-$(BUILD)/ext-background-effect-protocol.o: src/protocol/ext-background-effect-protocol.c
-	@mkdir -p $(BUILD)
-	$(CC) -O2 -c $< -o $@ $(WL_CFLAGS)
-
-$(BUILD)/wayland_blur.o: src/wayland_blur.cpp include/wayland_blur.hpp
-	@mkdir -p $(BUILD)
-	$(CXX) $(COMMON) -fPIC $(BLUR_DEF) $(WL_CFLAGS) $(QT6_CFLAGS) -c $< -o $@
+	$(CXX) $(COMMON) -pthread -fPIC $(QT6_CFLAGS) $< -o $@ $(QT6_LIBS)
 
 # 核心逻辑离线单测（不依赖 Qt）
 $(CORE_TEST): tests/core_test.cpp $(HEADERS)
@@ -75,7 +57,6 @@ info:
 	@$(CXX) --version | head -1
 	@printf '标准      : %s\n' '$(STD)'
 	@printf 'Qt6       : %s\n' '$(if $(QT6_LIBS),可用,缺 qt6-qtbase-devel)'
-	@printf '背景模糊  : %s\n' '$(if $(WL_LIBS),可用（ext-background-effect-v1）,缺 wayland-devel，会编译成无模糊版本)'
 	@printf 'qt app    : %s\n' '$(QT_APP)'
 	@printf '沙箱根    : %s (MC263_SANDBOX_ROOT 可覆盖)\n' '$(abspath .)'
 
