@@ -67,13 +67,15 @@ sudo dnf install mc263
 **openSUSE Tumbleweed** 用同一个项目的 `opensuse-tumbleweed` chroot：
 
 ```sh
+sudo rpm --import https://download.copr.fedorainfracloud.org/results/cxc123/one-263-linux/pubkey.gpg
 sudo zypper addrepo https://download.copr.fedorainfracloud.org/results/cxc123/one-263-linux/opensuse-tumbleweed-x86_64/ one-263-linux
-sudo zypper --gpg-auto-import-keys refresh one-263-linux
+sudo zypper refresh one-263-linux
 sudo zypper install mc263
 ```
 
-`--gpg-auto-import-keys` 只是首次导入 COPR 的签名公钥，不是跳过校验；
-之后升级走 `zypper dup` 或 `zypper update mc263` 都行。
+COPR 的 openSUSE 仓库有个细节：**rpm 是签名的，但仓库元数据（`repomd.xml`）没有 `.asc`**，
+所以第一步先 `rpm --import` 把公钥装进来，免得 zypper 卡在未知密钥上。
+这不是跳过校验：包签名照样验。之后升级走 `zypper dup` 或 `zypper update mc263` 都行。
 
 ### 1.3 手动下载 / 免安装 ELF
 
