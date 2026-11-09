@@ -1,9 +1,12 @@
 #include "wayland_blur.hpp"
 
 #include <QGuiApplication>
+#include <QPointer>
 #include <QWidget>
 #include <QWindow>
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #if defined(MC263_HAVE_WAYLAND_BLUR)
@@ -22,6 +25,7 @@ struct State {
     ext_background_effect_manager_v1* manager = nullptr;
     ext_background_effect_surface_v1* effect = nullptr;
     wl_surface* surface = nullptr;
+    QPointer<QWidget> win;
     int width = 0;
     int height = 0;
     bool want = false;
@@ -43,15 +47,42 @@ void dropEffect() {
 
 // 协议是双缓冲状态：改完要 commit 一次才生效。窗口空闲时 Qt 不会自己提交，
 // 所以这里补一次（此时没有待提交的 buffer，只会把状态刷上去）。
+// 每一行圆角要往里缩多少像素（dy = 距圆角起始行，0..r-1）
+int cornerInset(int dy, int r) {
+    const double t = r - dy - 0.5;
+    const double x = r - std::sqrt(std::max(0.0, double(r) * r - t * t));
+    return int(std::ceil(x));
+}
+
+// 模糊区域必须跟窗口的圆角一致：整块矩形会把圆角外面那四块也糊上，
+// 看起来就像窗口四周多出来一圈边框。wl_region 只支持矩形，
+// 所以用 2r 条 1px 高的横带来近似圆角，中间一大块矩形补齐。
 void pushRegion() {
     State& s = st();
     if (!s.effect || !s.surface || !s.compositor || s.width <= 0 || s.height <= 0) return;
     wl_region* region = wl_compositor_create_region(s.compositor);
     if (!region) return;
-    wl_region_add(region, 0, 0, s.width, s.height);
+
+    const int r = 14;  // 与 GlassShell 的 border-radius 保持一致
+    const int w = s.width;
+    const int h = s.height;
+    if (w > 2 * r && h > 2 * r) {
+        for (int i = 0; i < r; ++i) {
+            const int inset = cornerInset(i, r);
+            wl_region_add(region, inset, i, w - 2 * inset, 1);
+            wl_region_add(region, inset, h - 1 - i, w - 2 * inset, 1);
+        }
+        wl_region_add(region, 0, r, w, h - 2 * r);
+    } else {
+        wl_region_add(region, 0, 0, w, h);
+    }
+
     ext_background_effect_surface_v1_set_blur_region(s.effect, region);
     wl_region_destroy(region);
-    wl_surface_commit(s.surface);
+    // 不自己 wl_surface_commit：那会把 Qt 的待提交状态提前推出去，
+    // 有概率推出半帧、在窗口边缘留下残影。让它重绘一次，状态跟着 Qt 的提交走。
+    if (s.win) s.win->update();
+    else wl_surface_commit(s.surface);
 }
 
 void sync() {
@@ -100,7 +131,8 @@ void apply(QWidget* win, bool on) {
     s.want = on && win;
     if (!on || !win || !available()) {
         dropEffect();
-        if (s.surface) wl_surface_commit(s.surface);
+        s.win = nullptr;
+        if (s.surface) wl_surface_commit(s.surface);  // 撤销必须立刻生效，这里保留一次手动提交
         return;
     }
     auto* app = qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>();
@@ -114,6 +146,7 @@ void apply(QWidget* win, bool on) {
         wl_registry_add_listener(s.registry, &kRegistryListener, nullptr);
     }
 
+    s.win = win;
     QWindow* wh = win->windowHandle();
     if (!wh) return;
     // Qt 在 Wayland 下把 wl_surface 指针当 WId 暴露出来
