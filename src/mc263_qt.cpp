@@ -2181,6 +2181,10 @@ private:
             layout_ = core::Layout::at(dataRoot_, dir);
             cfg_.gameDir = dir;
         }
+        // 兜底：万一哪条路径又把沙箱根搞坏了，宁可退回数据根，也别让启动时报
+        // "拒绝写入受保护目录" 这种用户完全没法处理的错。
+        std::string lerr;
+        if (!layout_.writable(lerr)) layout_ = core::Layout::at(dataRoot_);
     }
 
     // ---- 自动保存：任何设置改动 400ms 后写盘，不需要「保存」按钮 ----
