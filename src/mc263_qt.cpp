@@ -25,6 +25,7 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QGraphicsDropShadowEffect>
+#include <QGraphicsOpacityEffect>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -48,6 +49,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QProgressBar>
+#include <QPropertyAnimation>
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QScrollArea>
@@ -57,6 +59,7 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTableWidget>
+#include <QTabBar>
 #include <QTableWidgetItem>
 #include <QTime>
 #include <QTimer>
@@ -484,16 +487,14 @@ QMainWindow, QStackedWidget, QStatusBar { background: transparent; }
 QDialog { background: @window@; }
 QToolTip { background: @card@; color: @text@; border: 1px solid @border@; padding: 4px 6px; }
 
-/* 左侧导航：无边框、选中态是浅蓝药丸 */
-QListWidget#nav { background: transparent; border: none; padding: 12px 8px; outline: none; }
-QListWidget#nav::item {
-    height: 38px; border-radius: 9px; padding-left: 14px; color: @muted@;
+/* 顶部导航：一排标签，选中态是浅蓝药丸 */
+QTabBar { background: transparent; }
+QTabBar::tab {
+    background: transparent; color: @muted@; border: none;
+    padding: 8px 16px; margin: 3px 4px 3px 0; border-radius: 9px;
 }
-QListWidget#nav::item:hover { background: @hover@; color: @text@; }
-QListWidget#nav::item:selected {
-    background: @accentSoft@; color: @accent@; font-weight: 600;
-    border-left: 3px solid @accent@; padding-left: 11px;
-}
+QTabBar::tab:hover { background: @hover@; color: @text@; }
+QTabBar::tab:selected { background: @accentSoft@; color: @accent@; font-weight: 600; }
 
 /* 页面大标题与正文同款字体（不单独指定 family，避免中文字形回落不一致），
    只用字号和 600 字重做层级，700 的合成粗体会让 CJK 笔画糊成一团 */
@@ -871,17 +872,20 @@ private:
         setWindowTitle("mc263 · Minecraft 26.3 启动器");
         resize(980, 680);
         auto* central = new QWidget(this);
-        auto* h = new QHBoxLayout(central);
-        h->setContentsMargins(6, 6, 6, 0);
-        h->setSpacing(4);
-        nav_ = new QListWidget(this);
+        auto* v = new QVBoxLayout(central);
+        v->setContentsMargins(10, 8, 10, 0);
+        v->setSpacing(6);
+        // 顶部横向导航：一排标签，页面内容占满整宽
+        nav_ = new QTabBar(this);
         nav_->setObjectName("nav");
-        nav_->setFixedWidth(178);
-        nav_->setFrameShape(QFrame::NoFrame);
-        nav_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        nav_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        nav_->setExpanding(false);
+        nav_->setDrawBase(false);
+        nav_->setUsesScrollButtons(false);
+        nav_->setMovable(false);
+        nav_->setFocusPolicy(Qt::NoFocus);
+        nav_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         for (const char* s : {"启动游戏", "下载游戏", "Mod 下载", "Java 与兼容性", "游戏目录", "设置 / 内存"})
-            nav_->addItem(QString::fromUtf8(s));
+            nav_->addTab(QString::fromUtf8(s));
         stack_ = new QStackedWidget(this);
         // 每页放进滚动区：窗口缩小/字体变大时滚动，而不是把卡片内容挤到重叠
         auto addPage = [this](QWidget* page) {
@@ -902,8 +906,8 @@ private:
         addPage(pageJavaCompat());
         addPage(pageDirs());
         addPage(pageSettings());
-        h->addWidget(nav_);
-        h->addWidget(stack_, 1);
+        v->addWidget(nav_);
+        v->addWidget(stack_, 1);
         mainPage_ = central;
 
         // 启动闸门：Java 不达标时用整页遮住主界面（不是弹窗，避免点穿）
@@ -913,8 +917,8 @@ private:
         rootStack_->addWidget(gatePage_);
         setCentralWidget(rootStack_);
         rootStack_->setCurrentWidget(gatePage_);
-        connect(nav_, &QListWidget::currentRowChanged, stack_, &QStackedWidget::setCurrentIndex);
-        nav_->setCurrentRow(0);
+        connect(nav_, &QTabBar::currentChanged, this, &LauncherWindow::switchPage);
+        nav_->setCurrentIndex(0);
     }
 
     // Java 闸门页：启动时先遮住主界面，扫描结果出来再决定放行还是留在这里
@@ -1053,7 +1057,7 @@ private:
             runtimeCheck_->setVisible(true);
             runtimeCheck_->setChecked(true);
         }
-        if (nav_) nav_->setCurrentRow(1);
+        if (nav_) nav_->setCurrentIndex(1);
     }
 
     QWidget* pageLaunch() {
@@ -1648,10 +1652,6 @@ private:
         mv->addLayout(legend);
 
         memAuto_ = new QCheckBox("内存交给 JVM 自动管理（推荐，不传 -Xmx / -Xms）", w);
-        if (langCombo_) {
-            const int li = langCombo_->findData(QString::fromStdString(cfg_.language));
-            langCombo_->setCurrentIndex(li >= 0 ? li : 0);
-        }
         memAuto_->setChecked(cfg_.autoMemory);
         mv->addWidget(memAuto_);
 
@@ -1983,6 +1983,29 @@ private:
         }
     }
 
+    // 切页：换索引 + 新页淡入。动画时长写在这里，想关掉把 180 改成 0。
+    void switchPage(int idx) {
+        if (!stack_ || idx < 0 || idx >= stack_->count()) return;
+        if (idx == stack_->currentIndex()) return;
+        stack_->setCurrentIndex(idx);
+        if (pageAnim_) { pageAnim_->stop(); pageAnim_->deleteLater(); pageAnim_ = nullptr; }
+        auto* eff = new QGraphicsOpacityEffect(stack_);
+        eff->setOpacity(0.0);
+        stack_->setGraphicsEffect(eff);
+        auto* anim = new QPropertyAnimation(eff, "opacity", this);
+        anim->setDuration(180);
+        anim->setStartValue(0.0);
+        anim->setEndValue(1.0);
+        anim->setEasingCurve(QEasingCurve::OutCubic);
+        pageAnim_ = anim;
+        connect(anim, &QPropertyAnimation::finished, this, [this, anim] {
+            if (pageAnim_ == anim) pageAnim_ = nullptr;
+            if (stack_) stack_->setGraphicsEffect(nullptr);  // 顺带释放 effect
+            anim->deleteLater();
+        });
+        anim->start();
+    }
+
     // ---- 配色来源：系统调色板 / Noctalia（Material You）色板 ----
     // niri 下没有系统级的强调色概念，Noctalia 会把壁纸算出来的 M3 色板渲染成
     // 一份扁平 TOML（本机 ~/.cache/nyxuri/palette.toml），启动器直接读它。
@@ -2068,6 +2091,10 @@ private:
         if (themeCombo_) {
             const int ti = themeCombo_->findData(QString::fromStdString(cfg_.themeSource));
             themeCombo_->setCurrentIndex(ti >= 0 ? ti : 0);
+        }
+        if (langCombo_) {
+            const int li = langCombo_->findData(QString::fromStdString(cfg_.language));
+            langCombo_->setCurrentIndex(li >= 0 ? li : 0);
         }
         memAuto_->setChecked(cfg_.autoMemory);
         memSlider_->setEnabled(!cfg_.autoMemory);
@@ -2383,7 +2410,8 @@ private:
     QString buffer_;
     QProcess* downloadProc_ = nullptr;
     QProcess* launchProc_ = nullptr;
-    QListWidget* nav_ = nullptr;
+    QTabBar* nav_ = nullptr;
+    QPropertyAnimation* pageAnim_ = nullptr;
     QStackedWidget* stack_ = nullptr;
     QStackedWidget* rootStack_ = nullptr;
     QWidget* mainPage_ = nullptr;
