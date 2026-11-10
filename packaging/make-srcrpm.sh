@@ -2,15 +2,15 @@
 # 生成 COPR 用的源码 rpm
 #
 #   bash packaging/make-srcrpm.sh
-#   → dist/mc263-26.3-1.fc45.src.rpm
-#   → copr-cli build cxc123/one-263-linux dist/mc263-26.3-1.fc45.src.rpm
+#   → dist/mc263-<版本>-<release>.fc45.src.rpm
+#   → copr-cli build cxc123/one-263-linux <上面那个文件>
 #
 # 为什么需要它：COPR 的 v3 API 只接受 .src.rpm / .nosrc.rpm / .spec，不收源码 tarball。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VER="${MC263_VER:-26.3}"
-RELEASE="${MC263_RELEASE:-1}"
+RELEASE="${MC263_RELEASE:-2}"
 TOP="$ROOT/build/rpmbuild-srpm"
 
 command -v rpmbuild >/dev/null 2>&1 || { echo "缺 rpmbuild：sudo dnf install rpm-build"; exit 1; }
@@ -34,9 +34,12 @@ rpmbuild -bs "$TOP/mc263.spec" \
     --define "mc263_release $RELEASE"
 
 cp "$TOP"/SRPMS/*.src.rpm "$ROOT/dist/"
+# spec 里的 Release 可能与 $RELEASE 不同（例如直接改了 spec），所以按实际产物打印，
+# 免得提示里给出一个不存在的文件名
+SRC="$(ls -1t "$ROOT"/dist/mc263-*.src.rpm 2>/dev/null | head -1)"
 echo
 echo "==> 源码 rpm:"
 ls -lh "$ROOT"/dist/*.src.rpm
 echo
 echo "上传到 COPR："
-echo "  copr-cli build cxc123/one-263-linux $ROOT/dist/mc263-$VER-$RELEASE.fc45.src.rpm"
+echo "  copr-cli build cxc123/one-263-linux $SRC"

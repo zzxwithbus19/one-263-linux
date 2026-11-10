@@ -13,7 +13,7 @@
 
 Name:           mc263
 Version:        %{mc263_version}
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Minecraft 26.3 launcher (Qt6 native, Wayland-ready)
 License:        GPL-3.0-or-later
 URL:            https://github.com/zzxwithbus19/one-263-linux

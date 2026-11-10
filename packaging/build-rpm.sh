@@ -9,7 +9,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="26.3"
-RELEASE="1"
+RELEASE="2"
 OUT="$ROOT/dist"
 TOP="$ROOT/build/rpmbuild"
 ARCH="$(uname -m)"
@@ -21,7 +21,7 @@ usage() {
 
   --out DIR        rpm 输出目录（默认 dist/）
   --version VER    包版本号（默认 26.3）
-  --release N      包 release 号（默认 1；同版本改了内容要 +1，否则 dnf 视为已装）
+  --release N      包 release 号（默认 2；同版本又改了内容要再 +1，否则 dnf 视为已装）
   --arch ARCH      目标架构（默认 uname -m）
   --topdir DIR     rpmbuild 工作目录（默认 build/rpmbuild）
   --sign KEYID     用 GPG 密钥给 rpm 签名。RPM 6 内置 OpenPGP 签名（%_openpgp_sign gpg），
