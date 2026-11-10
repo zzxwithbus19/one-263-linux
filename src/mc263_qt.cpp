@@ -25,7 +25,6 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QGraphicsDropShadowEffect>
-#include <QGraphicsOpacityEffect>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -49,7 +48,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QProgressBar>
-#include <QPropertyAnimation>
+#include <QVariantAnimation>
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QScrollArea>
@@ -627,6 +626,32 @@ static void setCardTitle(QGroupBox* box, QLayout* lay, const QString& text) {
     if (auto* vb = qobject_cast<QVBoxLayout*>(lay)) vb->insertWidget(0, t);
     else if (auto* fm = qobject_cast<QFormLayout*>(lay)) fm->insertRow(0, t);
 }
+
+// 切页过渡用的临时贴图：画上一页的快照，透明度从 1 收到 0。
+// 自己画（而不是 QGraphicsOpacityEffect）是为了保住窗口自绘的圆角底色。
+class FadeOverlay : public QWidget {
+public:
+    FadeOverlay(QWidget* parent, const QPixmap& pix) : QWidget(parent), pix_(pix) {
+        setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        setGeometry(parent->rect());
+        show();    // 直接 new 出来的子控件默认是隐藏的，不 show 就永远看不到
+        raise();
+    }
+    void setFade(qreal f) { fade_ = f; update(); }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setOpacity(fade_);
+        p.drawPixmap(0, 0, pix_);
+    }
+
+private:
+    QPixmap pix_;
+    qreal fade_ = 1.0;
+};
 
 // 每个页面顶部的标题 + 一句说明
 static void addPageHeader(QVBoxLayout* v, const QString& title, const QString& subtitle) {
@@ -1983,26 +2008,33 @@ private:
         }
     }
 
-    // 切页：换索引 + 新页淡入。动画时长写在这里，想关掉把 180 改成 0。
+    // 切页：换索引 + 旧页淡出。动画时长写在这里，想关掉把 150 改成 0。
+    // 不用 QGraphicsOpacityEffect：窗口是 WA_TranslucentBackground，effect 会把自绘的
+    // 窗口底色一起淡成透明，看起来就是"整块变透明/动画失败"。改成把旧页抓成一张
+    // 透明度递减的贴图盖在新页上，底色始终由 paintEvent 画，不会打洞。
     void switchPage(int idx) {
         if (!stack_ || idx < 0 || idx >= stack_->count()) return;
         if (idx == stack_->currentIndex()) return;
-        stack_->setCurrentIndex(idx);
+        if (fadeOverlay_) { fadeOverlay_->deleteLater(); fadeOverlay_ = nullptr; }
         if (pageAnim_) { pageAnim_->stop(); pageAnim_->deleteLater(); pageAnim_ = nullptr; }
-        auto* eff = new QGraphicsOpacityEffect(stack_);
-        eff->setOpacity(0.0);
-        stack_->setGraphicsEffect(eff);
-        auto* anim = new QPropertyAnimation(eff, "opacity", this);
-        anim->setDuration(180);
+        const QPixmap old = stack_->grab();
+        stack_->setCurrentIndex(idx);
+        if (old.isNull()) return;
+        auto* ov = new FadeOverlay(stack_, old);
+        fadeOverlay_ = ov;
+        auto* anim = new QVariantAnimation(this);
         anim->setStartValue(0.0);
         anim->setEndValue(1.0);
-        anim->setEasingCurve(QEasingCurve::OutCubic);
-        pageAnim_ = anim;
-        connect(anim, &QPropertyAnimation::finished, this, [this, anim] {
-            if (pageAnim_ == anim) pageAnim_ = nullptr;
-            if (stack_) stack_->setGraphicsEffect(nullptr);  // 顺带释放 effect
+        anim->setDuration(150);
+        anim->setEasingCurve(QEasingCurve::OutQuad);
+        connect(anim, &QVariantAnimation::valueChanged, ov,
+                [ov](const QVariant& v) { ov->setFade(1.0 - v.toReal()); });
+        connect(anim, &QVariantAnimation::finished, this, [this, ov, anim] {
+            if (fadeOverlay_ == ov) fadeOverlay_ = nullptr;
+            ov->deleteLater();
             anim->deleteLater();
         });
+        pageAnim_ = anim;
         anim->start();
     }
 
@@ -2411,7 +2443,8 @@ private:
     QProcess* downloadProc_ = nullptr;
     QProcess* launchProc_ = nullptr;
     QTabBar* nav_ = nullptr;
-    QPropertyAnimation* pageAnim_ = nullptr;
+    QWidget* fadeOverlay_ = nullptr;
+    QVariantAnimation* pageAnim_ = nullptr;
     QStackedWidget* stack_ = nullptr;
     QStackedWidget* rootStack_ = nullptr;
     QWidget* mainPage_ = nullptr;
