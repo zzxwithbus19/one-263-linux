@@ -35,6 +35,8 @@
 #include <QJsonValue>
 #include <QLabel>
 #include <QLibraryInfo>
+#include <csignal>
+#include <execinfo.h>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QLocale>
@@ -2015,8 +2017,14 @@ private:
     void switchPage(int idx) {
         if (!stack_ || idx < 0 || idx >= stack_->count()) return;
         if (idx == stack_->currentIndex()) return;
-        if (fadeOverlay_) { fadeOverlay_->deleteLater(); fadeOverlay_ = nullptr; }
         if (pageAnim_) { pageAnim_->stop(); pageAnim_->deleteLater(); pageAnim_ = nullptr; }
+        if (fadeOverlay_) {
+            fadeOverlay_->hide();          // 先藏起来，否则下一次 grab 会把上一张残影也抓进去
+            fadeOverlay_->deleteLater();
+            fadeOverlay_ = nullptr;
+        }
+        if (switching_) return;            // 极端情况下（重入）直接跳过这次动画
+        switching_ = true;
         const QPixmap old = stack_->grab();
         stack_->setCurrentIndex(idx);
         if (old.isNull()) return;
@@ -2036,6 +2044,7 @@ private:
         });
         pageAnim_ = anim;
         anim->start();
+        switching_ = false;
     }
 
     // ---- 配色来源：系统调色板 / Noctalia（Material You）色板 ----
@@ -2443,8 +2452,9 @@ private:
     QProcess* downloadProc_ = nullptr;
     QProcess* launchProc_ = nullptr;
     QTabBar* nav_ = nullptr;
-    QWidget* fadeOverlay_ = nullptr;
-    QVariantAnimation* pageAnim_ = nullptr;
+    QPointer<QWidget> fadeOverlay_;
+    QPointer<QVariantAnimation> pageAnim_;
+    bool switching_ = false;
     QStackedWidget* stack_ = nullptr;
     QStackedWidget* rootStack_ = nullptr;
     QWidget* mainPage_ = nullptr;
@@ -2526,7 +2536,20 @@ private:
     bool loadingConfig_ = false;
 };
 
+// 崩溃时把调用栈打到 stderr：终端里跑 ./build/mc263-qt 就能看到，方便定位
+static void fatalSignal(int sig) {
+    void* frames[64];
+    const int n = ::backtrace(frames, 64);
+    const std::string head = "\nmc263-qt: 收到信号 " + std::to_string(sig) + "，调用栈：\n";
+    ::write(2, head.data(), head.size());
+    ::backtrace_symbols_fd(frames, n, 2);
+    ::_Exit(128 + sig);
+}
+
 int main(int argc, char** argv) {
+    std::signal(SIGSEGV, fatalSignal);
+    std::signal(SIGABRT, fatalSignal);
+    std::signal(SIGBUS, fatalSignal);
     // 平台插件必须在 QApplication 之前定好：Wayland 会话优先原生 wayland，
     // 缺插件时回退 xcb（XWayland），两者都没有则直接给出安装提示后退出。
     const core::PlatformPick pick = preparePlatform();

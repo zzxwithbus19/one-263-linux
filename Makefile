@@ -33,7 +33,7 @@ all: $(QT_APP)
 # Qt6 启动器：无 Q_OBJECT / 无需 moc，单个 ELF
 $(QT_APP): src/mc263_qt.cpp $(HEADERS)
 	@mkdir -p $(BUILD)
-	$(CXX) $(COMMON) -pthread -fPIC $(QT6_CFLAGS) $< -o $@ $(QT6_LIBS)
+	$(CXX) $(COMMON) -rdynamic -pthread -fPIC $(QT6_CFLAGS) $< -o $@ $(QT6_LIBS)
 
 # 核心逻辑离线单测（不依赖 Qt）
 $(CORE_TEST): tests/core_test.cpp $(HEADERS)
