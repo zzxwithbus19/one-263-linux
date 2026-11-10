@@ -15,7 +15,9 @@
 #include <atomic>
 #include <functional>
 #include <set>
+#include <map>
 #include <sstream>
+#include <cctype>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -153,6 +155,10 @@ struct Layout {
         l.gameDir = gameDirOverride.empty()
                         ? l.appDir / "minecraft"
                         : mc263::safe::normalize(fs::path(gameDirOverride));
+        // 用户在界面里自己选的游戏目录可能落在 ~ 下（沙箱根之外），显式选择就认它，
+        // 但仍然拒绝 /etc、/usr 这类系统关键路径。
+        if (!gameDirOverride.empty() && !mc263::safe::isCritical(l.gameDir))
+            l.policy.extraRoots.push_back(l.gameDir);
         l.configDir = l.appDir / ".mc263";
         l.configFile = l.configDir / "config.json";
         l.versionsDir = l.gameDir / "versions";
@@ -209,6 +215,9 @@ struct Config {
     bool fabric = false;
     std::string profile;  // 加载器 profile 名（如 fabric），空 = 原版
     std::string language;  // 游戏语言（en_us / zh_cn…）；空 = 跟随系统
+    // 配色来源：auto = 检测到 Noctalia 色板就用它，否则跟随系统；system = 只用系统调色板；
+    // noctalia = 强制读 Noctalia 的 Material You 色板（读不到就退回系统）
+    std::string themeSource = "auto";
     std::vector<std::string> extraJvmArgs;
     std::vector<std::string> components = {"jar", "libraries", "assets", "runtime"};
 
@@ -227,6 +236,7 @@ struct Config {
         j.set("fabric", JValue::booleanV(fabric));
         j.set("profile", JValue::stringV(profile));
         j.set("language", JValue::stringV(language));
+        j.set("themeSource", JValue::stringV(themeSource));
         JValue a = JValue::arrayV();
         for (const auto& s : extraJvmArgs) a.push(JValue::stringV(s));
         j.set("extraJvmArgs", a);
@@ -248,7 +258,9 @@ struct Config {
         const JValue* mi = j.find("minMemoryMb"); if (mi) c.minMemoryMb = static_cast<int>(mi->number(0));
         const JValue* jobs = j.find("jobs"); if (jobs) c.jobs = static_cast<int>(jobs->number(10));
         const JValue* f = j.find("fabric"); if (f) c.fabric = f->boolean(false);
-        s("profile", c.profile); s("language", c.language);
+        s("profile", c.profile); s("language", c.language); s("themeSource", c.themeSource);
+        if (c.themeSource != "auto" && c.themeSource != "system" && c.themeSource != "noctalia")
+            c.themeSource = "auto";
         const JValue* a = j.find("extraJvmArgs");
         if (a && a->isArray()) { c.extraJvmArgs.clear(); for (const auto& v : a->array()) if (v.isString()) c.extraJvmArgs.push_back(v.str()); }
         const JValue* cc = j.find("components");
@@ -1012,9 +1024,10 @@ inline DownloadResult downloadAll(const Layout& l, const Config& c, const Progre
     JValue manifest = mc263::jsonParse(manifestText, err);
     if (!err.empty()) { result.error = "版本清单解析失败: " + err; return result; }
     std::string wanted = c.version;
-    if (wanted == "latest") {
+    if (wanted == "latest" || wanted == "latest-snapshot") {
         const JValue* latest = manifest.find("latest");
-        const JValue* rel = latest ? latest->find("release") : nullptr;
+        const JValue* rel =
+            latest ? latest->find(wanted == "latest-snapshot" ? "snapshot" : "release") : nullptr;
         wanted = rel ? rel->str() : "26.3";
     }
     const JValue* versions = manifest.find("versions");
@@ -1162,6 +1175,135 @@ inline DownloadResult downloadAll(const Layout& l, const Config& c, const Progre
     result.ok = result.failed == 0;
     if (!result.ok) result.error = std::to_string(result.failed) + " 个文件下载失败";
     return result;
+}
+
+
+// ------------------------------------------------------ 主题来源（Noctalia）----
+// Noctalia（Quickshell 桌面外壳）把 Material You 色板渲染成一份扁平 TOML：
+//   primary = "#004890"
+//   background = "#f9f9ff"
+// 本机这份在 ~/.cache/nyxuri/palette.toml（由 Noctalia 的 user template 渲染）。
+// 启动器直接读它就能跟壁纸 / 明暗模式同步，不需要链接任何 M3 生成库。
+
+inline std::string trimCopy(const std::string& s) {
+    std::size_t a = 0, b = s.size();
+    while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) ++a;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n')) --b;
+    return s.substr(a, b - a);
+}
+
+inline int hexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+inline bool isHexColor(const std::string& s) {
+    if (s.size() != 7 && s.size() != 9) return false;  // #RRGGBB 或带 alpha 的 #RRGGBBAA
+    if (s[0] != '#') return false;
+    for (std::size_t i = 1; i < s.size(); ++i)
+        if (hexNibble(s[i]) < 0) return false;
+    return true;
+}
+
+// 0..255 的感知亮度；非法值返回 -1
+inline int hexLuma(const std::string& hex) {
+    if (hex.size() < 7 || hex[0] != '#') return -1;
+    int v[3] = {0, 0, 0};
+    for (int i = 0; i < 3; ++i) {
+        int hi = hexNibble(hex[1 + i * 2]), lo = hexNibble(hex[2 + i * 2]);
+        if (hi < 0 || lo < 0) return -1;
+        v[i] = hi * 16 + lo;
+    }
+    return (v[0] * 299 + v[1] * 587 + v[2] * 114) / 1000;
+}
+
+struct M3Palette {
+    bool ok = false;
+    std::string path;
+    std::map<std::string, std::string> colors;
+
+    std::string get(const std::string& key, const std::string& fallback = "") const {
+        auto it = colors.find(key);
+        return (it != colors.end() && !it->second.empty()) ? it->second : fallback;
+    }
+    // 只认「够用」的色板：背景、正文、强调色齐了才算数
+    bool valid() const {
+        return ok && !get("background").empty() && !get("on_surface").empty() &&
+               !get("primary").empty();
+    }
+    bool dark() const {
+        const int l = hexLuma(get("background", get("surface")));
+        return l >= 0 && l < 128;
+    }
+};
+
+inline M3Palette parseM3Palette(const std::string& text, const std::string& path = "") {
+    M3Palette p;
+    p.path = path;
+    std::istringstream in(text);
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trimCopy(line);
+        if (line.empty() || line[0] == '#') continue;  // 注释
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = trimCopy(line.substr(0, eq));
+        std::string val = trimCopy(line.substr(eq + 1));
+        if (val.size() >= 2 && (val.front() == '"' || val.front() == '\'')) {
+            const char q = val.front();
+            if (val.back() == q) val = val.substr(1, val.size() - 2);
+        }
+        if (key.empty() || !isHexColor(val)) continue;
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        p.colors[key] = val;
+    }
+    p.ok = !p.colors.empty();
+    return p;
+}
+
+// 找色板的顺序：MC263_PALETTE 覆盖 → nyxuri 缓存 → noctalia 缓存 → noctalia 配置目录
+inline std::vector<std::string> paletteCandidates() {
+    std::vector<std::string> out;
+    const std::string forced = fsx::env("MC263_PALETTE");
+    if (!forced.empty()) out.push_back(forced);
+    std::string cache = fsx::env("XDG_CACHE_HOME");
+    if (cache.empty()) cache = fsx::home() + "/.cache";
+    std::string cfg = fsx::env("XDG_CONFIG_HOME");
+    if (cfg.empty()) cfg = fsx::home() + "/.config";
+    out.push_back(cache + "/nyxuri/palette.toml");
+    out.push_back(cache + "/noctalia/palette.toml");
+    out.push_back(cfg + "/noctalia/palette.toml");
+    return out;
+}
+
+inline M3Palette loadM3Palette(const std::string& path) {
+    std::error_code ec;
+    if (path.empty() || !fs::is_regular_file(path, ec)) return {};
+    std::ifstream f(path);
+    if (!f) return {};
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return parseM3Palette(ss.str(), path);
+}
+
+inline M3Palette findM3Palette() {
+    for (const auto& path : paletteCandidates()) {
+        M3Palette p = loadM3Palette(path);
+        if (p.valid()) return p;
+    }
+    return {};
+}
+
+// niri 会话：NIRI_SOCKET 最可靠；没有时再从 XDG_CURRENT_DESKTOP / XDG_SESSION_DESKTOP 认
+inline bool isNiriSession() {
+    if (!fsx::env("NIRI_SOCKET").empty()) return true;
+    std::string d = fsx::env("XDG_CURRENT_DESKTOP") + " " + fsx::env("XDG_SESSION_DESKTOP");
+    std::transform(d.begin(), d.end(), d.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return d.find("niri") != std::string::npos;
 }
 
 } // namespace mc263::core

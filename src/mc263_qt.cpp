@@ -19,6 +19,8 @@
 #include <QDialog>
 #include <QDir>
 #include <QFileDialog>
+#include <QDesktopServices>
+#include <QFileSystemWatcher>
 #include <QFont>
 #include <QFormLayout>
 #include <QFrame>
@@ -33,12 +35,13 @@
 #include <QJsonValue>
 #include <QLabel>
 #include <QLibraryInfo>
+#include <csignal>
+#include <execinfo.h>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QLocale>
 #include <QMainWindow>
 #include <QMessageBox>
-#include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -47,6 +50,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QProgressBar>
+#include <QVariantAnimation>
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QScrollArea>
@@ -56,10 +60,10 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTableWidget>
+#include <QTabBar>
 #include <QTableWidgetItem>
 #include <QTime>
 #include <QTimer>
-#include <QWindow>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -179,6 +183,8 @@ def main():
     ap.add_argument("--components", default="jar,libraries,assets,runtime")
     ap.add_argument("--base-url", default="")
     ap.add_argument("--list-versions", action="store_true")
+    ap.add_argument("--snapshots", action="store_true")
+    ap.add_argument("--latest-snapshot", action="store_true")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
     comps = set(x for x in args.components.split(",") if x)
@@ -189,13 +195,20 @@ def main():
     try:
         mtext = get(mirror_url(MANIFEST, args.mirror, args.base_url))
         manifest = json.loads(mtext)
+        if args.latest_snapshot:
+            print(json.dumps({"version": manifest.get("latest", {}).get("snapshot", "")},
+                             ensure_ascii=False), flush=True)
+            return 0
         if args.list_versions:
-            rel = [v["id"] for v in manifest.get("versions", []) if v.get("type") == "release"][:20]
+            types = {"release", "snapshot"} if args.snapshots else {"release"}
+            rel = [v["id"] for v in manifest.get("versions", []) if v.get("type") in types]
+            rel = rel[:(30 if args.snapshots else 20)]
             print(json.dumps({"versions": rel}, ensure_ascii=False), flush=True)
             return 0
         wanted = args.version
-        if wanted == "latest":
-            wanted = manifest.get("latest", {}).get("release", "26.3")
+        if wanted in ("latest", "latest-snapshot"):
+            key = "snapshot" if wanted == "latest-snapshot" else "release"
+            wanted = manifest.get("latest", {}).get(key, "26.3")
         entry = next((v for v in manifest.get("versions", []) if v.get("id") == wanted), None)
         if not entry:
             emit("error", 0, 0, "找不到版本 " + wanted, False, "")
@@ -380,14 +393,19 @@ static MemColors memColors(const QPalette& pal) {
             QColor("#eceef1"), QColor("#b45309")};
 }
 
+// 窗口圆角半径（px）。默认 12：niri 这类只为客户端画焦点环/阴影的合成器不会再裁圆角，
+// 所以由客户端自己画。想改就改这里（不做图形化开关）；设 0 回到直角窗口。
+// 只在「没有系统装饰」的会话启用——有标题栏时只圆客户端区域反而更难看。
+static constexpr int kWindowRadius = 12;
+
 // ---------------------------------------------------------------- 主题 ----
-// 一套 tokens 生成 QSS；深浅色都从 palette 推，避免写死颜色在换主题时糊掉
+// 一套 tokens 生成 QSS；所有颜色都从 QPalette 推，这样换配色只需要换 palette：
+//   - 系统主题（Breeze / GTK / 自定义配色）→ Qt 给的默认 palette
+//   - Noctalia（Material You）→ paletteFromM3() 从 ~/.cache/nyxuri/palette.toml 造一份
 struct Theme {
     QString window, card, border, text, muted, accent, accentHover, accentSoft, input, log, hover;
 };
 
-// dark 必须在窗口变透明之前算好再传进来：开了 WA_TranslucentBackground 之后，
-// Qt 会把 palette 的 Window 角色设成透明黑，再读 palette() 会一直误判成暗色主题。
 static QString rgbaOf(const QColor& c, double alpha) {
     return QStringLiteral("rgba(%1,%2,%3,%4)")
         .arg(c.red()).arg(c.green()).arg(c.blue()).arg(int(alpha * 255));
@@ -399,8 +417,6 @@ static QColor mixColor(const QColor& a, const QColor& b, double t) {
                             a.blueF() * (1 - t) + b.blueF() * t);
 }
 
-// 配色全部从系统调色板来：KDE 的 Breeze / 自定义配色、明暗切换都直接生效，
-// 强调色用 QPalette::Accent（Qt 6.6+，KDE 系统设置里的"突出显示色"）。
 static Theme themeFor(const QPalette& pal) {
     const bool dark = pal.color(QPalette::Window).lightness() < 128;
     const QColor win = pal.color(QPalette::Window);
@@ -430,6 +446,32 @@ static Theme themeFor(const QPalette& pal) {
     };
 }
 
+// Material You 色板 → QPalette。之后 themeFor()、MemoryBar、各处内联颜色都按它走。
+// 找不到某个角色时退回 Material 的近似角色，避免整块变黑。
+static QPalette paletteFromM3(const core::M3Palette& m) {
+    auto c = [&](const char* key, const char* fallbackKey) {
+        return QColor(QString::fromStdString(m.get(key, m.get(fallbackKey))));
+    };
+    QPalette p;
+    const QColor text = c("on_surface", "on_background");
+    const QColor accent = c("primary", "on_surface");
+    p.setColor(QPalette::Window, c("background", "surface"));
+    p.setColor(QPalette::WindowText, text);
+    p.setColor(QPalette::Base, c("surface_container_lowest", "surface"));
+    p.setColor(QPalette::AlternateBase, c("surface_container", "surface"));
+    p.setColor(QPalette::Text, text);
+    p.setColor(QPalette::Button, c("surface_container", "surface"));
+    p.setColor(QPalette::ButtonText, text);
+    p.setColor(QPalette::Highlight, accent);
+    p.setColor(QPalette::HighlightedText, c("on_primary", "on_surface"));
+    p.setColor(QPalette::PlaceholderText, c("on_surface_variant", "on_surface"));
+    p.setColor(QPalette::Accent, accent);
+    p.setColor(QPalette::BrightText, c("error", "on_surface"));
+    p.setColor(QPalette::ToolTipBase, c("surface_container_high", "surface"));
+    p.setColor(QPalette::ToolTipText, text);
+    return p;
+}
+
 // QSS 里没法画三角形，就现生成一张 14x14 的尖角图给 QComboBox 用（跟随主题色）
 static QString makeChevron(const QString& dir, const QColor& color) {
     QPixmap pm(14, 14);
@@ -451,19 +493,26 @@ static QString makeChevron(const QString& dir, const QColor& color) {
 static QString buildStyleSheet(const Theme& t, const QString& chevron) {
     QString qss = QStringLiteral(R"QSS(
 QWidget { color: @text@; }
-QMainWindow, QStackedWidget, QDialog { background: @window@; }
+QMainWindow, QStackedWidget, QStatusBar { background: transparent; }
+QDialog { background: @window@; }
 QToolTip { background: @card@; color: @text@; border: 1px solid @border@; padding: 4px 6px; }
 
-/* 左侧导航：无边框、选中态是浅蓝药丸 */
-QListWidget#nav { background: transparent; border: none; padding: 12px 8px; outline: none; }
-QListWidget#nav::item {
-    height: 38px; border-radius: 9px; padding-left: 14px; color: @muted@;
+/* 版本管理左栏：卡片式列表，选中态是实心强调色 */
+QListWidget#verList {
+    background: @card@; border: 1px solid @border@; border-radius: 10px; padding: 4px;
 }
-QListWidget#nav::item:hover { background: @hover@; color: @text@; }
-QListWidget#nav::item:selected {
-    background: @accentSoft@; color: @accent@; font-weight: 600;
-    border-left: 3px solid @accent@; padding-left: 11px;
+QListWidget#verList::item { height: 38px; padding: 0 10px; border-radius: 8px; color: @text@; }
+QListWidget#verList::item:hover { background: @hover@; }
+QListWidget#verList::item:selected { background: @accent@; color: white; }
+
+/* 顶部导航：一排标签，选中态是浅蓝药丸 */
+QTabBar { background: transparent; }
+QTabBar::tab {
+    background: transparent; color: @muted@; border: none;
+    padding: 8px 16px; margin: 3px 4px 3px 0; border-radius: 9px;
 }
+QTabBar::tab:hover { background: @hover@; color: @text@; }
+QTabBar::tab:selected { background: @accentSoft@; color: @accent@; font-weight: 600; }
 
 /* 页面大标题与正文同款字体（不单独指定 family，避免中文字形回落不一致），
    只用字号和 600 字重做层级，700 的合成粗体会让 CJK 笔画糊成一团 */
@@ -561,7 +610,7 @@ QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 
 /* 状态栏 */
-QStatusBar { background: @window@; color: @muted@; border-top: 1px solid @border@; }
+QStatusBar { background: transparent; color: @muted@; border-top: 1px solid @border@; }
 QStatusBar::item { border: none; }
 )QSS");
 
@@ -596,6 +645,32 @@ static void setCardTitle(QGroupBox* box, QLayout* lay, const QString& text) {
     if (auto* vb = qobject_cast<QVBoxLayout*>(lay)) vb->insertWidget(0, t);
     else if (auto* fm = qobject_cast<QFormLayout*>(lay)) fm->insertRow(0, t);
 }
+
+// 切页过渡用的临时贴图：画上一页的快照，透明度从 1 收到 0。
+// 自己画（而不是 QGraphicsOpacityEffect）是为了保住窗口自绘的圆角底色。
+class FadeOverlay : public QWidget {
+public:
+    FadeOverlay(QWidget* parent, const QPixmap& pix) : QWidget(parent), pix_(pix) {
+        setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        setGeometry(parent->rect());
+        show();    // 直接 new 出来的子控件默认是隐藏的，不 show 就永远看不到
+        raise();
+    }
+    void setFade(qreal f) { fade_ = f; update(); }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setOpacity(fade_);
+        p.drawPixmap(0, 0, pix_);
+    }
+
+private:
+    QPixmap pix_;
+    qreal fade_ = 1.0;
+};
 
 // 每个页面顶部的标题 + 一句说明
 static void addPageHeader(QVBoxLayout* v, const QString& title, const QString& subtitle) {
@@ -697,12 +772,13 @@ public:
             const QString data = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
             if (!data.isEmpty()) root = std::filesystem::path(data.toStdString());
         }
+        dataRoot_ = root;   // 可写的数据根：应用目录，或只读安装时的 XDG 数据目录
         layout_ = core::Layout::at(root);
         std::string err;
         cfg_.load(layout_.configFile, err);  // 配置路径只跟应用目录有关，可以先读
         // 配置里存过游戏目录：能写且过守卫才用，否则回退到默认的 <应用目录>/minecraft
         if (!cfg_.gameDir.empty()) {
-            core::Layout cand = core::Layout::detect(exe, cfg_.gameDir);
+            core::Layout cand = core::Layout::at(dataRoot_, cfg_.gameDir);
             std::string gerr;
             if (cand.writable(gerr)) layout_ = cand;
             else cfg_.gameDir.clear();
@@ -710,12 +786,12 @@ public:
         if (!layout_.ensure(err)) {
             QMessageBox::critical(this, "路径被拒绝", QString::fromStdString(err));
         }
+        defaultPalette_ = qApp->palette();
         requiredJava_ = core::requiredJavaMajor(layout_, cfg_.version);
         saveDownloaderScript();
+        applyPalette();   // 先定调色板：buildUi 里的内联颜色会跟着它走
         buildUi();
-        chevronPath_ = makeChevron(QString::fromStdString(layout_.configDir.string()),
-                                   QColor(themeFor(palette()).muted));
-        qApp->setStyleSheet(buildStyleSheet(themeFor(palette()), chevronPath_));
+        applyStyleSheet();
         QTimer::singleShot(700, this, [this] { checkGameDirs(); });
         loadingConfig_ = true;
         loadConfigToUi();
@@ -723,14 +799,13 @@ public:
         setupAutoSave();
         refreshLocalVersions();
         refreshJava();
-        // 冒烟/文档用：MC263_SHOT=/tmp/x.png 时把首屏抓成 PNG（无合成器时没有模糊，只有布局与 alpha）
+        // 冒烟/文档用：MC263_SHOT=/tmp/x.png 时把首屏抓成 PNG 后退出
         const QByteArray shotPath = qgetenv("MC263_SHOT");
-        if (!shotPath.isEmpty()) {
+        if (!shotPath.isEmpty())
             QTimer::singleShot(1500, this, [this, shotPath] {
                 grab().save(QString::fromLocal8Bit(shotPath));
                 qApp->quit();
             });
-        }
         statusBar()->showMessage("游戏目录 " + QString::fromStdString(layout_.gameDir.string()) +
                                  " | 配置 " + QString::fromStdString(layout_.configFile.string()) +
                                  "（改动即自动保存）");
@@ -798,6 +873,19 @@ public:
     }
 
 protected:
+    // 系统配色变了（KDE 切明暗、换配色方案）就重算一遍；Noctalia 那条路由文件监视负责。
+    // 自己 setPalette 也会发 PaletteChange，所以用 lastPalette_ 比对，避免自激。
+    void changeEvent(QEvent* ev) override {
+        if (ev->type() == QEvent::PaletteChange || ev->type() == QEvent::ApplicationPaletteChange) {
+            if (qApp && qApp->palette() != lastPalette_) {
+                lastPalette_ = qApp->palette();
+                applyPalette();
+                applyStyleSheet();
+            }
+        }
+        QMainWindow::changeEvent(ev);
+    }
+
     void closeEvent(QCloseEvent* ev) override {
         collectUiToConfig();
         std::string err;
@@ -819,21 +907,50 @@ private:
         return p.isEmpty() ? QStringLiteral("python3") : p;
     }
 
+    // 圆角窗口：paintEvent 自己画一层圆角背景，QSS 里 QMainWindow 是透明的。
+    // 只在没有系统装饰时启用（niri 的 prefer-no-csd / QT_WAYLAND_DISABLE_WINDOWDECORATION=1）：
+    // 有 CSD/SSD 时圆角只作用在客户端区域，反而难看，保持系统外观。
+    static bool noServerDecorations() {
+        if (qEnvironmentVariableIntValue("QT_WAYLAND_DISABLE_WINDOWDECORATION") == 1) return true;
+        return core::isNiriSession();
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(Qt::NoPen);
+        p.setBrush(theme_.window.isEmpty() ? palette().color(QPalette::Window)
+                                           : QColor(theme_.window));
+        if (roundedCorners_) {
+            p.drawRoundedRect(QRectF(rect()), kWindowRadius, kWindowRadius);
+        } else {
+            p.fillRect(rect(), p.brush());
+        }
+    }
+
     void buildUi() {
+        roundedCorners_ = kWindowRadius > 0 && noServerDecorations();
+        if (roundedCorners_) {
+            setAttribute(Qt::WA_TranslucentBackground, true);
+            setAttribute(Qt::WA_NoSystemBackground, true);
+        }
         setWindowTitle("mc263 · Minecraft 26.3 启动器");
         resize(980, 680);
         auto* central = new QWidget(this);
-        auto* h = new QHBoxLayout(central);
-        h->setContentsMargins(8, 6, 8, 6);
-        h->setSpacing(4);
-        nav_ = new QListWidget(this);
+        auto* v = new QVBoxLayout(central);
+        v->setContentsMargins(10, 8, 10, 0);
+        v->setSpacing(6);
+        // 顶部横向导航：一排标签，页面内容占满整宽
+        nav_ = new QTabBar(this);
         nav_->setObjectName("nav");
-        nav_->setFixedWidth(178);
-        nav_->setFrameShape(QFrame::NoFrame);
-        nav_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        nav_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        for (const char* s : {"启动游戏", "下载游戏", "Mod 下载", "Java 与兼容性", "游戏目录", "设置 / 内存"})
-            nav_->addItem(QString::fromUtf8(s));
+        nav_->setExpanding(false);
+        nav_->setDrawBase(false);
+        nav_->setUsesScrollButtons(false);
+        nav_->setMovable(false);
+        nav_->setFocusPolicy(Qt::NoFocus);
+        nav_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        for (const char* s : {"启动游戏", "下载游戏", "Mod 下载", "版本管理", "游戏目录", "设置 / 内存"})
+            nav_->addTab(QString::fromUtf8(s));
         stack_ = new QStackedWidget(this);
         // 每页放进滚动区：窗口缩小/字体变大时滚动，而不是把卡片内容挤到重叠
         auto addPage = [this](QWidget* page) {
@@ -846,19 +963,16 @@ private:
             sa->setFrameShape(QFrame::NoFrame);
             sa->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
             sa->setWidget(page);
-            // 玻璃模式下页面和视口必须真的透明，否则半透明窗口会被这层底色盖死
-            page->setAutoFillBackground(false);
-            sa->viewport()->setAutoFillBackground(false);
             stack_->addWidget(sa);
         };
         addPage(pageLaunch());
         addPage(pageDownload());
         addPage(pageMods());
-        addPage(pageJavaCompat());
+        addPage(pageVersionManager());
         addPage(pageDirs());
         addPage(pageSettings());
-        h->addWidget(nav_);
-        h->addWidget(stack_, 1);
+        v->addWidget(nav_, 0, Qt::AlignHCenter);
+        v->addWidget(stack_, 1);
         mainPage_ = central;
 
         // 启动闸门：Java 不达标时用整页遮住主界面（不是弹窗，避免点穿）
@@ -868,25 +982,10 @@ private:
         rootStack_->addWidget(gatePage_);
         setCentralWidget(rootStack_);
         rootStack_->setCurrentWidget(gatePage_);
-        connect(nav_, &QListWidget::currentRowChanged, stack_, &QStackedWidget::setCurrentIndex);
-        nav_->setCurrentRow(0);
+        connect(nav_, &QTabBar::currentChanged, this, &LauncherWindow::switchPage);
+        nav_->setCurrentIndex(0);
     }
 
-    // 系统主题/配色变了（KDE 换明暗、换配色方案）就重新生成样式表
-    void applyTheme() {
-        if (applyingTheme_) return;  // 设样式表本身会再触发一次，防重入
-        applyingTheme_ = true;
-        qApp->setStyleSheet(buildStyleSheet(themeFor(palette()), chevronPath_));
-        applyingTheme_ = false;
-    }
-
-    void changeEvent(QEvent* ev) override {
-        if (ev->type() == QEvent::PaletteChange || ev->type() == QEvent::ApplicationPaletteChange)
-            applyTheme();
-        QMainWindow::changeEvent(ev);
-    }
-
-public:
     // Java 闸门页：启动时先遮住主界面，扫描结果出来再决定放行还是留在这里
     QWidget* pageJavaGate() {
         auto* page = new QWidget(this);
@@ -898,7 +997,7 @@ public:
         card->setFrameShape(QFrame::StyledPanel);
         card->setMinimumWidth(620);
         card->setMaximumWidth(680);
-        card->setAutoFillBackground(false);  // 交给 QSS 的 #gateCard 背景（玻璃下要能透）
+        card->setAutoFillBackground(true);
         QPalette pal = card->palette();
         pal.setColor(QPalette::Window, palette().color(QPalette::Base));
         card->setPalette(pal);
@@ -1023,7 +1122,7 @@ public:
             runtimeCheck_->setVisible(true);
             runtimeCheck_->setChecked(true);
         }
-        if (nav_) nav_->setCurrentRow(1);
+        if (nav_) nav_->setCurrentIndex(1);
     }
 
     QWidget* pageLaunch() {
@@ -1071,7 +1170,15 @@ public:
         mirrorCombo_->addItem("bmclapi · 国内镜像", "bmclapi");
         jobsSpin_ = new QSpinBox(w); jobsSpin_->setRange(1, 16); jobsSpin_->setValue(10);
         auto* onlineBtn = new QPushButton("获取在线版本", w);
-        auto* verRow = new QHBoxLayout(); verRow->addWidget(downloadVersion_, 1); verRow->addWidget(onlineBtn);
+        snapCheck_ = new QCheckBox("含预览版", w);
+        snapCheck_->setToolTip("勾上后「获取在线版本」会同时列出 snapshot（预览版）");
+        auto* latestSnapBtn = new QPushButton("最新预览版", w);
+        latestSnapBtn->setToolTip("把版本填成 Mojang 当前的 latest.snapshot，再点「开始下载」");
+        auto* verRow = new QHBoxLayout();
+        verRow->addWidget(downloadVersion_, 1);
+        verRow->addWidget(onlineBtn);
+        verRow->addWidget(snapCheck_);
+        verRow->addWidget(latestSnapBtn);
         form->addRow("版本", verRow);
         form->addRow("下载源", mirrorCombo_);
         form->addRow("并发线程", jobsSpin_);
@@ -1145,6 +1252,7 @@ public:
         });
         connect(clearCacheBtn_, &QPushButton::clicked, this, &LauncherWindow::clearDownloadCache);
         connect(onlineBtn, &QPushButton::clicked, this, &LauncherWindow::refreshOnlineVersions);
+        connect(latestSnapBtn, &QPushButton::clicked, this, &LauncherWindow::fetchLatestSnapshot);
         return w;
     }
 
@@ -1183,7 +1291,7 @@ public:
         modSearchBtn_->setObjectName("primary");
         auto* srow = new QHBoxLayout();
         srow->addWidget(modSearchBtn_);
-        auto* hint = new QLabel("按下载量排序，取前 20 个；双击结果可直接安装", sbox);
+        auto* hint = new QLabel("按下载量排序，取前 20 个；双击结果可直接安装（会自动补齐 required 前置）", sbox);
         hint->setObjectName("muted");
         srow->addWidget(hint);
         srow->addStretch(1);
@@ -1309,6 +1417,8 @@ public:
                                         : QString("找到 %1 个，双击或点「安装选中 Mod」").arg(hits.size()));
     }
 
+    // ---- 安装 Mod：先解析 required 前置，确认后一起下载 ----
+    // 解析（网络）在后台线程；弹框在主线程；下载再开一个后台线程，避免界面卡住。
     void installSelectedMod() {
         const int row = modTable_->currentRow();
         if (row < 0) { modState_->setText("先在列表里选一个 Mod"); return; }
@@ -1318,84 +1428,266 @@ public:
         const std::string loader = modLoader_->currentData().toString().toStdString();
         const std::string ver = modVersionEdit_->text().trimmed().toStdString();
         modInstallBtn_->setEnabled(false);
-        modState_->setText("安装 " + title + " …");
+        modState_->setText("解析 " + title + " 的前置…");
         const auto cache = layout_.configDir / "cache";
         const auto mods = core::isolatedGameDir(layout_, cfg_) / "mods";  // 版本隔离：mods 跟着版本走
         QPointer<LauncherWindow> guard(this);
         std::thread([guard, project, loader, ver, cache, mods, title] {
             std::vector<mc263::modrinth::Version> list;
             std::string err;
-            bool ok = false;
             QString msg;
+            bool ok = false;
             if (!mc263::modrinth::versions(project, loader, ver, cache, list, err)) {
                 msg = "查版本失败：" + QString::fromStdString(err);
             } else if (list.empty()) {
                 msg = "没有适配该版本 / 加载器的文件";
-            } else if (const auto* f = mc263::modrinth::primaryFile(list.front()); !f) {
-                msg = "该版本没有可下载文件";
             } else {
-                std::error_code ec;
-                std::filesystem::create_directories(mods, ec);
-                const auto dest = mods / f->filename;
-                mc263::dl::Task t{f->url, dest, f->sha1, 0644, f->filename};
-                bool cached = false;
-                ok = mc263::dl::fetchOne(t, "", 120, true, err, cached);
-                msg = ok ? QString("%1 → %2%3")
-                               .arg(QString::fromStdString(list.front().number),
-                                    QString::fromStdString(dest.string()),
-                                    cached ? "（已存在，跳过）" : "")
-                         : "下载失败：" + QString::fromStdString(err);
+                ok = true;
             }
-            QMetaObject::invokeMethod(qApp, [guard, ok, msg, title] {
+            mc263::modrinth::DepPlan plan;
+            if (ok && mc263::modrinth::primaryFile(list.front())) {
+                mc263::modrinth::resolveDependencies(list.front(), loader, ver, cache, plan, err);
+            } else if (ok) {
+                ok = false;
+                msg = "NOFILE";
+            }
+            QMetaObject::invokeMethod(qApp, [guard, ok, msg, plan, list, title, mods, project] {
                 if (!guard) return;
-                guard->modInstallBtn_->setEnabled(true);
-                guard->modState_->setText(ok ? "完成" : "失败");
-                guard->modLog_->appendPlainText(QString("[%1] %2  %3")
-                                                    .arg(QTime::currentTime().toString("HH:mm:ss"), title, msg));
+                if (!ok) {
+                    guard->modInstallBtn_->setEnabled(true);
+                    guard->modState_->setText("失败");
+                    if (msg == "NOFILE") {
+                        guard->promptManualMod(title,
+                            QString::fromStdString("https://modrinth.com/mod/" + project));
+                    } else {
+                        guard->modLog_->appendPlainText(QString("[%1] %2  %3")
+                            .arg(QTime::currentTime().toString("HH:mm:ss"), title, msg));
+                    }
+                    return;
+                }
+                guard->askInstallPlan(title, list.front(), plan, mods);
             }, Qt::QueuedConnection);
         }).detach();
     }
 
-    QWidget* pageJavaCompat() {
+    // 连本体都拿不到文件：按 Prism 的做法提示手动下载 + 打开模组网页
+    void promptManualMod(const QString& title, const QString& url) {
+        QMessageBox box(this);
+        box.setWindowTitle("需要手动下载");
+        box.setIcon(QMessageBox::Warning);
+        box.setText(QString("%1 没有可用的下载文件（作者可能禁止了 API 分发）。\n\n"
+                            "请到模组网页手动下载后放进 mods 目录：\n%2").arg(title, url));
+        auto* open = box.addButton("打开网页", QMessageBox::ActionRole);
+        box.addButton("关闭", QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == open)
+            QDesktopServices::openUrl(QUrl(url));
+        modState_->setText("需要手动下载");
+    }
+
+    void askInstallPlan(const QString& title, const mc263::modrinth::Version& root,
+                        const mc263::modrinth::DepPlan& plan, const std::filesystem::path& mods) {
+        QString text = QString("安装 %1（%2）到 %3")
+                           .arg(title, QString::fromStdString(root.number),
+                                QString::fromStdString(mods.string()));
+        if (!plan.resolved.empty()) {
+            text += QString("\n\n会自动补齐 %1 个前置：").arg(plan.resolved.size());
+            for (const auto& d : plan.resolved)
+                text += QString("\n  • %1 %2").arg(QString::fromStdString(d.title),
+                                                    QString::fromStdString(d.versionNumber));
+        }
+        if (!plan.manual.empty()) {
+            text += "\n\n以下前置无法自动下载，需要手动处理：";
+            for (const auto& d : plan.manual)
+                text += QString("\n  • %1（%2）\n    %3").arg(QString::fromStdString(d.title),
+                                                               QString::fromStdString(d.reason),
+                                                               QString::fromStdString(d.url));
+        }
+        QMessageBox box(this);
+        box.setWindowTitle(plan.manual.empty() ? "安装 Mod" : "确认安装 / 需要手动下载前置");
+        box.setIcon(plan.manual.empty() ? QMessageBox::Question : QMessageBox::Warning);
+        box.setText(text);
+        box.setTextFormat(Qt::PlainText);
+        auto* go = box.addButton("安装", QMessageBox::AcceptRole);
+        QAbstractButton* open = nullptr;
+        if (!plan.manual.empty()) open = box.addButton("打开网页", QMessageBox::ActionRole);
+        box.addButton("取消", QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == open && open) {
+            QDesktopServices::openUrl(QUrl(QString::fromStdString(plan.manual.front().url)));
+        } else if (box.clickedButton() != go) {
+            modInstallBtn_->setEnabled(true);
+            modState_->setText("已取消");
+            return;
+        }
+        startModDownload(title, root, plan, mods);
+    }
+
+    void startModDownload(const QString& title, const mc263::modrinth::Version& root,
+                          const mc263::modrinth::DepPlan& plan, const std::filesystem::path& mods) {
+        struct Item { mc263::modrinth::File file; };
+        std::vector<Item> items;
+        if (const auto* f = mc263::modrinth::primaryFile(root)) items.push_back({*f});
+        for (const auto& d : plan.resolved) items.push_back({d.file});
+
+        QStringList manualNotes;
+        for (const auto& d : plan.manual)
+            manualNotes << QString("需要手动下载：%1  %2").arg(QString::fromStdString(d.title),
+                                                           QString::fromStdString(d.url));
+
+        modState_->setText(QString("下载 %1 个文件…").arg(items.size()));
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, items, mods, title, manualNotes] {
+            std::error_code ec;
+            std::filesystem::create_directories(mods, ec);
+            QStringList lines;
+            int failed = 0;
+            for (const auto& it : items) {
+                std::string err;
+                bool cached = false;
+                mc263::dl::Task t{it.file.url, mods / it.file.filename, it.file.sha1, 0644,
+                                  it.file.filename};
+                if (mc263::dl::fetchOne(t, "", 180, true, err, cached)) {
+                    lines << QString("  %1%2").arg(QString::fromStdString(it.file.filename),
+                                                   cached ? "（已存在，跳过）" : "");
+                } else {
+                    ++failed;
+                    lines << QString("  %1 失败：%2").arg(QString::fromStdString(it.file.filename),
+                                                          QString::fromStdString(err));
+                }
+            }
+            lines += manualNotes;
+            QMetaObject::invokeMethod(qApp, [guard, failed, lines, title, manualNotes] {
+                if (!guard) return;
+                guard->modInstallBtn_->setEnabled(true);
+                guard->modState_->setText(failed == 0 ? "完成" : "部分失败");
+                guard->modLog_->appendPlainText(QString("[%1] %2\n%3")
+                    .arg(QTime::currentTime().toString("HH:mm:ss"), title, lines.join("\n")));
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    // 版本管理：左栏列已装版本，右栏是 Java 与兼容性（原「Java 与兼容性」页融进来）
+    QWidget* pageVersionManager() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        addPageHeader(v, "Java 与兼容性", "列出所有 Java 及其来源，逐项检查架构、依赖库、natives 与图形音频库");
-        auto* jbox = new QGroupBox("可用的 Java", w);
+        addPageHeader(v, "版本管理", "左边是已装的游戏版本，右边是这个版本要的 Java 与兼容性查验");
+
+        auto* row = new QHBoxLayout();
+        row->setSpacing(12);
+
+        auto* left = new QWidget(w);
+        left->setFixedWidth(250);
+        auto* lv = new QVBoxLayout(left);
+        lv->setContentsMargins(0, 0, 0, 0);
+        lv->setSpacing(6);
+        auto* lhead = new QLabel("已装版本", left);
+        lhead->setObjectName("cardTitle");
+        lv->addWidget(lhead);
+        verList_ = new QListWidget(left);
+        verList_->setObjectName("verList");
+        verList_->setFrameShape(QFrame::NoFrame);
+        verList_->setSelectionMode(QAbstractItemView::SingleSelection);
+        verList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        lv->addWidget(verList_, 1);
+        auto* lrow = new QHBoxLayout();
+        auto* refreshBtn = new QPushButton("刷新", left);
+        auto* openDirBtn = new QPushButton("打开目录", left);
+        lrow->addWidget(refreshBtn);
+        lrow->addWidget(openDirBtn);
+        lrow->addStretch(1);
+        lv->addLayout(lrow);
+        row->addWidget(left);
+
+        auto* right = new QWidget(w);
+        auto* rv = new QVBoxLayout(right);
+        rv->setContentsMargins(0, 0, 0, 0);
+        rv->setSpacing(10);
+        verSummary_ = new QLabel(right);
+        verSummary_->setObjectName("pageSubtitle");
+        verSummary_->setWordWrap(true);
+        verSummary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        auto* useVerBtn = new QPushButton("设为启动版本", right);
+        useVerBtn->setObjectName("primary");
+        auto* srow = new QHBoxLayout();
+        srow->addWidget(verSummary_, 1);
+        srow->addWidget(useVerBtn);
+        rv->addLayout(srow);
+
+        auto* jbox = new QGroupBox("可用的 Java", right);
         auto* jv = new QVBoxLayout(jbox);
         setCardTitle(jbox, jv, "可用的 Java");
-        javaTable_ = new QTableWidget(0, 4, w);
+        javaTable_ = new QTableWidget(0, 4, right);
         javaTable_->setHorizontalHeaderLabels({"路径", "版本", "来源", "状态"});
         javaTable_->horizontalHeader()->setStretchLastSection(true);
         javaTable_->verticalHeader()->setVisible(false);
         javaTable_->setShowGrid(false);
         javaTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
         jv->addWidget(javaTable_);
-        javaCombo_ = new QComboBox(w);
-        javaState_ = new QLabel("尚未扫描", w);
+        javaCombo_ = new QComboBox(right);
+        javaState_ = new QLabel("尚未扫描", right);
         auto* jrow = new QHBoxLayout();
-        auto* rescan = new QPushButton("重新扫描", w);
-        auto* manual = new QPushButton("手动指定 java", w);
-        auto* useBtn = new QPushButton("设为当前 Java", w);
-        jrow->addWidget(rescan); jrow->addWidget(manual); jrow->addWidget(useBtn); jrow->addStretch(1);
-        jv->addLayout(jrow); jv->addWidget(new QLabel("当前选择", w)); jv->addWidget(javaCombo_);
+        auto* rescan = new QPushButton("重新扫描", right);
+        auto* manual = new QPushButton("手动指定 java", right);
+        auto* useBtn = new QPushButton("设为当前 Java", right);
+        jrow->addWidget(rescan);
+        jrow->addWidget(manual);
+        jrow->addWidget(useBtn);
+        jrow->addStretch(1);
+        jv->addLayout(jrow);
+        jv->addWidget(new QLabel("当前选择", right));
+        jv->addWidget(javaCombo_);
         jv->addWidget(javaState_);
-        v->addWidget(jbox, 2);
-        auto* cbox = new QGroupBox("兼容性查验", w);
+        rv->addWidget(jbox, 2);
+
+        auto* cbox = new QGroupBox("兼容性查验", right);
         auto* cv = new QVBoxLayout(cbox);
         setCardTitle(cbox, cv, "兼容性查验");
-        compatTable_ = new QTableWidget(0, 3, w);
+        compatTable_ = new QTableWidget(0, 3, right);
         compatTable_->setHorizontalHeaderLabels({"检查项", "状态", "说明"});
         compatTable_->horizontalHeader()->setStretchLastSection(true);
         compatTable_->verticalHeader()->setVisible(false);
         compatTable_->setShowGrid(false);
         compatTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
         cv->addWidget(compatTable_);
-        compatState_ = new QLabel("尚未检查", w);
-        netCheck_ = new QCheckBox("同时检查官方下载源连通性", w);
-        auto* checkBtn = new QPushButton("运行兼容性查验", w);
-        auto* crow = new QHBoxLayout(); crow->addWidget(checkBtn); crow->addWidget(netCheck_); crow->addStretch(1);
-        cv->addLayout(crow); cv->addWidget(compatState_);
-        v->addWidget(cbox, 3);
+        compatState_ = new QLabel("尚未检查", right);
+        netCheck_ = new QCheckBox("同时检查官方下载源连通性", right);
+        auto* checkBtn = new QPushButton("运行兼容性查验", right);
+        auto* crow = new QHBoxLayout();
+        crow->addWidget(checkBtn);
+        crow->addWidget(netCheck_);
+        crow->addStretch(1);
+        cv->addLayout(crow);
+        cv->addWidget(compatState_);
+        rv->addWidget(cbox, 3);
+        rv->addStretch(1);
+
+        auto* scroll = new QScrollArea(w);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidget(right);
+        row->addWidget(scroll, 1);
+        v->addLayout(row, 1);
+
+        connect(verList_, &QListWidget::currentRowChanged, this, [this](int r) {
+            if (r >= 0 && verList_->item(r)) showVersionDetail(verList_->item(r)->text());
+        });
+        connect(refreshBtn, &QPushButton::clicked, this, &LauncherWindow::refreshVersionList);
+        connect(useVerBtn, &QPushButton::clicked, this, [this] {
+            const auto* it = verList_->currentItem();
+            if (!it) return;
+            cfg_.version = it->text().toStdString();
+            launchVersion_->setCurrentText(it->text());
+            saveConfigQuietly();
+            statusBar()->showMessage("启动版本已设为 " + it->text(), 5000);
+        });
+        connect(openDirBtn, &QPushButton::clicked, this, [this] {
+            const auto* it = verList_->currentItem();
+            if (!it) return;
+            QProcess::startDetached(
+                "xdg-open",
+                {QString::fromStdString(layout_.versionDir(it->text().toStdString()).string())});
+        });
         connect(rescan, &QPushButton::clicked, this, &LauncherWindow::refreshJava);
         connect(manual, &QPushButton::clicked, this, [this] {
             QString p = QFileDialog::getOpenFileName(this, "选择 java 可执行文件", "/usr/bin");
@@ -1408,7 +1700,50 @@ public:
             }
         });
         connect(checkBtn, &QPushButton::clicked, this, &LauncherWindow::runCompat);
+
+        refreshVersionList();
         return w;
+    }
+
+    // 左栏列表：已装版本
+    void refreshVersionList() {
+        if (!verList_) return;
+        const QString keep = verList_->currentItem() ? verList_->currentItem()->text() : QString();
+        const auto vers = core::availableVersions(layout_);
+        verList_->clear();
+        for (const auto& id : vers) verList_->addItem(QString::fromStdString(id));
+        if (verList_->count() == 0) {
+            if (verSummary_) verSummary_->setText("还没有装任何游戏版本；去「下载游戏」页拉一个，或先装个加载器");
+            return;
+        }
+        int idx = 0;
+        if (!keep.isEmpty()) {
+            const auto hits = verList_->findItems(keep, Qt::MatchExactly);
+            if (!hits.isEmpty()) idx = verList_->row(hits.first());
+        }
+        verList_->setCurrentRow(idx);
+    }
+
+    // 右栏头部：所选版本的要求与占用
+    void showVersionDetail(const QString& id) {
+        if (!verSummary_) return;
+        const std::string vid = id.toStdString();
+        const auto dir = layout_.versionDir(vid);
+        const int java = core::requiredJavaMajor(layout_, vid);
+        auto count = [](const std::filesystem::path& p) {
+            std::error_code ec;
+            int n = 0;
+            if (!std::filesystem::is_directory(p, ec)) return 0;
+            for (std::filesystem::directory_iterator it(p, ec), end; !ec && it != end; it.increment(ec)) ++n;
+            return n;
+        };
+        QString s = QString("<b>%1</b> · 需要 Java %2 · mods %3 · 存档 %4")
+                        .arg(id)
+                        .arg(java)
+                        .arg(count(dir / "mods"))
+                        .arg(count(dir / "saves"));
+        s += QString("<br>%1").arg(QString::fromStdString(dir.string()));
+        verSummary_->setText(s);
     }
 
     QWidget* pageDirs() {
@@ -1515,10 +1850,6 @@ public:
         mv->addLayout(legend);
 
         memAuto_ = new QCheckBox("内存交给 JVM 自动管理（推荐，不传 -Xmx / -Xms）", w);
-        if (langCombo_) {
-            const int li = langCombo_->findData(QString::fromStdString(cfg_.language));
-            langCombo_->setCurrentIndex(li >= 0 ? li : 0);
-        }
         memAuto_->setChecked(cfg_.autoMemory);
         mv->addWidget(memAuto_);
 
@@ -1556,6 +1887,19 @@ public:
         form->addRow("游戏语言", langCombo_);
         v->addWidget(gbox);
 
+        auto* abox = new QGroupBox("外观", w);
+        auto* aform = new QFormLayout(abox);
+        setCardTitle(abox, aform, "外观");
+        themeCombo_ = new QComboBox(w);
+        themeCombo_->addItem("自动（找到 Noctalia 色板就用）", "auto");
+        themeCombo_->addItem("跟随系统调色板", "system");
+        themeCombo_->addItem("Noctalia / Material You", "noctalia");
+        aform->addRow("配色来源", themeCombo_);
+        themeHint_ = new QLabel(w);
+        themeHint_->setWordWrap(true);
+        themeHint_->setObjectName("pageSubtitle");
+        aform->addRow("", themeHint_);
+        v->addWidget(abox);
         v->addWidget(aboutSection());
         v->addStretch(1);
         connect(memAuto_, &QCheckBox::toggled, this, [this] {
@@ -1837,6 +2181,106 @@ public:
         }
     }
 
+    // 切页：换索引 + 旧页淡出。动画时长写在这里，想关掉把 150 改成 0。
+    // 不用 QGraphicsOpacityEffect：窗口是 WA_TranslucentBackground，effect 会把自绘的
+    // 窗口底色一起淡成透明，看起来就是"整块变透明/动画失败"。改成把旧页抓成一张
+    // 透明度递减的贴图盖在新页上，底色始终由 paintEvent 画，不会打洞。
+    void switchPage(int idx) {
+        if (!stack_ || idx < 0 || idx >= stack_->count()) return;
+        if (idx == stack_->currentIndex()) return;
+        if (pageAnim_) { pageAnim_->stop(); pageAnim_->deleteLater(); pageAnim_ = nullptr; }
+        if (fadeOverlay_) {
+            fadeOverlay_->hide();          // 先藏起来，否则下一次 grab 会把上一张残影也抓进去
+            fadeOverlay_->deleteLater();
+            fadeOverlay_ = nullptr;
+        }
+        if (switching_) return;            // 极端情况下（重入）直接跳过这次动画
+        switching_ = true;
+        const QPixmap old = stack_->grab();
+        stack_->setCurrentIndex(idx);
+        if (old.isNull()) return;
+        auto* ov = new FadeOverlay(stack_, old);
+        fadeOverlay_ = ov;
+        auto* anim = new QVariantAnimation(this);
+        anim->setStartValue(0.0);
+        anim->setEndValue(1.0);
+        anim->setDuration(150);
+        anim->setEasingCurve(QEasingCurve::OutQuad);
+        connect(anim, &QVariantAnimation::valueChanged, ov,
+                [ov](const QVariant& v) { ov->setFade(1.0 - v.toReal()); });
+        connect(anim, &QVariantAnimation::finished, this, [this, ov, anim] {
+            if (fadeOverlay_ == ov) fadeOverlay_ = nullptr;
+            ov->deleteLater();
+            anim->deleteLater();
+        });
+        pageAnim_ = anim;
+        anim->start();
+        switching_ = false;
+    }
+
+    // ---- 配色来源：系统调色板 / Noctalia（Material You）色板 ----
+    // niri 下没有系统级的强调色概念，Noctalia 会把壁纸算出来的 M3 色板渲染成
+    // 一份扁平 TOML（本机 ~/.cache/nyxuri/palette.toml），启动器直接读它。
+    void applyPalette() {
+        if (!qApp) return;
+        m3_ = core::findM3Palette();
+        const std::string src = cfg_.themeSource;
+        const bool useNoctalia =
+            m3_.valid() && (src == "noctalia" || (src == "auto" && !m3_.path.empty()));
+        if (useNoctalia)
+            qApp->setPalette(paletteFromM3(m3_));
+        else
+            qApp->setPalette(defaultPalette_);
+        lastPalette_ = qApp->palette();   // changeEvent 里用它判断"是不是自己设的"
+        updateThemeHint();
+        setupPaletteWatch();
+    }
+
+    void applyStyleSheet() {
+        if (!qApp) return;
+        const Theme th = themeFor(qApp->palette());
+        theme_ = th;
+        if (roundedCorners_) update();   // 背景是自绘的，换色后要重画
+        if (qEnvironmentVariableIntValue("MC263_DEBUG_THEME") == 1)
+            std::fprintf(stderr, "mc263-qt: 配色=%s 色板=%s window=%s accent=%s\n",
+                         cfg_.themeSource.c_str(),
+                         m3_.valid() ? m3_.path.c_str() : "(系统调色板)",
+                         th.window.toUtf8().constData(), th.accent.toUtf8().constData());
+        const QString chevron = makeChevron(QString::fromStdString(layout_.configDir.string()),
+                                            QColor(th.muted));
+        qApp->setStyleSheet(buildStyleSheet(th, chevron));
+        updateThemeHint();
+    }
+
+    void updateThemeHint() {
+        if (!themeHint_) return;
+        QString txt;
+        if (m3_.valid())
+            txt = QStringLiteral("读的是 %1（%2）")
+                      .arg(QString::fromStdString(m3_.path),
+                           m3_.dark() ? QStringLiteral("深色") : QStringLiteral("浅色"));
+        else
+            txt = QStringLiteral("没找到 Noctalia 色板（会依次找 %1）")
+                      .arg(QString::fromStdString(core::paletteCandidates().front()));
+        if (core::isNiriSession()) txt += QStringLiteral(" · niri 会话");
+        themeHint_->setText(txt);
+    }
+
+    // 壁纸一换 Noctalia 会重渲染色板：盯着文件，变了就重新上色（不用重启）
+    void setupPaletteWatch() {
+        if (!paletteWatch_) {
+            paletteWatch_ = new QFileSystemWatcher(this);
+            connect(paletteWatch_, &QFileSystemWatcher::fileChanged, this, [this](const QString&) {
+                applyPalette();
+                applyStyleSheet();
+            });
+        }
+        const QStringList watched = paletteWatch_->files();
+        if (!watched.isEmpty()) paletteWatch_->removePaths(watched);
+        if (m3_.valid())
+            paletteWatch_->addPath(QString::fromStdString(m3_.path));
+    }
+
     void loadConfigToUi() {
         usernameEdit_->setText(QString::fromStdString(cfg_.username));
         launchVersion_->setCurrentText(QString::fromStdString(cfg_.version));
@@ -1856,6 +2300,14 @@ public:
         for (const auto& a : cfg_.extraJvmArgs) {
             if (!extraArgsEdit_->text().isEmpty()) extraArgsEdit_->setText(extraArgsEdit_->text() + " ");
             extraArgsEdit_->setText(extraArgsEdit_->text() + QString::fromStdString(a));
+        }
+        if (themeCombo_) {
+            const int ti = themeCombo_->findData(QString::fromStdString(cfg_.themeSource));
+            themeCombo_->setCurrentIndex(ti >= 0 ? ti : 0);
+        }
+        if (langCombo_) {
+            const int li = langCombo_->findData(QString::fromStdString(cfg_.language));
+            langCombo_->setCurrentIndex(li >= 0 ? li : 0);
         }
         memAuto_->setChecked(cfg_.autoMemory);
         memSlider_->setEnabled(!cfg_.autoMemory);
@@ -1883,19 +2335,27 @@ public:
         if (runtimeCheck_ && runtimeCheck_->isVisible() && runtimeCheck_->isChecked())
             cfg_.components.push_back("runtime");
         if (langCombo_) cfg_.language = langCombo_->currentData().toString().toStdString();
+        if (themeCombo_) cfg_.themeSource = themeCombo_->currentData().toString().toStdString();
         cfg_.extraJvmArgs.clear();
         QString extra = extraArgsEdit_->text().trimmed();
         if (!extra.isEmpty()) for (const QString& s : extra.split(' ', Qt::SkipEmptyParts))
             cfg_.extraJvmArgs.push_back(s.toStdString());
+        // 注意：这里必须用 dataRoot_ 当沙箱根。装到 /usr/bin 时 exe 目录不可写、
+        // 数据在 ~/.local/share/mc263，用 Layout::detect(exe, dir) 会把沙箱根设成
+        // /usr/bin，于是 XDG 下的目录被守卫当成 /home 敏感路径拒掉（启动直接报
+        // "无法创建运行目录: 拒绝写入受保护目录"）。
         std::string dir = gameDirEdit_->text().trimmed().toStdString();
-        const std::string exe = QCoreApplication::applicationFilePath().toStdString();
         if (dir.empty()) {
             cfg_.gameDir.clear();
-            layout_ = core::Layout::detect(exe);
+            layout_ = core::Layout::at(dataRoot_);
         } else if (dir != layout_.gameDir.string()) {
-            layout_ = core::Layout::detect(exe, dir);
+            layout_ = core::Layout::at(dataRoot_, dir);
             cfg_.gameDir = dir;
         }
+        // 兜底：万一哪条路径又把沙箱根搞坏了，宁可退回数据根，也别让启动时报
+        // "拒绝写入受保护目录" 这种用户完全没法处理的错。
+        std::string lerr;
+        if (!layout_.writable(lerr)) layout_ = core::Layout::at(dataRoot_);
     }
 
     // ---- 自动保存：任何设置改动 400ms 后写盘，不需要「保存」按钮 ----
@@ -1918,6 +2378,13 @@ public:
                 this, &LauncherWindow::scheduleAutoSave);
         connect(langCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &LauncherWindow::scheduleAutoSave);
+        connect(themeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
+            if (loadingConfig_) return;
+            cfg_.themeSource = themeCombo_->currentData().toString().toStdString();
+            applyPalette();
+            applyStyleSheet();
+            scheduleAutoSave();
+        });
         connect(xmsCheck_, &QCheckBox::toggled, this, &LauncherWindow::scheduleAutoSave);
         for (auto* cb : compChecks_)
             connect(cb, &QCheckBox::toggled, this, &LauncherWindow::scheduleAutoSave);
@@ -1952,12 +2419,39 @@ public:
         if (!cur.isEmpty()) launchVersion_->setCurrentText(cur);
         else launchVersion_->setCurrentText(QString::fromStdString(cfg_.version));
         launchState_->setText("本地版本 " + QString::number(vers.size()) + " 个");
+        refreshVersionList();
     }
+    // 取 Mojang 的 latest.snapshot（预览版），填进版本框，让用户自己点开始下载
+    void fetchLatestSnapshot() {
+        auto* p = new QProcess(this);
+        p->setProgram(pythonBin());
+        p->setArguments({QString::fromStdString(scriptPath_.string()), "--latest-snapshot",
+                         "--mc-dir", QString::fromStdString(layout_.gameDir.string())});
+        QPointer<LauncherWindow> guard(this);
+        connect(p, &QProcess::finished, this, [this, guard, p](int, QProcess::ExitStatus) {
+            const QJsonDocument doc = QJsonDocument::fromJson(p->readAllStandardOutput());
+            const QString id = doc.isObject() ? doc.object().value("version").toString() : QString();
+            if (guard) {
+                if (id.isEmpty()) {
+                    downloadLog_->appendPlainText(
+                        "拿不到最新预览版：" + QString::fromUtf8(p->readAllStandardError()).trimmed());
+                } else {
+                    downloadVersion_->setCurrentText(id);
+                    downloadLog_->appendPlainText("最新预览版：" + id + "（点「开始下载」拉到本地）");
+                }
+            }
+            p->deleteLater();
+        });
+        p->start();
+    }
+
     void refreshOnlineVersions() {
         auto* p = new QProcess(this);
         p->setProgram(pythonBin());
-        p->setArguments({QString::fromStdString(scriptPath_.string()), "--list-versions",
-                         "--mc-dir", QString::fromStdString(layout_.gameDir.string())});
+        QStringList listArgs{QString::fromStdString(scriptPath_.string()), "--list-versions",
+                             "--mc-dir", QString::fromStdString(layout_.gameDir.string())};
+        if (snapCheck_ && snapCheck_->isChecked()) listArgs << "--snapshots";
+        p->setArguments(listArgs);
         QPointer<LauncherWindow> guard(this);
         connect(p, &QProcess::finished, this, [this, guard, p](int, QProcess::ExitStatus) {
             QByteArray out = p->readAllStandardOutput();
@@ -2156,16 +2650,18 @@ public:
     }
 
     core::Layout layout_;
+    std::filesystem::path dataRoot_;
     core::Config cfg_;
-    bool applyingTheme_ = false;
-    QString chevronPath_;
     std::vector<core::JavaInfo> javas_;
     std::filesystem::path scriptPath_;
     int maxMemoryMb_ = 8192;
     QString buffer_;
     QProcess* downloadProc_ = nullptr;
     QProcess* launchProc_ = nullptr;
-    QListWidget* nav_ = nullptr;
+    QTabBar* nav_ = nullptr;
+    QPointer<QWidget> fadeOverlay_;
+    QPointer<QVariantAnimation> pageAnim_;
+    bool switching_ = false;
     QStackedWidget* stack_ = nullptr;
     QStackedWidget* rootStack_ = nullptr;
     QWidget* mainPage_ = nullptr;
@@ -2236,11 +2732,35 @@ public:
     QLabel* dirsState_ = nullptr;
     QLineEdit* extraArgsEdit_ = nullptr;
     QComboBox* langCombo_ = nullptr;
+    QComboBox* themeCombo_ = nullptr;
+    QCheckBox* snapCheck_ = nullptr;
+    QListWidget* verList_ = nullptr;
+    QLabel* verSummary_ = nullptr;
+    QLabel* themeHint_ = nullptr;
+    QFileSystemWatcher* paletteWatch_ = nullptr;
+    QPalette defaultPalette_;
+    QPalette lastPalette_;   // 最近一次由本程序设下去的调色板
+    core::M3Palette m3_;
+    Theme theme_;
+    bool roundedCorners_ = false;
     QTimer* autosaveTimer_ = nullptr;
     bool loadingConfig_ = false;
 };
 
+// 崩溃时把调用栈打到 stderr：终端里跑 ./build/mc263-qt 就能看到，方便定位
+static void fatalSignal(int sig) {
+    void* frames[64];
+    const int n = ::backtrace(frames, 64);
+    const std::string head = "\nmc263-qt: 收到信号 " + std::to_string(sig) + "，调用栈：\n";
+    ::write(2, head.data(), head.size());
+    ::backtrace_symbols_fd(frames, n, 2);
+    ::_Exit(128 + sig);
+}
+
 int main(int argc, char** argv) {
+    std::signal(SIGSEGV, fatalSignal);
+    std::signal(SIGABRT, fatalSignal);
+    std::signal(SIGBUS, fatalSignal);
     // 平台插件必须在 QApplication 之前定好：Wayland 会话优先原生 wayland，
     // 缺插件时回退 xcb（XWayland），两者都没有则直接给出安装提示后退出。
     const core::PlatformPick pick = preparePlatform();

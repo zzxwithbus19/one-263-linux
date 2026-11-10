@@ -14,7 +14,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VER="${MC263_VER:-26.3}"
-REL="${MC263_REL:-1}"
+# pkgrel 以 PKGBUILD 为唯一来源，MC263_REL 可临时覆盖
+REL="${MC263_REL:-$(sed -n 's/^pkgrel=//p' "$(dirname "$0")/PKGBUILD" | head -1)}"
+REL="${REL:-1}"
 OUT="${MC263_ARCH_OUT:-$ROOT/dist/arch}"
 
 step() { printf '\033[1m==> %s\033[0m\n' "$*"; }
@@ -66,6 +68,18 @@ if [ -n "$missing" ]; then
     warn "请自己装：sudo pacman -S --needed $missing"
     [ "$NODEPS" = 0 ] && warn "（不想现在装，可加 --nodeps 先出包，但该包在这些依赖齐之前装不上）"
 fi
+
+# ---------- 3.5 打包者信息（.PKGINFO 的 packager 字段）----------
+if [ -z "${PACKAGER:-}" ]; then
+    _name="$(git -C "$ROOT" config user.name 2>/dev/null || true)"
+    _mail="$(git -C "$ROOT" config user.email 2>/dev/null || true)"
+    if [ -n "$_name" ] && [ -n "$_mail" ]; then
+        export PACKAGER="$_name <$_mail>"
+    else
+        export PACKAGER="mc263 <mc263@users.noreply.github.com>"
+    fi
+fi
+echo "  packager = $PACKAGER"
 
 # ---------- 4. makepkg ----------
 step "makepkg（只构建，不安装、不联网拉依赖）"

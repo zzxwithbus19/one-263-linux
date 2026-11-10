@@ -224,6 +224,91 @@ Cached:          2097152 kB
     check(requiredJavaMajor(l, "26.3") == 25, "Java 要求：有 version json 时读 javaVersion.majorVersion");
     check(requiredJavaMajor(l, "1.20.1") == 21, "Java 要求：没有 json 时按版本号推断");
 
+    // 9.5) Modrinth 版本里的前置（dependencies）解析
+    {
+        const std::string kVer = R"([{
+            "id": "ver-1", "version_number": "1.2.3", "name": "demo",
+            "game_versions": ["1.21.1"], "loaders": ["fabric"],
+            "files": [{"url": "https://example.invalid/a.jar", "filename": "a.jar",
+                       "hashes": {"sha1": "abc"}, "primary": true}],
+            "dependencies": [
+                {"version_id": "depv", "project_id": "P1", "dependency_type": "required"},
+                {"project_id": "P2", "dependency_type": "optional"},
+                {"file_name": "some-non-modrinth-mod.jar", "dependency_type": "required"}
+            ]
+        }])";
+        std::vector<mc263::modrinth::Version> vs;
+        std::string err;
+        check(mc263::modrinth::parseVersions(kVer, vs, err) && vs.size() == 1,
+              "Modrinth：版本数组解析");
+        check(vs[0].dependencies.size() == 3, "Modrinth：dependencies 全部保留");
+        check(vs[0].dependencies[0].projectId == "P1" && vs[0].dependencies[0].versionId == "depv" &&
+                  vs[0].dependencies[0].type == "required",
+              "Modrinth：required 前置带 project/version id");
+        check(vs[0].dependencies[2].projectId.empty() &&
+                  vs[0].dependencies[2].fileName == "some-non-modrinth-mod.jar",
+              "Modrinth：只有 file_name 的前置（非 Modrinth 项目）能识别");
+        check(mc263::modrinth::primaryFile(vs[0]) != nullptr &&
+                  mc263::modrinth::primaryFile(vs[0])->filename == "a.jar",
+              "Modrinth：主文件选择");
+    }
+
+    // 10) Noctalia 色板解析 / 路径搜索 / niri 会话识别
+    {
+        const std::string kPal = R"(
+# comment line
+primary = "#004890"
+on_primary = "#ffffff"
+background = "#f9f9ff"
+on_surface = "#191c21"
+surface_container_low = "#f2f3fb"
+broken = "not-a-color"
+)";
+        M3Palette pal = parseM3Palette(kPal, "/tmp/palette.toml");
+        check(pal.valid(), "色板：background / on_surface / primary 齐了才算有效");
+        check(pal.get("primary") == "#004890", "色板：键值解析");
+        check(pal.get("outline", "#000000") == "#000000", "色板：缺字段走回退值");
+        check(pal.colors.find("broken") == pal.colors.end(), "色板：非法颜色被丢弃");
+        check(!pal.dark(), "色板：浅色背景判为亮色");
+
+        M3Palette darkPal = parseM3Palette(
+            "background = \"#101318\"\non_surface = \"#e4e6eb\"\nprimary = \"#a8c7fa\"\n");
+        check(darkPal.dark(), "色板：深色背景判为暗色");
+        check(!parseM3Palette("primary = \"#004890\"\n").valid(), "色板：缺背景/正文时不算有效");
+
+        setenv("MC263_PALETTE", "/tmp/mc263-palette-test.toml", 1);
+        const auto cands = paletteCandidates();
+        check(!cands.empty() && cands.front() == "/tmp/mc263-palette-test.toml",
+              "色板：MC263_PALETTE 覆盖默认搜索路径");
+        unsetenv("MC263_PALETTE");
+
+        setenv("NIRI_SOCKET", "/run/user/1000/niri.test.sock", 1);
+        check(isNiriSession(), "会话：NIRI_SOCKET 存在 → niri");
+        unsetenv("NIRI_SOCKET");
+        setenv("XDG_CURRENT_DESKTOP", "sway", 1);
+        setenv("XDG_SESSION_DESKTOP", "sway", 1);
+        check(!isNiriSession(), "会话：非 niri 桌面名 → 不是 niri");
+        setenv("XDG_CURRENT_DESKTOP", "niri", 1);
+        check(isNiriSession(), "会话：XDG_CURRENT_DESKTOP=niri → niri");
+    }
+
+    // 11) 只读安装（ELF 在 /usr/bin）时的布局：数据根必须当沙箱根
+    {
+        std::string err;
+        Layout data = Layout::at("/tmp/mc263-layout-test");
+        check(data.writable(err), "布局：数据根自身可写");
+        Layout same =
+            Layout::at("/tmp/mc263-layout-test", "/tmp/mc263-layout-test/minecraft");
+        check(same.writable(err), "布局：游戏目录在数据根之下时可写");
+        Layout bad =
+            Layout::detect("/usr/bin/mc263-qt", "/tmp/mc263-layout-test/minecraft");
+        check(!bad.writable(err), "布局：拿 /usr/bin 当沙箱根会被拒（修复前就踩这个坑）");
+        Layout homePick = Layout::at("/tmp/mc263-layout-test", "/home/bus/Games/mc263");
+        check(homePick.writable(err), "布局：用户显式选在 ~ 下的游戏目录允许写入");
+        Layout danger = Layout::at("/tmp/mc263-layout-test", "/etc/mc263");
+        check(!danger.writable(err), "布局：显式选 /etc 仍然拒绝");
+    }
+
     std::cout << "core: " << passed << " 项通过\n";
     return 0;
 }

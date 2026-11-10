@@ -102,7 +102,7 @@ sudo dnf install gcc-c++ make qt6-qtbase-devel qt6-qtwayland python3
 sudo zypper install gcc-c++ make qt6-qtbase-devel libQt6WaylandClient6 python3
 
 make                 # 编译 build/mc263-qt
-make check           # 57 项核心单测 + 7 项内嵌下载器自测（全部离线）
+make check           # 78 项核心单测 + 7 项内嵌下载器自测（全部离线）
 make rpm             # 出 rpm（本分支主线，见第 6 节）
 make info            # 编译器 / Qt6 / 产物路径
 
@@ -117,15 +117,19 @@ MC263_SHOT=/tmp/ui.png build/mc263-qt     # 抓首屏 PNG 后退出（看布局�
 
 ## 3. 界面与功能
 
+导航是**顶部一排横向标签**（切页带淡入动画），不是侧边栏：
+
 | 页面 | 能力 |
 |------|------|
 | 启动游戏 | 本地版本下拉、玩家名、一键启动；`QProcess` 异步 exec java，日志实时刷新 |
-| 下载游戏 | 在线版本列表、组件勾选、official / bmclapi 镜像、并发线程（默认 10）；JSON 进度条与日志；**清除下载缓存**按钮（只删元数据缓存，已下载的 jar / 库 / 资源不受影响） |
-| Mod 下载 | 搜 Modrinth：关键词 + 加载器 + 游戏版本过滤，**排序可选下载量 / 相关度 / 关注数 / 最新发布 / 最近更新**；双击即装，SHA1 校验、已存在则跳过 |
+| 下载游戏 | 在线版本列表（可勾「含预览版」把 snapshot 一起列出来）、组件勾选、official / bmclapi 镜像、并发线程（默认 10）；JSON 进度条与日志；**清除下载缓存**按钮（只删元数据缓存，已下载的 jar / 库 / 资源不受影响） |
+| Mod 下载 | 搜 Modrinth：关键词 + 加载器 + 游戏版本过滤，**排序可选下载量 / 相关度 / 关注数 / 最新发布 / 最近更新**；双击即装，SHA1 校验、已存在则跳过；**自动补齐 Mod 的 required 前置**，拿不到文件的转成手动下载清单 |
+| 版本管理 | 左栏是已装版本（卡片列表，选中态实心强调色），右栏是**该版本的 Java 与兼容性查验**：扫配置 / Mojang JRE / `JAVA_HOME` / `PATH` / `/usr/lib/jvm`，11 项检查（架构、Java 版本、依赖库、natives、图形音频库、内存、磁盘、路径守卫，可选网络连通性） |
 | 加载器 | Fabric / Quilt 版本列表拉取 + 一键安装：抓 profile json、与原版 json 合并、下载依赖到 `libraries/`，生成 `versions/<版本>+<加载器>/` |
-| Java 与兼容性 | 后台线程扫描配置 / Mojang JRE / `JAVA_HOME` / `PATH` / `/usr/lib/jvm`；11 项查验（架构、Java 版本、依赖库、natives、图形音频库、内存、磁盘、路径守卫，可选网络连通性） |
 | 游戏目录 | 独立一页：自动扫描 ELF 旁 / XDG 数据目录 / `~/.minecraft`（**只列真实存在的目录**），列出各自的版本数与 mods 数，选中即切换，避免两套装各用一份 |
-| 设置 / 内存 | 配色跟随系统调色板（KDE 配色方案 / 强调色直接生效，明暗切换即时重绘）；**内存默认交给 JVM 管理**（不传 `-Xmx`/`-Xms`），关掉自动后可手动拖；四段式内存条：程序占用 → 缓存 → 游戏堆 → 余下可用，2 秒刷新、超可用内存红字提示；额外 JVM 参数；**游戏语言默认跟随系统 locale**（识别不到就 `en_us`） |
+| 设置 / 内存 | **配色来源可选**：自动（找到 Noctalia 色板就用）/ 跟随系统调色板 / Noctalia（Material You）；**内存默认交给 JVM 管理**（不传 `-Xmx`/`-Xms`），关掉自动后可手动拖；四段式内存条：程序占用 → 缓存 → 游戏堆 → 余下可用，2 秒刷新、超可用内存红字提示；额外 JVM 参数；**游戏语言默认跟随系统 locale**（识别不到就 `en_us`） |
+
+窗口圆角默认 12px（`kWindowRadius` 常量，合成器给了服务端装饰时它自己画圆角、这里就不画）。
 
 **版本隔离（始终开启，没有关闭开关）**：启动时 `--gameDir` 指向 `versions/<版本>/`，
 `mods`、`saves`、`resourcepacks`、`shaderpacks`、`logs` 都在该目录下自动建好 ——
@@ -284,6 +288,7 @@ mc26-one/
 │   ├── make-repo.sh            用 createrepo_c 生成 dnf 仓库目录
 │   ├── mc263.repo.example      用户侧 repo 文件模板
 │   ├── mc263.desktop           应用菜单项（Exec=mc263-qt）
+│   ├── niri-mc263.kdl          niri 窗口规则示例（浮动尺寸 / 圆角 / 边框）
 │   └── mc263.svg               图标
 └── tests/
     ├── core_test.cpp           57 项核心单测
