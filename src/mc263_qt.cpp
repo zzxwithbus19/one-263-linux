@@ -183,6 +183,8 @@ def main():
     ap.add_argument("--components", default="jar,libraries,assets,runtime")
     ap.add_argument("--base-url", default="")
     ap.add_argument("--list-versions", action="store_true")
+    ap.add_argument("--snapshots", action="store_true")
+    ap.add_argument("--latest-snapshot", action="store_true")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
     comps = set(x for x in args.components.split(",") if x)
@@ -193,13 +195,20 @@ def main():
     try:
         mtext = get(mirror_url(MANIFEST, args.mirror, args.base_url))
         manifest = json.loads(mtext)
+        if args.latest_snapshot:
+            print(json.dumps({"version": manifest.get("latest", {}).get("snapshot", "")},
+                             ensure_ascii=False), flush=True)
+            return 0
         if args.list_versions:
-            rel = [v["id"] for v in manifest.get("versions", []) if v.get("type") == "release"][:20]
+            types = {"release", "snapshot"} if args.snapshots else {"release"}
+            rel = [v["id"] for v in manifest.get("versions", []) if v.get("type") in types]
+            rel = rel[:(30 if args.snapshots else 20)]
             print(json.dumps({"versions": rel}, ensure_ascii=False), flush=True)
             return 0
         wanted = args.version
-        if wanted == "latest":
-            wanted = manifest.get("latest", {}).get("release", "26.3")
+        if wanted in ("latest", "latest-snapshot"):
+            key = "snapshot" if wanted == "latest-snapshot" else "release"
+            wanted = manifest.get("latest", {}).get(key, "26.3")
         entry = next((v for v in manifest.get("versions", []) if v.get("id") == wanted), None)
         if not entry:
             emit("error", 0, 0, "找不到版本 " + wanted, False, "")
@@ -487,6 +496,14 @@ QWidget { color: @text@; }
 QMainWindow, QStackedWidget, QStatusBar { background: transparent; }
 QDialog { background: @window@; }
 QToolTip { background: @card@; color: @text@; border: 1px solid @border@; padding: 4px 6px; }
+
+/* 版本管理左栏：卡片式列表，选中态是实心强调色 */
+QListWidget#verList {
+    background: @card@; border: 1px solid @border@; border-radius: 10px; padding: 4px;
+}
+QListWidget#verList::item { height: 38px; padding: 0 10px; border-radius: 8px; color: @text@; }
+QListWidget#verList::item:hover { background: @hover@; }
+QListWidget#verList::item:selected { background: @accent@; color: white; }
 
 /* 顶部导航：一排标签，选中态是浅蓝药丸 */
 QTabBar { background: transparent; }
@@ -911,8 +928,8 @@ private:
         nav_->setUsesScrollButtons(false);
         nav_->setMovable(false);
         nav_->setFocusPolicy(Qt::NoFocus);
-        nav_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        for (const char* s : {"启动游戏", "下载游戏", "Mod 下载", "Java 与兼容性", "游戏目录", "设置 / 内存"})
+        nav_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        for (const char* s : {"启动游戏", "下载游戏", "Mod 下载", "版本管理", "游戏目录", "设置 / 内存"})
             nav_->addTab(QString::fromUtf8(s));
         stack_ = new QStackedWidget(this);
         // 每页放进滚动区：窗口缩小/字体变大时滚动，而不是把卡片内容挤到重叠
@@ -931,10 +948,10 @@ private:
         addPage(pageLaunch());
         addPage(pageDownload());
         addPage(pageMods());
-        addPage(pageJavaCompat());
+        addPage(pageVersionManager());
         addPage(pageDirs());
         addPage(pageSettings());
-        v->addWidget(nav_);
+        v->addWidget(nav_, 0, Qt::AlignHCenter);
         v->addWidget(stack_, 1);
         mainPage_ = central;
 
@@ -1133,7 +1150,15 @@ private:
         mirrorCombo_->addItem("bmclapi · 国内镜像", "bmclapi");
         jobsSpin_ = new QSpinBox(w); jobsSpin_->setRange(1, 16); jobsSpin_->setValue(10);
         auto* onlineBtn = new QPushButton("获取在线版本", w);
-        auto* verRow = new QHBoxLayout(); verRow->addWidget(downloadVersion_, 1); verRow->addWidget(onlineBtn);
+        snapCheck_ = new QCheckBox("含预览版", w);
+        snapCheck_->setToolTip("勾上后「获取在线版本」会同时列出 snapshot（预览版）");
+        auto* latestSnapBtn = new QPushButton("最新预览版", w);
+        latestSnapBtn->setToolTip("把版本填成 Mojang 当前的 latest.snapshot，再点「开始下载」");
+        auto* verRow = new QHBoxLayout();
+        verRow->addWidget(downloadVersion_, 1);
+        verRow->addWidget(onlineBtn);
+        verRow->addWidget(snapCheck_);
+        verRow->addWidget(latestSnapBtn);
         form->addRow("版本", verRow);
         form->addRow("下载源", mirrorCombo_);
         form->addRow("并发线程", jobsSpin_);
@@ -1207,6 +1232,7 @@ private:
         });
         connect(clearCacheBtn_, &QPushButton::clicked, this, &LauncherWindow::clearDownloadCache);
         connect(onlineBtn, &QPushButton::clicked, this, &LauncherWindow::refreshOnlineVersions);
+        connect(latestSnapBtn, &QPushButton::clicked, this, &LauncherWindow::fetchLatestSnapshot);
         return w;
     }
 
@@ -1521,46 +1547,127 @@ private:
         }).detach();
     }
 
-    QWidget* pageJavaCompat() {
+    // 版本管理：左栏列已装版本，右栏是 Java 与兼容性（原「Java 与兼容性」页融进来）
+    QWidget* pageVersionManager() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        addPageHeader(v, "Java 与兼容性", "列出所有 Java 及其来源，逐项检查架构、依赖库、natives 与图形音频库");
-        auto* jbox = new QGroupBox("可用的 Java", w);
+        addPageHeader(v, "版本管理", "左边是已装的游戏版本，右边是这个版本要的 Java 与兼容性查验");
+
+        auto* row = new QHBoxLayout();
+        row->setSpacing(12);
+
+        auto* left = new QWidget(w);
+        left->setFixedWidth(250);
+        auto* lv = new QVBoxLayout(left);
+        lv->setContentsMargins(0, 0, 0, 0);
+        lv->setSpacing(6);
+        auto* lhead = new QLabel("已装版本", left);
+        lhead->setObjectName("cardTitle");
+        lv->addWidget(lhead);
+        verList_ = new QListWidget(left);
+        verList_->setObjectName("verList");
+        verList_->setFrameShape(QFrame::NoFrame);
+        verList_->setSelectionMode(QAbstractItemView::SingleSelection);
+        verList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        lv->addWidget(verList_, 1);
+        auto* lrow = new QHBoxLayout();
+        auto* refreshBtn = new QPushButton("刷新", left);
+        auto* openDirBtn = new QPushButton("打开目录", left);
+        lrow->addWidget(refreshBtn);
+        lrow->addWidget(openDirBtn);
+        lrow->addStretch(1);
+        lv->addLayout(lrow);
+        row->addWidget(left);
+
+        auto* right = new QWidget(w);
+        auto* rv = new QVBoxLayout(right);
+        rv->setContentsMargins(0, 0, 0, 0);
+        rv->setSpacing(10);
+        verSummary_ = new QLabel(right);
+        verSummary_->setObjectName("pageSubtitle");
+        verSummary_->setWordWrap(true);
+        verSummary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        auto* useVerBtn = new QPushButton("设为启动版本", right);
+        useVerBtn->setObjectName("primary");
+        auto* srow = new QHBoxLayout();
+        srow->addWidget(verSummary_, 1);
+        srow->addWidget(useVerBtn);
+        rv->addLayout(srow);
+
+        auto* jbox = new QGroupBox("可用的 Java", right);
         auto* jv = new QVBoxLayout(jbox);
         setCardTitle(jbox, jv, "可用的 Java");
-        javaTable_ = new QTableWidget(0, 4, w);
+        javaTable_ = new QTableWidget(0, 4, right);
         javaTable_->setHorizontalHeaderLabels({"路径", "版本", "来源", "状态"});
         javaTable_->horizontalHeader()->setStretchLastSection(true);
         javaTable_->verticalHeader()->setVisible(false);
         javaTable_->setShowGrid(false);
         javaTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
         jv->addWidget(javaTable_);
-        javaCombo_ = new QComboBox(w);
-        javaState_ = new QLabel("尚未扫描", w);
+        javaCombo_ = new QComboBox(right);
+        javaState_ = new QLabel("尚未扫描", right);
         auto* jrow = new QHBoxLayout();
-        auto* rescan = new QPushButton("重新扫描", w);
-        auto* manual = new QPushButton("手动指定 java", w);
-        auto* useBtn = new QPushButton("设为当前 Java", w);
-        jrow->addWidget(rescan); jrow->addWidget(manual); jrow->addWidget(useBtn); jrow->addStretch(1);
-        jv->addLayout(jrow); jv->addWidget(new QLabel("当前选择", w)); jv->addWidget(javaCombo_);
+        auto* rescan = new QPushButton("重新扫描", right);
+        auto* manual = new QPushButton("手动指定 java", right);
+        auto* useBtn = new QPushButton("设为当前 Java", right);
+        jrow->addWidget(rescan);
+        jrow->addWidget(manual);
+        jrow->addWidget(useBtn);
+        jrow->addStretch(1);
+        jv->addLayout(jrow);
+        jv->addWidget(new QLabel("当前选择", right));
+        jv->addWidget(javaCombo_);
         jv->addWidget(javaState_);
-        v->addWidget(jbox, 2);
-        auto* cbox = new QGroupBox("兼容性查验", w);
+        rv->addWidget(jbox, 2);
+
+        auto* cbox = new QGroupBox("兼容性查验", right);
         auto* cv = new QVBoxLayout(cbox);
         setCardTitle(cbox, cv, "兼容性查验");
-        compatTable_ = new QTableWidget(0, 3, w);
+        compatTable_ = new QTableWidget(0, 3, right);
         compatTable_->setHorizontalHeaderLabels({"检查项", "状态", "说明"});
         compatTable_->horizontalHeader()->setStretchLastSection(true);
         compatTable_->verticalHeader()->setVisible(false);
         compatTable_->setShowGrid(false);
         compatTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
         cv->addWidget(compatTable_);
-        compatState_ = new QLabel("尚未检查", w);
-        netCheck_ = new QCheckBox("同时检查官方下载源连通性", w);
-        auto* checkBtn = new QPushButton("运行兼容性查验", w);
-        auto* crow = new QHBoxLayout(); crow->addWidget(checkBtn); crow->addWidget(netCheck_); crow->addStretch(1);
-        cv->addLayout(crow); cv->addWidget(compatState_);
-        v->addWidget(cbox, 3);
+        compatState_ = new QLabel("尚未检查", right);
+        netCheck_ = new QCheckBox("同时检查官方下载源连通性", right);
+        auto* checkBtn = new QPushButton("运行兼容性查验", right);
+        auto* crow = new QHBoxLayout();
+        crow->addWidget(checkBtn);
+        crow->addWidget(netCheck_);
+        crow->addStretch(1);
+        cv->addLayout(crow);
+        cv->addWidget(compatState_);
+        rv->addWidget(cbox, 3);
+        rv->addStretch(1);
+
+        auto* scroll = new QScrollArea(w);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidget(right);
+        row->addWidget(scroll, 1);
+        v->addLayout(row, 1);
+
+        connect(verList_, &QListWidget::currentRowChanged, this, [this](int r) {
+            if (r >= 0 && verList_->item(r)) showVersionDetail(verList_->item(r)->text());
+        });
+        connect(refreshBtn, &QPushButton::clicked, this, &LauncherWindow::refreshVersionList);
+        connect(useVerBtn, &QPushButton::clicked, this, [this] {
+            const auto* it = verList_->currentItem();
+            if (!it) return;
+            cfg_.version = it->text().toStdString();
+            launchVersion_->setCurrentText(it->text());
+            saveConfigQuietly();
+            statusBar()->showMessage("启动版本已设为 " + it->text(), 5000);
+        });
+        connect(openDirBtn, &QPushButton::clicked, this, [this] {
+            const auto* it = verList_->currentItem();
+            if (!it) return;
+            QProcess::startDetached(
+                "xdg-open",
+                {QString::fromStdString(layout_.versionDir(it->text().toStdString()).string())});
+        });
         connect(rescan, &QPushButton::clicked, this, &LauncherWindow::refreshJava);
         connect(manual, &QPushButton::clicked, this, [this] {
             QString p = QFileDialog::getOpenFileName(this, "选择 java 可执行文件", "/usr/bin");
@@ -1573,7 +1680,50 @@ private:
             }
         });
         connect(checkBtn, &QPushButton::clicked, this, &LauncherWindow::runCompat);
+
+        refreshVersionList();
         return w;
+    }
+
+    // 左栏列表：已装版本
+    void refreshVersionList() {
+        if (!verList_) return;
+        const QString keep = verList_->currentItem() ? verList_->currentItem()->text() : QString();
+        const auto vers = core::availableVersions(layout_);
+        verList_->clear();
+        for (const auto& id : vers) verList_->addItem(QString::fromStdString(id));
+        if (verList_->count() == 0) {
+            if (verSummary_) verSummary_->setText("还没有装任何游戏版本；去「下载游戏」页拉一个，或先装个加载器");
+            return;
+        }
+        int idx = 0;
+        if (!keep.isEmpty()) {
+            const auto hits = verList_->findItems(keep, Qt::MatchExactly);
+            if (!hits.isEmpty()) idx = verList_->row(hits.first());
+        }
+        verList_->setCurrentRow(idx);
+    }
+
+    // 右栏头部：所选版本的要求与占用
+    void showVersionDetail(const QString& id) {
+        if (!verSummary_) return;
+        const std::string vid = id.toStdString();
+        const auto dir = layout_.versionDir(vid);
+        const int java = core::requiredJavaMajor(layout_, vid);
+        auto count = [](const std::filesystem::path& p) {
+            std::error_code ec;
+            int n = 0;
+            if (!std::filesystem::is_directory(p, ec)) return 0;
+            for (std::filesystem::directory_iterator it(p, ec), end; !ec && it != end; it.increment(ec)) ++n;
+            return n;
+        };
+        QString s = QString("<b>%1</b> · 需要 Java %2 · mods %3 · 存档 %4")
+                        .arg(id)
+                        .arg(java)
+                        .arg(count(dir / "mods"))
+                        .arg(count(dir / "saves"));
+        s += QString("<br>%1").arg(QString::fromStdString(dir.string()));
+        verSummary_->setText(s);
     }
 
     QWidget* pageDirs() {
@@ -2248,12 +2398,39 @@ private:
         if (!cur.isEmpty()) launchVersion_->setCurrentText(cur);
         else launchVersion_->setCurrentText(QString::fromStdString(cfg_.version));
         launchState_->setText("本地版本 " + QString::number(vers.size()) + " 个");
+        refreshVersionList();
     }
+    // 取 Mojang 的 latest.snapshot（预览版），填进版本框，让用户自己点开始下载
+    void fetchLatestSnapshot() {
+        auto* p = new QProcess(this);
+        p->setProgram(pythonBin());
+        p->setArguments({QString::fromStdString(scriptPath_.string()), "--latest-snapshot",
+                         "--mc-dir", QString::fromStdString(layout_.gameDir.string())});
+        QPointer<LauncherWindow> guard(this);
+        connect(p, &QProcess::finished, this, [this, guard, p](int, QProcess::ExitStatus) {
+            const QJsonDocument doc = QJsonDocument::fromJson(p->readAllStandardOutput());
+            const QString id = doc.isObject() ? doc.object().value("version").toString() : QString();
+            if (guard) {
+                if (id.isEmpty()) {
+                    downloadLog_->appendPlainText(
+                        "拿不到最新预览版：" + QString::fromUtf8(p->readAllStandardError()).trimmed());
+                } else {
+                    downloadVersion_->setCurrentText(id);
+                    downloadLog_->appendPlainText("最新预览版：" + id + "（点「开始下载」拉到本地）");
+                }
+            }
+            p->deleteLater();
+        });
+        p->start();
+    }
+
     void refreshOnlineVersions() {
         auto* p = new QProcess(this);
         p->setProgram(pythonBin());
-        p->setArguments({QString::fromStdString(scriptPath_.string()), "--list-versions",
-                         "--mc-dir", QString::fromStdString(layout_.gameDir.string())});
+        QStringList listArgs{QString::fromStdString(scriptPath_.string()), "--list-versions",
+                             "--mc-dir", QString::fromStdString(layout_.gameDir.string())};
+        if (snapCheck_ && snapCheck_->isChecked()) listArgs << "--snapshots";
+        p->setArguments(listArgs);
         QPointer<LauncherWindow> guard(this);
         connect(p, &QProcess::finished, this, [this, guard, p](int, QProcess::ExitStatus) {
             QByteArray out = p->readAllStandardOutput();
@@ -2535,6 +2712,9 @@ private:
     QLineEdit* extraArgsEdit_ = nullptr;
     QComboBox* langCombo_ = nullptr;
     QComboBox* themeCombo_ = nullptr;
+    QCheckBox* snapCheck_ = nullptr;
+    QListWidget* verList_ = nullptr;
+    QLabel* verSummary_ = nullptr;
     QLabel* themeHint_ = nullptr;
     QFileSystemWatcher* paletteWatch_ = nullptr;
     QPalette defaultPalette_;

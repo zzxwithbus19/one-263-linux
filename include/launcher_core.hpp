@@ -1024,9 +1024,10 @@ inline DownloadResult downloadAll(const Layout& l, const Config& c, const Progre
     JValue manifest = mc263::jsonParse(manifestText, err);
     if (!err.empty()) { result.error = "版本清单解析失败: " + err; return result; }
     std::string wanted = c.version;
-    if (wanted == "latest") {
+    if (wanted == "latest" || wanted == "latest-snapshot") {
         const JValue* latest = manifest.find("latest");
-        const JValue* rel = latest ? latest->find("release") : nullptr;
+        const JValue* rel =
+            latest ? latest->find(wanted == "latest-snapshot" ? "snapshot" : "release") : nullptr;
         wanted = rel ? rel->str() : "26.3";
     }
     const JValue* versions = manifest.find("versions");
