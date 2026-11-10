@@ -86,6 +86,9 @@ inline fs::path defaultSandboxRoot(const char* argv0 = nullptr) {
 struct Policy {
     fs::path sandboxRoot;
     bool allowOutside = false;
+    // 用户显式指定的目录（比如自己选在 ~/Games 下的游戏目录）：也算可信写入区。
+    // 系统关键路径（/etc、/usr…）不会被加进来，见 Layout::at()。
+    std::vector<fs::path> extraRoots;
 };
 
 inline Policy policyFromEnv(const char* argv0 = nullptr) {
@@ -107,6 +110,8 @@ inline Result checkWrite(const fs::path& target, const Policy& pol) {
     if (isCritical(root))
         return {false, "沙箱根目录本身是系统敏感路径: " + root.string(), abs};
     if (isUnder(abs, root)) return {true, "", abs};
+    for (const auto& extra : pol.extraRoots)
+        if (isUnder(abs, normalize(extra))) return {true, "", abs};
     if (isBlocked(abs))
         return {false, "拒绝写入受保护目录: " + abs.string() +
                            "（/、/home、/etc 等系统敏感路径一律禁用）", abs};

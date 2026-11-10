@@ -755,12 +755,13 @@ public:
             const QString data = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
             if (!data.isEmpty()) root = std::filesystem::path(data.toStdString());
         }
+        dataRoot_ = root;   // 可写的数据根：应用目录，或只读安装时的 XDG 数据目录
         layout_ = core::Layout::at(root);
         std::string err;
         cfg_.load(layout_.configFile, err);  // 配置路径只跟应用目录有关，可以先读
         // 配置里存过游戏目录：能写且过守卫才用，否则回退到默认的 <应用目录>/minecraft
         if (!cfg_.gameDir.empty()) {
-            core::Layout cand = core::Layout::detect(exe, cfg_.gameDir);
+            core::Layout cand = core::Layout::at(dataRoot_, cfg_.gameDir);
             std::string gerr;
             if (cand.writable(gerr)) layout_ = cand;
             else cfg_.gameDir.clear();
@@ -2168,13 +2169,16 @@ private:
         QString extra = extraArgsEdit_->text().trimmed();
         if (!extra.isEmpty()) for (const QString& s : extra.split(' ', Qt::SkipEmptyParts))
             cfg_.extraJvmArgs.push_back(s.toStdString());
+        // 注意：这里必须用 dataRoot_ 当沙箱根。装到 /usr/bin 时 exe 目录不可写、
+        // 数据在 ~/.local/share/mc263，用 Layout::detect(exe, dir) 会把沙箱根设成
+        // /usr/bin，于是 XDG 下的目录被守卫当成 /home 敏感路径拒掉（启动直接报
+        // "无法创建运行目录: 拒绝写入受保护目录"）。
         std::string dir = gameDirEdit_->text().trimmed().toStdString();
-        const std::string exe = QCoreApplication::applicationFilePath().toStdString();
         if (dir.empty()) {
             cfg_.gameDir.clear();
-            layout_ = core::Layout::detect(exe);
+            layout_ = core::Layout::at(dataRoot_);
         } else if (dir != layout_.gameDir.string()) {
-            layout_ = core::Layout::detect(exe, dir);
+            layout_ = core::Layout::at(dataRoot_, dir);
             cfg_.gameDir = dir;
         }
     }
@@ -2444,6 +2448,7 @@ private:
     }
 
     core::Layout layout_;
+    std::filesystem::path dataRoot_;
     core::Config cfg_;
     std::vector<core::JavaInfo> javas_;
     std::filesystem::path scriptPath_;

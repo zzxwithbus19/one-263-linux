@@ -292,6 +292,23 @@ broken = "not-a-color"
         check(isNiriSession(), "会话：XDG_CURRENT_DESKTOP=niri → niri");
     }
 
+    // 11) 只读安装（ELF 在 /usr/bin）时的布局：数据根必须当沙箱根
+    {
+        std::string err;
+        Layout data = Layout::at("/tmp/mc263-layout-test");
+        check(data.writable(err), "布局：数据根自身可写");
+        Layout same =
+            Layout::at("/tmp/mc263-layout-test", "/tmp/mc263-layout-test/minecraft");
+        check(same.writable(err), "布局：游戏目录在数据根之下时可写");
+        Layout bad =
+            Layout::detect("/usr/bin/mc263-qt", "/tmp/mc263-layout-test/minecraft");
+        check(!bad.writable(err), "布局：拿 /usr/bin 当沙箱根会被拒（修复前就踩这个坑）");
+        Layout homePick = Layout::at("/tmp/mc263-layout-test", "/home/bus/Games/mc263");
+        check(homePick.writable(err), "布局：用户显式选在 ~ 下的游戏目录允许写入");
+        Layout danger = Layout::at("/tmp/mc263-layout-test", "/etc/mc263");
+        check(!danger.writable(err), "布局：显式选 /etc 仍然拒绝");
+    }
+
     std::cout << "core: " << passed << " 项通过\n";
     return 0;
 }

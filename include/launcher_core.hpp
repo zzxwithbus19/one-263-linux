@@ -155,6 +155,10 @@ struct Layout {
         l.gameDir = gameDirOverride.empty()
                         ? l.appDir / "minecraft"
                         : mc263::safe::normalize(fs::path(gameDirOverride));
+        // 用户在界面里自己选的游戏目录可能落在 ~ 下（沙箱根之外），显式选择就认它，
+        // 但仍然拒绝 /etc、/usr 这类系统关键路径。
+        if (!gameDirOverride.empty() && !mc263::safe::isCritical(l.gameDir))
+            l.policy.extraRoots.push_back(l.gameDir);
         l.configDir = l.appDir / ".mc263";
         l.configFile = l.configDir / "config.json";
         l.versionsDir = l.gameDir / "versions";
