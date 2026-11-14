@@ -309,6 +309,35 @@ broken = "not-a-color"
         check(!danger.writable(err), "布局：显式选 /etc 仍然拒绝");
     }
 
+    // 12) 加载器版本（26.3+fabric）要用父版本的 client jar
+    {
+        std::string e;
+        fs::create_directories(l.versionDir("26.3+fabric"), ec);
+        { std::ofstream o(l.versionJson("26.3+fabric")); o << kFakeVersion; }
+        { std::ofstream o(l.versionJar("26.3")); o << "fake-jar"; }   // 父版本 jar
+
+        Config lc;
+        lc.version = "26.3";
+        lc.profile = "fabric";
+        lc.arch = "x86_64";
+        VersionMeta lvm = loadVersion(l, lc);
+        check(lvm.ok(), "加载器版本：json 能解析 " + lvm.error);
+        bool hasParentJar = false, hasOwnJar = false;
+        for (const auto& p : lvm.classpath) {
+            if (p.find("26.3/26.3.jar") != std::string::npos) hasParentJar = true;
+            if (p.find("26.3+fabric/26.3+fabric.jar") != std::string::npos) hasOwnJar = true;
+        }
+        check(hasParentJar && !hasOwnJar, "加载器版本：classpath 用父版本 jar，不塞不存在的自身 jar");
+
+        Config noParent;
+        noParent.version = "1.21.9";   // 没有这个版本
+        noParent.profile = "fabric";
+        noParent.arch = "x86_64";
+        VersionMeta miss = loadVersion(l, noParent);
+        check(!miss.ok() && miss.error.find("缺少版本 json") != std::string::npos,
+              "加载器版本：父版本缺失时报缺 json");
+    }
+
     std::cout << "core: " << passed << " 项通过\n";
     return 0;
 }
