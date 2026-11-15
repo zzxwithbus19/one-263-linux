@@ -17,3 +17,5 @@ minecraft/
 __pycache__/
 *.pyc
 docs/copr-publish.md
+.vscode/
+*.code-workspace
