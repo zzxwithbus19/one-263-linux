@@ -672,15 +672,17 @@ private:
     qreal fade_ = 1.0;
 };
 
-// 每个页面顶部的标题 + 一句说明
-static void addPageHeader(QVBoxLayout* v, const QString& title, const QString& subtitle) {
+// 每个页面顶部的标题 + 一句说明（subtitle 可省略：省略时不占位）
+static void addPageHeader(QVBoxLayout* v, const QString& title, const QString& subtitle = {}) {
     auto* t = new QLabel(title);
     t->setObjectName("pageTitle");
-    auto* s = new QLabel(subtitle);
-    s->setObjectName("pageSubtitle");
-    s->setWordWrap(true);
     v->addWidget(t);
-    v->addWidget(s);
+    if (!subtitle.isEmpty()) {
+        auto* s = new QLabel(subtitle);
+        s->setObjectName("pageSubtitle");
+        s->setWordWrap(true);
+        v->addWidget(s);
+    }
     v->addSpacing(2);
 }
 
