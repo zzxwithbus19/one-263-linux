@@ -866,6 +866,19 @@ public:
     }
 
 protected:
+    // 系统配色变了（KDE 切明暗、换配色方案）就重算一遍；Noctalia 那条路由文件监视负责。
+    // 自己 setPalette 也会发 PaletteChange，所以用 lastPalette_ 比对，避免自激。
+    void changeEvent(QEvent* ev) override {
+        if (ev->type() == QEvent::PaletteChange || ev->type() == QEvent::ApplicationPaletteChange) {
+            if (qApp && qApp->palette() != lastPalette_) {
+                lastPalette_ = qApp->palette();
+                applyPalette();
+                applyStyleSheet();
+            }
+        }
+        QMainWindow::changeEvent(ev);
+    }
+
     void closeEvent(QCloseEvent* ev) override {
         collectUiToConfig();
         std::string err;
@@ -2211,6 +2224,7 @@ private:
             qApp->setPalette(paletteFromM3(m3_));
         else
             qApp->setPalette(defaultPalette_);
+        lastPalette_ = qApp->palette();   // changeEvent 里用它判断"是不是自己设的"
         updateThemeHint();
         setupPaletteWatch();
     }
@@ -2718,6 +2732,7 @@ private:
     QLabel* themeHint_ = nullptr;
     QFileSystemWatcher* paletteWatch_ = nullptr;
     QPalette defaultPalette_;
+    QPalette lastPalette_;   // 最近一次由本程序设下去的调色板
     core::M3Palette m3_;
     Theme theme_;
     bool roundedCorners_ = false;
