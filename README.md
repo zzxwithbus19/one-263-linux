@@ -47,7 +47,8 @@ CachyOS 内核，`uname -r` 里带 cachyos，但系统还是 Fedora）：
 |---|---|
 | Fedora 系 | **不下载，直接打印 COPR 的 `dnf copr enable` 两条命令**（未签名 rpm 在 45+ 会被拒装） |
 | Arch 系（含 CachyOS / Manjaro） | `pacman -U` 装 `.pkg.tar.zst` |
-| openSUSE 系 | **不下载，直接打印 COPR 的 `zypper addrepo` 三条命令**（同一个项目有 Tumbleweed chroot） |
+| openSUSE 系 | **不下载，直接打印 COPR 的 `zypper addrepo` 四条命令**（同一个项目有 Tumbleweed chroot） |
+| Debian 系（Ubuntu / Mint / Pop!_OS…） | `apt install ./mc263_*.deb` |
 | 其它 | 退回独立 ELF |
 
 想强制走某条路就加参数（例如 Fedora 上 `--rpm` 会真的下 rpm，`--elf` 装免安装版）。
@@ -102,7 +103,7 @@ sudo dnf install gcc-c++ make qt6-qtbase-devel qt6-qtwayland python3
 sudo zypper install gcc-c++ make qt6-qtbase-devel libQt6WaylandClient6 python3
 
 make                 # 编译 build/mc263-qt
-make check           # 78 项核心单测 + 7 项内嵌下载器自测（全部离线）
+make check           # 81 项核心单测 + 7 项内嵌下载器自测（全部离线）
 make rpm             # 出 rpm（本分支主线，见第 6 节）
 make info            # 编译器 / Qt6 / 产物路径
 

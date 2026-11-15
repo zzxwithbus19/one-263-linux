@@ -757,7 +757,26 @@ inline VersionMeta loadVersion(const Layout& l, const Config& c) {
             }
         }
     }
-    m.classpath.push_back(l.versionJar(versionDirName(c)).string());
+    // 加载器版本（26.3+fabric / +quilt）自己没有 client jar：安装时把父版本 json
+    // 展平进了加载器 json（libraries / assetIndex 都在），但游戏本体仍然是
+    // versions/<mc 版本>/<mc 版本>.jar。它必须进 classpath，否则 Knot 直接报
+    // "Minecraft game provider couldn't locate the game!"。
+    const fs::path ownJar = l.versionJar(versionDirName(c));
+    std::error_code jec;
+    if (!c.profile.empty() || c.fabric) {
+        if (fs::exists(ownJar, jec)) {
+            m.classpath.push_back(ownJar.string());
+        } else {
+            const fs::path parentJar = l.versionJar(c.version);
+            if (!fs::exists(parentJar, jec)) {
+                m.error = "缺少客户端 jar: " + parentJar.string() + "（先下载 " + c.version + "）";
+                return m;
+            }
+            m.classpath.push_back(parentJar.string());
+        }
+    } else {
+        m.classpath.push_back(ownJar.string());
+    }
     return m;
 }
 

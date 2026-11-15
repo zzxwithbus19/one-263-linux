@@ -1,0 +1,78 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Qt 启动器 (gdb / GCC 构建)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/mc263-qt",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "MC263_SANDBOX_ROOT",
+          "value": "${workspaceFolder}"
+        }
+      ],
+      "stopAtEntry": false,
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "setupCommands": [
+        {
+          "description": "关闭 debuginfod 提示",
+          "text": "set debuginfod enabled off",
+          "ignoreFailures": true
+        },
+        {
+          "description": "启用 GDB 美化输出",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "make (g++ debug)"
+    },
+    {
+      "name": "Qt 启动器 (lldb / CodeLLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/mc263-qt",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "MC263_SANDBOX_ROOT": "${workspaceFolder}"
+      },
+      "preLaunchTask": "make (g++ debug)"
+    },
+    {
+      "name": "core-test (gdb)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/core-test",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "setupCommands": [
+        {
+          "description": "关闭 debuginfod 提示",
+          "text": "set debuginfod enabled off",
+          "ignoreFailures": true
+        },
+        {
+          "description": "启用 GDB 美化输出",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "make (g++ debug)"
+    },
+    {
+      "name": "core-test (lldb / CodeLLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/core-test",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "make (g++ debug)"
+    }
+  ]
+}

@@ -10,7 +10,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VER="${MC263_VER:-26.3}"
-RELEASE="${MC263_RELEASE:-2}"
+RELEASE="${MC263_RELEASE:-3}"
 TOP="$ROOT/build/rpmbuild-srpm"
 
 command -v rpmbuild >/dev/null 2>&1 || { echo "缺 rpmbuild：sudo dnf install rpm-build"; exit 1; }
