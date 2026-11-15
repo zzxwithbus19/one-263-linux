@@ -213,7 +213,6 @@ bash packaging/make-srcrpm.sh            # → dist/mc263-26.3-1.fc45.src.rpm
 copr-cli build cxc123/one-263-linux dist/mc263-26.3-1.fc45.src.rpm
 ```
 
-逐步操作、项目页文案与失败排查见 [docs/copr-publish.md](docs/copr-publish.md)。
 两份 spec 的分工：`packaging/mc263.spec` 塞预编译二进制（本地出包快，用户不必装编译环境）；
 COPR 在 mock 里现编源码，用 `packaging/mc263-source.spec`（`%prep` 解包 + `%build` 跑 `make` + `%check` 跑单测）。
 
@@ -279,8 +278,6 @@ mc26-one/
 │   └── fs_util.hpp             目录 / 文件 / 环境变量小工具
 ├── src/
 │   └── mc263_qt.cpp            Qt6 主窗口（6 页，内嵌 python3 下载脚本）
-├── docs/
-│   └── copr-publish.md         COPR 上传流程与项目页文案
 ├── packaging/
 │   ├── mc263.spec              rpm spec（装预编译二进制）
 │   ├── mc263-source.spec       rpm spec（从源码构建，给 COPR / OBS）
@@ -298,8 +295,8 @@ mc26-one/
     └── probe_endpoints.py      真实端点诊断
 ```
 
-> `packaging/PKGBUILD`、`build-arch.sh`、`make-repo-arch.sh`、`docs/arch-handoff.md`
-> 是从 main 合并过来的 Arch 线文件：在这条分支上不维护，也不随 rpm 发布走（打包用不到它们）。
+> `packaging/PKGBUILD`、`build-arch.sh`、`make-repo-arch.sh` 是从 main 合并过来的
+> Arch 线文件：在这条分支上不维护，也不随 rpm 发布走（打包用不到它们）。
 
 ---
 
