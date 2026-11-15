@@ -82,7 +82,7 @@ COPR 的 openSUSE 仓库有个细节：**rpm 是签名的，但仓库元数据�
 
 | 发行版 / 方式 | 文件 | 做法 |
 |---|---|---|
-| Fedora / openSUSE | `mc263-26.3-3.<arch>.rpm` | `sudo dnf install ./mc263-26.3-3.x86_64.rpm` |
+| Fedora / openSUSE | `mc263-26.3-4.<arch>.rpm` | `sudo dnf install ./mc263-26.3-4.x86_64.rpm` |
 | 免安装 | `mc263-qt-26.3-<arch>` | `chmod +x` 后直接跑 |
 
 独立 ELF 没有菜单项和图标，需要自己准备 Qt6 运行时与 python3：
@@ -187,8 +187,8 @@ Mod 下载也装进对应版本的目录，而不是全局 `minecraft/mods/`。
 ```bash
 sudo dnf install rpm-build gcc-c++ make qt6-qtbase-devel
 bash packaging/build-rpm.sh
-#   → dist/mc263-26.3-3.fc45.x86_64.rpm   正式包（带发行版后缀）
-#   → dist/mc263-26.3-3.x86_64.rpm        稳定名副本（install.sh 用）
+#   → dist/mc263-26.3-4.fc45.x86_64.rpm   正式包（带发行版后缀）
+#   → dist/mc263-26.3-4.x86_64.rpm        稳定名副本（install.sh 用）
 #   → dist/mc263-qt-26.3-x86_64           独立 ELF
 #   → dist/SHA256SUMS                     所有产物的摘要（离线兜底）
 ```
@@ -209,8 +209,8 @@ COPR 的 v3 API **只收 `.src.rpm` / `.nosrc.rpm` / `.spec`**，所以先把
 
 ```bash
 sudo dnf install copr-cli
-bash packaging/make-srcrpm.sh            # → dist/mc263-26.3-3.fc45.src.rpm
-copr-cli build cxc123/one-263-linux dist/mc263-26.3-3.fc45.src.rpm
+bash packaging/make-srcrpm.sh            # → dist/mc263-26.3-4.fc45.src.rpm
+copr-cli build cxc123/one-263-linux dist/mc263-26.3-4.fc45.src.rpm
 ```
 
 两份 spec 的分工：`packaging/mc263.spec` 塞预编译二进制（本地出包快，用户不必装编译环境）；
@@ -243,7 +243,7 @@ Fedora 45 起 RPM 默认 `%_pkgverify_level all`：未签名包不再只是 `NOK
 |---|---|---|
 | 1（推荐） | 用已签名的 COPR 源：`sudo dnf copr enable cxc123/one-263-linux && sudo dnf install mc263` | 需要联网，首次会拉 repodata |
 | 2 | 装免安装 ELF：`sh install.sh --elf` | 没有菜单项，要自己准备 Qt6 运行时 |
-| 3 | 你确认过来源，只对这一次放宽：`sudo dnf install --nogpgcheck ./mc263-26.3-3.x86_64.rpm` | 这一个包不验签，其它包不受影响 |
+| 3 | 你确认过来源，只对这一次放宽：`sudo dnf install --nogpgcheck ./mc263-26.3-4.x86_64.rpm` | 这一个包不验签，其它包不受影响 |
 
 > **不要**为了装一个包去改 `/etc/rpm/macros.verify`（或 `--define '%_pkgverify_level digest'`）——
 > 那等于给这台机器上**所有** rpm 永久放行，装上什么东西都不会再被拦。
