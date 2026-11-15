@@ -1,0 +1,14 @@
+# GitHub 语言统计（linguist）只算主程序源码。
+#
+# 原因：语言占比是按「文件字节数」算的，测试夹具和打包脚本会把
+# C++ 的占比压下去（例如 tests/mock_cdn.py 与 probe_endpoints.py 合计 271 行，
+# packaging/*.sh 与 install.sh 合计 812 行），看上去像个脚本项目。
+# 这里把这些目录/文件标记为「不参与统计」，条形图就只剩 C++/头文件。
+#
+# 想恢复某项统计：删掉对应行的 linguist-detectable 即可。
+# 注意：这不是 gitignore —— 文件照常提交，只是不进语言统计。
+
+tests/**        linguist-detectable=false
+packaging/**    linguist-detectable=false
+install.sh      linguist-detectable=false
+Makefile        linguist-detectable=false
