@@ -17,6 +17,6 @@ minecraft/
 __pycache__/
 *.pyc
 mc26-one.code-workspace
-
+.vscode/
 # clangd 的编译数据库：跟编译器版本和本机路径绑定，不进仓库
 compile_commands.json
