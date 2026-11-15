@@ -110,7 +110,7 @@ a:hover{color:var(--brand-hover)}
 .section-head h2{font-size:26px;font-weight:600;margin:0 0 12px;letter-spacing:-.3px}
 .section-head p{color:var(--text-2);margin:0;font-size:14px}
 
-.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.grid-3{display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));gap:16px}
 .card{
   border:1px solid var(--line);border-radius:var(--radius);background:var(--bg);
   padding:24px;transition:border-color .18s,transform .18s;
@@ -283,7 +283,7 @@ footer{padding:36px 0;background:var(--bg);font-size:12px;color:var(--text-3)}
       </div>
       <div class="panel">
         <div class="panel-head"><span>运行时布局</span><code>~/.local/share/mc263/</code></div>
-        <pre><b>mc263-qt</b>                  <i>唯一可执行文件 · 约 530 KB</i>
+        <pre><b>mc263-qt</b>                  <i>唯一可执行文件 · 约 820 KB</i>
 <b>minecraft/</b>               <i>游戏目录，首次运行自动建</i>
 └── versions/
     ├── <b>26.3/</b>              <i>mods  saves  logs ...</i>
@@ -298,9 +298,9 @@ footer{padding:36px 0;background:var(--bg);font-size:12px;color:var(--text-3)}
 
   <section class="facts">
     <div class="container facts-grid">
-      <div class="fact"><div class="fact-num">530<small>KB</small></div><div class="fact-label">单个 ELF</div><div class="fact-note">不含游戏与 Java 运行时</div></div>
-      <div class="fact"><div class="fact-num">6<small>页</small></div><div class="fact-label">功能界面</div><div class="fact-note">启动 / 下载 / Mod / 加载器 / 兼容 / 设置</div></div>
-      <div class="fact"><div class="fact-num">57<small>项</small></div><div class="fact-label">核心单测</div><div class="fact-note">另有 7 项下载器自测，全部离线</div></div>
+      <div class="fact"><div class="fact-num">820<small>KB</small></div><div class="fact-label">单个 ELF</div><div class="fact-note">不含游戏与 Java 运行时</div></div>
+      <div class="fact"><div class="fact-num">7<small>页</small></div><div class="fact-label">功能界面</div><div class="fact-note">启动 / 下载 / Mod / 版本 / 目录 / 资源 / 设置</div></div>
+      <div class="fact"><div class="fact-num">90<small>项</small></div><div class="fact-label">核心单测</div><div class="fact-note">另有 7 项下载器自测，全部离线</div></div>
       <div class="fact"><div class="fact-num">25<small>+</small></div><div class="fact-label">主线 Java 要求</div><div class="fact-note">26.x 需 Java 25 或更高</div></div>
     </div>
   </section>
@@ -309,15 +309,15 @@ footer{padding:36px 0;background:var(--bg);font-size:12px;color:var(--text-3)}
     <div class="container">
       <div class="section-head">
         <p class="eyebrow">功能</p>
-        <h2>六个页面，各管一件事</h2>
+        <h2>七个页面，各管一件事</h2>
         <p>界面按任务划分，不把下载、Mod、加载器和环境检查混在同一个视图里。</p>
       </div>
       <div class="grid-3">
         <article class="card">
           <div class="card-icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/></svg></div>
           <h3>启动游戏</h3>
-          <p>本地版本下拉、玩家名、一键启动。QProcess 异步执行 java，日志实时刷新。</p>
-          <span class="tagline">QProcess / 实时日志</span>
+          <p>本地版本下拉、玩家名、一键启动。QProcess 异步执行 java，日志实时刷新；启动日志同时落盘到 <code>note/launch-&lt;版本&gt;-&lt;时间&gt;.log</code>，只留最近 10 个。</p>
+          <span class="tagline">QProcess / 日志落盘</span>
         </article>
         <article class="card">
           <div class="card-icon"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 18v2h16v-2"/></svg></div>
@@ -328,25 +328,31 @@ footer{padding:36px 0;background:var(--bg);font-size:12px;color:var(--text-3)}
         <article class="card">
           <div class="card-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div>
           <h3>Mod 下载</h3>
-          <p>检索 Modrinth，按关键词、加载器、游戏版本过滤，五种排序；双击安装并做 SHA1 校验，已存在则跳过。</p>
-          <span class="tagline">Modrinth / 无需 key</span>
+          <p>检索 Modrinth，按关键词、加载器、游戏版本过滤，五种排序；双击安装并做 SHA1 校验，已存在则跳过。同页可装 Fabric / Quilt 加载器（抓 profile json、依赖下到 <code>libraries/</code>），已装列表支持启用 / 禁用（改 <code>.disabled</code>）、删除、按 SHA1 反查 Modrinth 检查更新。</p>
+          <span class="tagline">Modrinth / 启停 · 更新</span>
         </article>
         <article class="card">
           <div class="card-icon"><svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5zM3 12l9 5 9-5M3 16l9 5 9-5"/></svg></div>
-          <h3>加载器</h3>
-          <p>Fabric / Quilt 版本列表拉取，profile json 与原版合并，依赖下载到 libraries/，生成独立版本目录。</p>
-          <span class="tagline">versions/26.3+fabric</span>
+          <h3>版本管理</h3>
+          <p>左栏是已装版本（卡片列表，选中态实心强调色），右栏是该版本的 Java 与兼容性查验：扫配置、Mojang JRE、JAVA_HOME、PATH、/usr/lib/jvm，11 项覆盖架构、依赖库、natives、内存、磁盘与路径守卫。</p>
+          <span class="tagline">启动前闸门 · 11 项</span>
         </article>
         <article class="card">
-          <div class="card-icon"><svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z"/><path d="M9 12l2 2 4-4"/></svg></div>
-          <h3>Java 与兼容性</h3>
-          <p>后台扫描 JAVA_HOME、PATH、/usr/lib/jvm 与 Mojang JRE；11 项查验覆盖架构、依赖库、natives、内存、磁盘与路径守卫。</p>
-          <span class="tagline">启动前闸门</span>
+          <div class="card-icon"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></div>
+          <h3>游戏目录</h3>
+          <p>自动扫描 ELF 旁、XDG 数据目录与 <code>~/.minecraft</code>，只列真实存在的目录；列出各自版本数与 mods 数，选中即切换，避免两套装各用一份。</p>
+          <span class="tagline">只列真实存在的目录</span>
+        </article>
+        <article class="card">
+          <div class="card-icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M8 14h8"/></svg></div>
+          <h3>资源</h3>
+          <p>世界、资源包、光影分标签页，扫的是当前版本目录；可导入 zip、启用 / 禁用（<code>.disabled</code>）、删除。世界不能禁用，只能删或换目录。</p>
+          <span class="tagline">saves / resourcepacks / shaderpacks</span>
         </article>
         <article class="card">
           <div class="card-icon"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="#fff"/><circle cx="15" cy="12" r="2" fill="#fff"/><circle cx="8" cy="17" r="2" fill="#fff"/></svg></div>
-          <h3>游戏目录与设置</h3>
-          <p>扫描 ELF 旁、XDG 数据目录与 ~/.minecraft 并切换；内存默认交给 JVM，四段式内存条每 2 秒刷新；语言跟随系统 locale。</p>
+          <h3>设置 / 内存</h3>
+          <p>配色来源可选（自动 / 系统调色板 / Noctalia Material You）；内存默认交给 JVM，四段式内存条 2 秒刷新并在超出可用内存时红字提示；额外 JVM 参数；游戏语言跟随系统 locale。</p>
           <span class="tagline">无 -Xmx / 跟随 locale</span>
         </article>
       </div>
@@ -411,7 +417,7 @@ footer{padding:36px 0;background:var(--bg);font-size:12px;color:var(--text-3)}
             <pre>curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh | sh -s -- --pacman
 
 <span class="c"># 指定 tag（含 pre-release）</span>
-sh install.sh --tag up3-1
+sh install.sh --tag up3-2
 
 <span class="c"># 卸载</span>
 sh install.sh --uninstall</pre>
@@ -467,10 +473,11 @@ sudo pacman -S --needed qt6-base qt6-wayland python curl</pre>
       </div>
 
       <div class="assets">
-        <a class="asset" href="https://github.com/zzxwithbus19/one-263-linux/releases/download/up3-1/mc263-26.3-1-x86_64.pkg.tar.zst"><span>Arch 包<code>mc263-26.3-1-x86_64.pkg.tar.zst</code></span><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 18v2h16v-2"/></svg></a>
-        <a class="asset" href="https://github.com/zzxwithbus19/one-263-linux/releases/download/up3/mc263-26.3-1.fc45.x86_64.rpm"><span>Fedora 45 rpm<code>mc263-26.3-1.fc45.x86_64.rpm</code></span><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 18v2h16v-2"/></svg></a>
-        <a class="asset" href="https://github.com/zzxwithbus19/one-263-linux/releases/download/up3-1/mc263-qt-26.3-x86_64"><span>独立 ELF<code>mc263-qt-26.3-x86_64</code></span><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 18v2h16v-2"/></svg></a>
+        <a class="asset" href="https://github.com/zzxwithbus19/one-263-linux/releases"><span>Arch 包<code>mc263-26.3-&lt;rel&gt;-x86_64.pkg.tar.zst</code></span><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 18v2h16v-2"/></svg></a>
+        <a class="asset" href="https://github.com/zzxwithbus19/one-263-linux/releases"><span>Fedora 45 rpm<code>mc263-26.3-&lt;rel&gt;.fc45.x86_64.rpm</code></span><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 18v2h16v-2"/></svg></a>
+        <a class="asset" href="https://github.com/zzxwithbus19/one-263-linux/releases"><span>独立 ELF<code>mc263-qt-26.3-x86_64</code></span><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 18v2h16v-2"/></svg></a>
       </div>
+      <p class="block-note">安装脚本会按发行版自动挑资产；文件名里的版本号以 Releases 页面为准。</p>
     </div>
   </section>
 
@@ -487,9 +494,11 @@ sudo pacman -S --needed qt6-base qt6-wayland python curl</pre>
             <thead><tr><th>目标</th><th>作用</th></tr></thead>
             <tbody>
               <tr><td><code>make</code></td><td>编译 <code>build/mc263-qt</code></td></tr>
-              <tr><td><code>make check</code></td><td>57 项核心单测 + 7 项下载器自测，全部离线</td></tr>
+              <tr><td><code>make check</code></td><td>90 项核心单测 + 7 项下载器自测，全部离线</td></tr>
               <tr><td><code>make arch</code></td><td>源码包 → PKGBUILD → makepkg → 校验 → 冒烟</td></tr>
               <tr><td><code>make rpm</code></td><td>调用 <code>packaging/build-rpm.sh</code></td></tr>
+              <tr><td><code>make deb</code></td><td>调用 <code>packaging/build-deb.sh</code>，产出 <code>dist/deb/*.deb</code></td></tr>
+              <tr><td><code>make compile-db</code></td><td>生成 <code>compile_commands.json</code>（clangd / IDE 用）</td></tr>
               <tr><td><code>make info</code></td><td>显示编译器与 Qt6 状态</td></tr>
               <tr><td><code>make clean</code></td><td>删除 <code>build/</code> 与 <code>dist/</code></td></tr>
             </tbody>
@@ -499,11 +508,11 @@ sudo pacman -S --needed qt6-base qt6-wayland python curl</pre>
           <h3>测试与产物</h3>
           <p>核心逻辑不依赖 Qt，可单独编译运行。</p>
           <ul class="path-list">
-            <li><span>tests/core_test.cpp</span><span>57 项</span></li>
+            <li><span>tests/core_test.cpp</span><span>90 项</span></li>
             <li><span>tests/downloader_test.sh</span><span>7 项</span></li>
             <li><span>tests/mock_cdn.py</span><span>离线 Mojang 端点</span></li>
             <li><span>tests/probe_endpoints.py</span><span>真实端点诊断</span></li>
-            <li><span>docs/arch-handoff.md</span><span>打包交接与验收</span></li>
+            <li><span>tools/gen_compile_db.py</span><span>make compile-db</span></li>
           </ul>
           <p class="block-note">构建依赖需自行安装，脚本不联网拉取、不代装。产物写入 <code>dist/</code>，已由 .gitignore 排除。</p>
         </div>
@@ -572,7 +581,7 @@ sudo pacman -S --needed qt6-base qt6-wayland python curl</pre>
     <div class="footer-links">
       <a href="https://github.com/zzxwithbus19/one-263-linux">仓库</a>
       <a href="https://github.com/zzxwithbus19/one-263-linux/releases">Releases</a>
-      <a href="https://github.com/zzxwithbus19/one-263-linux/blob/main/docs/arch-handoff.md">打包交接文档</a>
+      <a href="https://github.com/zzxwithbus19/one-263-linux/issues">问题反馈</a>
       <a href="https://github.com/zzxwithbus19/one-263-linux/blob/main/LICENSE">LICENSE</a>
     </div>
   </div>
