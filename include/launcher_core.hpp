@@ -20,6 +20,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdint>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
@@ -1194,6 +1195,88 @@ inline DownloadResult downloadAll(const Layout& l, const Config& c, const Progre
     result.ok = result.failed == 0;
     if (!result.ok) result.error = std::to_string(result.failed) + " 个文件下载失败";
     return result;
+}
+
+
+// --------------------------------------------------- 本地文件管理（mods/资源）----
+// mods、resourcepacks、shaderpacks 都是「一个目录 + 文件」，禁用 = 加 .disabled 后缀
+// （Minecraft 只认 .jar / .zip，所以 .disabled 会被忽略，相当于关掉）。
+struct LocalEntry {
+    fs::path path;
+    std::string name;   // 显示名（去掉 .disabled）
+    bool enabled = true;
+    bool isDir = false;
+    uint64_t size = 0;
+};
+
+inline std::vector<LocalEntry> listEntries(const fs::path& dir) {
+    std::vector<LocalEntry> out;
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return out;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        LocalEntry e;
+        e.path = it->path();
+        e.isDir = it->is_directory(ec);
+        e.name = e.path.filename().string();
+        if (!e.isDir && e.path.extension() == ".disabled") {
+            e.enabled = false;
+            e.name = e.path.stem().string();
+        }
+        if (!e.isDir) e.size = static_cast<uint64_t>(fs::file_size(e.path, ec));
+        out.push_back(std::move(e));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const LocalEntry& a, const LocalEntry& b) { return a.name < b.name; });
+    return out;
+}
+
+// 启用/禁用：filename <-> filename.disabled
+inline bool setEntryEnabled(const fs::path& p, bool on, std::string& err) {
+    const std::string cur = p.string();
+    const bool isDisabled = p.extension() == ".disabled";
+    if (on && !isDisabled) { err.clear(); return true; }
+    if (!on && isDisabled) { err.clear(); return true; }
+    fs::path target = on ? fs::path(cur.substr(0, cur.size() - std::string(".disabled").size()))
+                         : fs::path(cur + ".disabled");
+    std::error_code ec;
+    fs::rename(p, target, ec);
+    if (ec) { err = "重命名失败: " + ec.message(); return false; }
+    err.clear();
+    return true;
+}
+
+// 启动日志：<noteDir>/launch-<标签>-<YYYYmmdd-HHMMSS>.log
+inline fs::path newLogPath(const fs::path& noteDir, const std::string& tag, std::string& err) {
+    if (!fsx::makeDirs(noteDir, err)) return {};
+    std::string safe;
+    for (char c : tag) safe.push_back((std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_') ? c : '-');
+    if (safe.empty()) safe = "mc263";
+    std::time_t t = std::time(nullptr);
+    std::tm tmv{};
+    localtime_r(&t, &tmv);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y%m%d-%H%M%S", &tmv);
+    return noteDir / ("launch-" + safe + "-" + buf + ".log");
+}
+
+// 只保留最近 keep 个 *.log（按文件名里的时间戳排序，够用）
+inline int pruneLogs(const fs::path& noteDir, int keep) {
+    std::error_code ec;
+    if (!fs::is_directory(noteDir, ec)) return 0;
+    std::vector<fs::path> logs;
+    for (fs::directory_iterator it(noteDir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->is_regular_file(ec) && it->path().extension() == ".log") logs.push_back(it->path());
+    }
+    std::sort(logs.begin(), logs.end());
+    int removed = 0;
+    if (static_cast<int>(logs.size()) > keep) {
+        const auto extra = static_cast<long>(logs.size()) - keep;
+        for (long i = 0; i < extra; ++i) {
+            std::error_code rec;
+            if (fs::remove(logs[static_cast<size_t>(i)], rec)) ++removed;
+        }
+    }
+    return removed;
 }
 
 

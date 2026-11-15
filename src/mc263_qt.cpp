@@ -17,7 +17,9 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDialog>
+#include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QFileDialog>
 #include <QDesktopServices>
 #include <QFileSystemWatcher>
@@ -59,6 +61,7 @@
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QTabWidget>
 #include <QTableWidget>
 #include <QTabBar>
 #include <QTableWidgetItem>
@@ -931,7 +934,7 @@ private:
         nav_->setMovable(false);
         nav_->setFocusPolicy(Qt::NoFocus);
         nav_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-        for (const char* s : {"启动游戏", "下载游戏", "Mod 下载", "版本管理", "游戏目录", "设置 / 内存"})
+        for (const char* s : {"启动游戏", "下载游戏", "Mod 下载", "版本管理", "游戏目录", "资源", "设置 / 内存"})
             nav_->addTab(QString::fromUtf8(s));
         stack_ = new QStackedWidget(this);
         // 每页放进滚动区：窗口缩小/字体变大时滚动，而不是把卡片内容挤到重叠
@@ -952,6 +955,7 @@ private:
         addPage(pageMods());
         addPage(pageVersionManager());
         addPage(pageDirs());
+        addPage(pageResources());
         addPage(pageSettings());
         v->addWidget(nav_, 0, Qt::AlignHCenter);
         v->addWidget(stack_, 1);
@@ -1124,7 +1128,10 @@ private:
         launchBtn_->setObjectName("primary");
         auto* refreshBtn = new QPushButton("刷新本地版本", w);
         auto* openDirBtn = new QPushButton("打开游戏目录", w);
-        row->addWidget(launchBtn_); row->addWidget(refreshBtn); row->addWidget(openDirBtn); row->addStretch(1);
+        auto* noteBtn = new QPushButton("日志", w);
+        noteBtn->setToolTip("日志写在 <游戏目录>/note/，最多保留 10 个");
+        row->addWidget(launchBtn_); row->addWidget(refreshBtn); row->addWidget(openDirBtn);
+        row->addWidget(noteBtn); row->addStretch(1);
         v->addLayout(row);
         launchState_ = new QLabel("就绪", w);
         v->addWidget(launchState_);
@@ -1134,6 +1141,12 @@ private:
         connect(refreshBtn, &QPushButton::clicked, this, &LauncherWindow::refreshLocalVersions);
         connect(openDirBtn, &QPushButton::clicked, this, [this] {
             QProcess::startDetached("xdg-open", {QString::fromStdString(layout_.gameDir.string())});
+        });
+        connect(noteBtn, &QPushButton::clicked, this, [this] {
+            const auto dir = layout_.gameDir / "note";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            QProcess::startDetached("xdg-open", {QString::fromStdString(dir.string())});
         });
         return w;
     }
@@ -1337,6 +1350,37 @@ private:
         modLog_->setMaximumBlockCount(500);
         v->addWidget(modLog_, 1);
 
+        // 已装 Mod：启用/禁用、删除、检查更新（按 Modrinth 的 SHA1 反查项目）
+        auto* ibox = new QGroupBox("已装 Mod（当前版本目录）", w);
+        auto* iv = new QVBoxLayout(ibox);
+        setCardTitle(ibox, iv, "已装 Mod（当前版本目录）");
+        instModTable_ = new QTableWidget(0, 3, ibox);
+        instModTable_->setHorizontalHeaderLabels({"文件", "状态", "大小"});
+        instModTable_->horizontalHeader()->setStretchLastSection(true);
+        instModTable_->verticalHeader()->setVisible(false);
+        instModTable_->setShowGrid(false);
+        instModTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        instModTable_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        instModTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        iv->addWidget(instModTable_, 1);
+        auto* mrow = new QHBoxLayout();
+        auto* iRefresh = new QPushButton("刷新", ibox);
+        auto* iToggle = new QPushButton("启用 / 禁用", ibox);
+        auto* iDelete = new QPushButton("删除", ibox);
+        auto* iUpdate = new QPushButton("检查更新", ibox);
+        auto* iOpen = new QPushButton("打开目录", ibox);
+        mrow->addWidget(iRefresh);
+        mrow->addWidget(iToggle);
+        mrow->addWidget(iDelete);
+        mrow->addWidget(iUpdate);
+        mrow->addWidget(iOpen);
+        mrow->addStretch(1);
+        iv->addLayout(mrow);
+        instModState_ = new QLabel("切到这一页会自动刷新；更新只认 Modrinth 上有的文件", ibox);
+        instModState_->setObjectName("muted");
+        iv->addWidget(instModState_);
+        v->addWidget(ibox, 1);
+
         connect(modSearchBtn_, &QPushButton::clicked, this, &LauncherWindow::startModSearch);
         connect(modQuery_, &QLineEdit::returnPressed, this, &LauncherWindow::startModSearch);
         connect(modInstallBtn_, &QPushButton::clicked, this, &LauncherWindow::installSelectedMod);
@@ -1346,6 +1390,16 @@ private:
         connect(installLoaderBtn_, &QPushButton::clicked, this, &LauncherWindow::installSelectedLoader);
         connect(loaderCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
                 [this](int) { refreshLoaderVersions(); });
+        connect(iRefresh, &QPushButton::clicked, this, &LauncherWindow::refreshInstalledMods);
+        connect(iToggle, &QPushButton::clicked, this, &LauncherWindow::toggleInstalledMod);
+        connect(iDelete, &QPushButton::clicked, this, &LauncherWindow::deleteInstalledMod);
+        connect(iUpdate, &QPushButton::clicked, this, &LauncherWindow::updateInstalledMods);
+        connect(iOpen, &QPushButton::clicked, this, [this] {
+            const auto dir = currentModsDir();
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            QProcess::startDetached("xdg-open", {QString::fromStdString(dir.string())});
+        });
         connect(openMods, &QPushButton::clicked, this, [this] {
             const auto dir = core::isolatedGameDir(layout_, cfg_) / "mods";
             std::error_code ec;
@@ -1545,11 +1599,137 @@ private:
                 guard->modState_->setText(failed == 0 ? "完成" : "部分失败");
                 guard->modLog_->appendPlainText(QString("[%1] %2\n%3")
                     .arg(QTime::currentTime().toString("HH:mm:ss"), title, lines.join("\n")));
+                guard->refreshInstalledMods();
             }, Qt::QueuedConnection);
         }).detach();
     }
 
     // 版本管理：左栏列已装版本，右栏是 Java 与兼容性（原「Java 与兼容性」页融进来）
+    // ---- 已装 Mod 管理 ----
+    std::filesystem::path currentModsDir() const {
+        return core::isolatedGameDir(layout_, cfg_) / "mods";
+    }
+
+    void refreshInstalledMods() {
+        if (!instModTable_) return;
+        const auto dir = currentModsDir();
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const auto entries = core::listEntries(dir);
+        instModTable_->setRowCount(0);
+        int enabledCount = 0;
+        for (const auto& e : entries) {
+            if (e.isDir) continue;
+            const int r = instModTable_->rowCount();
+            instModTable_->insertRow(r);
+            auto* nameItem = new QTableWidgetItem(QString::fromStdString(e.name));
+            nameItem->setData(Qt::UserRole, QString::fromStdString(e.path.string()));
+            instModTable_->setItem(r, 0, nameItem);
+            instModTable_->setItem(r, 1, new QTableWidgetItem(e.enabled ? "启用" : "已禁用"));
+            instModTable_->setItem(r, 2, new QTableWidgetItem(QString::number(e.size / 1024.0, 'f', 0) + " KB"));
+            if (e.enabled) ++enabledCount;
+        }
+        if (instModState_)
+            instModState_->setText(QString("共 %1 个，启用 %2 个；目录：%3")
+                                       .arg(instModTable_->rowCount())
+                                       .arg(enabledCount)
+                                       .arg(QString::fromStdString(dir.string())));
+    }
+
+    void toggleInstalledMod() {
+        if (!instModTable_ || !instModTable_->selectionModel()) return;
+        const auto rows = instModTable_->selectionModel()->selectedRows();
+        if (rows.isEmpty()) { instModState_->setText("先在列表里选一个"); return; }
+        int changed = 0;
+        for (const auto& idx : rows) {
+            auto* nameItem = instModTable_->item(idx.row(), 0);
+            auto* stateItem = instModTable_->item(idx.row(), 1);
+            if (!nameItem) continue;
+            const bool enabled = stateItem && stateItem->text() == "启用";
+            std::string err;
+            if (core::setEntryEnabled(std::filesystem::path(nameItem->data(Qt::UserRole).toString().toStdString()),
+                                      !enabled, err))
+                ++changed;
+            else
+                modLog_->appendPlainText("切换失败：" + QString::fromStdString(err));
+        }
+        refreshInstalledMods();
+        instModState_->setText(QString("已切换 %1 个（.disabled 后缀 = 游戏不加载）").arg(changed));
+    }
+
+    void deleteInstalledMod() {
+        if (!instModTable_ || !instModTable_->selectionModel()) return;
+        const auto rows = instModTable_->selectionModel()->selectedRows();
+        if (rows.isEmpty()) { instModState_->setText("先在列表里选一个"); return; }
+        if (QMessageBox::question(this, "删除 Mod",
+                                  QString("确定删除选中的 %1 个 Mod 文件？（不进回收站）").arg(rows.size()),
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+        int removed = 0;
+        for (const auto& idx : rows) {
+            auto* nameItem = instModTable_->item(idx.row(), 0);
+            if (!nameItem) continue;
+            std::error_code ec;
+            if (std::filesystem::remove(std::filesystem::path(nameItem->data(Qt::UserRole).toString().toStdString()), ec))
+                ++removed;
+        }
+        refreshInstalledMods();
+        instModState_->setText(QString("已删除 %1 个").arg(removed));
+    }
+
+    // 更新检查：本地 jar 的 SHA1 → Modrinth /version_file → 项目最新兼容版本
+    void updateInstalledMods() {
+        if (!instModTable_) return;
+        const auto dir = currentModsDir();
+        auto entries = core::listEntries(dir);
+        if (entries.empty()) { instModState_->setText("没有已装的 Mod"); return; }
+        const std::string loader = modLoader_->currentData().toString().toStdString();
+        const std::string ver = modVersionEdit_->text().trimmed().toStdString();
+        const auto cache = layout_.configDir / "cache";
+        instModState_->setText("检查更新中…");
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, entries, dir, loader, ver, cache] {
+            QStringList lines;
+            int updated = 0, skipped = 0, failed = 0;
+            for (const auto& e : entries) {
+                if (e.isDir) continue;
+                const QString name = QString::fromStdString(e.name);
+                std::string err;
+                const std::string sha = mc263::dl::Sha1::ofFile(e.path, err);
+                if (!err.empty()) { ++failed; lines << name + "  读文件失败"; continue; }
+                mc263::modrinth::Version cur;
+                if (!mc263::modrinth::versionByHash(sha, cache, cur, err)) {
+                    ++skipped; lines << name + "  不在 Modrinth 上，跳过"; continue;
+                }
+                std::vector<mc263::modrinth::Version> list;
+                if (!mc263::modrinth::versions(cur.projectId, loader, ver, cache, list, err) || list.empty()) {
+                    ++skipped; lines << name + "  没有适配 " + QString::fromStdString(ver) + " 的版本，跳过"; continue;
+                }
+                if (list.front().id == cur.id) { ++skipped; lines << name + "  已是最新"; continue; }
+                const auto* f = mc263::modrinth::primaryFile(list.front());
+                if (!f) { ++skipped; lines << name + "  新版本没有主文件"; continue; }
+                mc263::dl::Task t{f->url, dir / f->filename, f->sha1, 0644, f->filename};
+                bool cached = false;
+                if (mc263::dl::fetchOne(t, "", 180, true, err, cached)) {
+                    std::error_code rec;
+                    std::filesystem::remove(e.path, rec);
+                    ++updated;
+                    lines << name + "  → " + QString::fromStdString(f->filename);
+                } else {
+                    ++failed;
+                    lines << name + "  下载失败：" + QString::fromStdString(err);
+                }
+            }
+            QMetaObject::invokeMethod(qApp, [guard, lines, updated, skipped, failed] {
+                if (!guard) return;
+                guard->refreshInstalledMods();
+                guard->instModState_->setText(
+                    QString("更新 %1 个，跳过 %2 个，失败 %3 个").arg(updated).arg(skipped).arg(failed));
+                guard->modLog_->appendPlainText(lines.join("\n"));
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
     QWidget* pageVersionManager() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
@@ -1785,6 +1965,177 @@ private:
             QProcess::startDetached("xdg-open", {QString::fromStdString(layout_.gameDir.string())});
         });
         refreshGameDirs();
+        return w;
+    }
+
+    // ---- 资源：世界 / 资源包 / 光影 ----
+    std::filesystem::path currentResDir() const {
+        const auto base = core::isolatedGameDir(layout_, cfg_);
+        const int idx = resTabs_ ? resTabs_->currentIndex() : 0;
+        if (idx == 1) return base / "resourcepacks";
+        if (idx == 2) return base / "shaderpacks";
+        return base / "saves";
+    }
+
+    QTableWidget* makeResTable(QWidget* parent, const QStringList& headers) {
+        auto* t = new QTableWidget(0, headers.size(), parent);
+        t->setHorizontalHeaderLabels(headers);
+        t->horizontalHeader()->setStretchLastSection(true);
+        t->verticalHeader()->setVisible(false);
+        t->setShowGrid(false);
+        t->setSelectionBehavior(QAbstractItemView::SelectRows);
+        t->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        t->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        return t;
+    }
+
+    void fillResTable(QTableWidget* table, const std::filesystem::path& dir, bool onlyDirs) {
+        if (!table) return;
+        table->setRowCount(0);
+        for (const auto& e : core::listEntries(dir)) {
+            if (onlyDirs && !e.isDir) continue;
+            if (!onlyDirs && e.isDir) continue;
+            const int r = table->rowCount();
+            table->insertRow(r);
+            auto* nameItem = new QTableWidgetItem(QString::fromStdString(e.name));
+            nameItem->setData(Qt::UserRole, QString::fromStdString(e.path.string()));
+            table->setItem(r, 0, nameItem);
+            table->setItem(r, 1, new QTableWidgetItem(e.enabled ? "启用" : "已禁用"));
+            table->setItem(r, 2, new QTableWidgetItem(
+                e.isDir ? "目录" : QString::number(e.size / 1024.0, 'f', 0) + " KB"));
+        }
+    }
+
+    void refreshResources() {
+        if (!resTabs_) return;
+        const auto base = core::isolatedGameDir(layout_, cfg_);
+        std::error_code ec;
+        for (const char* sub : {"saves", "resourcepacks", "shaderpacks"})
+            std::filesystem::create_directories(base / sub, ec);
+        fillResTable(savesTable_, base / "saves", true);
+        fillResTable(packsTable_, base / "resourcepacks", false);
+        fillResTable(shadersTable_, base / "shaderpacks", false);
+        if (resState_)
+            resState_->setText(QString("当前版本目录：%1（世界 %2 / 资源包 %3 / 光影 %4）")
+                                   .arg(QString::fromStdString(base.string()))
+                                   .arg(savesTable_ ? savesTable_->rowCount() : 0)
+                                   .arg(packsTable_ ? packsTable_->rowCount() : 0)
+                                   .arg(shadersTable_ ? shadersTable_->rowCount() : 0));
+    }
+
+    QTableWidget* currentResTable() const {
+        if (!resTabs_) return nullptr;
+        const int idx = resTabs_->currentIndex();
+        if (idx == 1) return packsTable_;
+        if (idx == 2) return shadersTable_;
+        return savesTable_;
+    }
+
+    QWidget* pageResources() {
+        auto* w = new QWidget(this);
+        auto* v = new QVBoxLayout(w);
+        addPageHeader(v, "资源", "世界 / 资源包 / 光影都在当前版本目录下：可以导入、启用禁用、删除");
+
+        resTabs_ = new QTabWidget(w);
+        savesTable_ = makeResTable(w, {"世界名", "状态", "大小"});
+        packsTable_ = makeResTable(w, {"资源包", "状态", "大小"});
+        shadersTable_ = makeResTable(w, {"光影包", "状态", "大小"});
+        resTabs_->addTab(savesTable_, "世界");
+        resTabs_->addTab(packsTable_, "资源包");
+        resTabs_->addTab(shadersTable_, "光影");
+        v->addWidget(resTabs_, 1);
+
+        auto* row = new QHBoxLayout();
+        auto* refresh = new QPushButton("刷新", w);
+        auto* toggle = new QPushButton("启用 / 禁用", w);
+        auto* del = new QPushButton("删除", w);
+        auto* importBtn = new QPushButton("导入…", w);
+        auto* openBtn = new QPushButton("打开目录", w);
+        row->addWidget(refresh);
+        row->addWidget(toggle);
+        row->addWidget(del);
+        row->addWidget(importBtn);
+        row->addWidget(openBtn);
+        row->addStretch(1);
+        v->addLayout(row);
+        resState_ = new QLabel("", w);
+        resState_->setObjectName("muted");
+        v->addWidget(resState_);
+
+        connect(refresh, &QPushButton::clicked, this, &LauncherWindow::refreshResources);
+        connect(resTabs_, &QTabWidget::currentChanged, this, [this](int) { refreshResources(); });
+        connect(toggle, &QPushButton::clicked, this, [this] {
+            if (resTabs_->currentIndex() == 0) { resState_->setText("世界不能禁用，只能删除或换目录"); return; }
+            auto* t = currentResTable();
+            if (!t || !t->selectionModel()) return;
+            const auto rows = t->selectionModel()->selectedRows();
+            int changed = 0;
+            for (const auto& idx : rows) {
+                auto* nameItem = t->item(idx.row(), 0);
+                auto* st = t->item(idx.row(), 1);
+                if (!nameItem) continue;
+                const bool enabled = st && st->text() == "启用";
+                std::string err;
+                if (core::setEntryEnabled(
+                        std::filesystem::path(nameItem->data(Qt::UserRole).toString().toStdString()),
+                        !enabled, err))
+                    ++changed;
+            }
+            refreshResources();
+            resState_->setText(QString("已切换 %1 个（.disabled = 游戏不加载）").arg(changed));
+        });
+        connect(del, &QPushButton::clicked, this, [this] {
+            auto* t = currentResTable();
+            if (!t || !t->selectionModel()) return;
+            const auto rows = t->selectionModel()->selectedRows();
+            if (rows.isEmpty()) { resState_->setText("先在列表里选一个"); return; }
+            if (QMessageBox::question(this, "删除",
+                                      QString("确定删除选中的 %1 项？目录会整个删掉（不进回收站）").arg(rows.size()),
+                                      QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+                return;
+            int removed = 0;
+            for (const auto& idx : rows) {
+                auto* nameItem = t->item(idx.row(), 0);
+                if (!nameItem) continue;
+                std::error_code ec;
+                const auto p = std::filesystem::path(nameItem->data(Qt::UserRole).toString().toStdString());
+                removed += static_cast<int>(std::filesystem::remove_all(p, ec));
+            }
+            refreshResources();
+            resState_->setText(QString("已删除 %1 项").arg(removed));
+        });
+        connect(importBtn, &QPushButton::clicked, this, [this] {
+            const auto target = currentResDir();
+            std::error_code ec;
+            std::filesystem::create_directories(target, ec);
+            if (resTabs_->currentIndex() == 0) {
+                const QString dir = QFileDialog::getExistingDirectory(this, "选择世界目录（level.dat 所在目录）");
+                if (dir.isEmpty()) return;
+                const auto dest = target / std::filesystem::path(dir.toStdString()).filename();
+                std::filesystem::copy(dir.toStdString(), dest,
+                                      std::filesystem::copy_options::recursive |
+                                          std::filesystem::copy_options::overwrite_existing, ec);
+                resState_->setText(ec ? "导入失败：" + QString::fromStdString(ec.message())
+                                      : "已导入世界 " + QString::fromStdString(dest.filename().string()));
+            } else {
+                const QString file = QFileDialog::getOpenFileName(this, "选择 zip", QString(), "资源包/光影 (*.zip)");
+                if (file.isEmpty()) return;
+                const auto dest = target / std::filesystem::path(file.toStdString()).filename();
+                std::filesystem::copy_file(file.toStdString(), dest,
+                                           std::filesystem::copy_options::overwrite_existing, ec);
+                resState_->setText(ec ? "导入失败：" + QString::fromStdString(ec.message())
+                                      : "已导入 " + QString::fromStdString(dest.filename().string()));
+            }
+            refreshResources();
+        });
+        connect(openBtn, &QPushButton::clicked, this, [this] {
+            const auto dir = currentResDir();
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            QProcess::startDetached("xdg-open", {QString::fromStdString(dir.string())});
+        });
+
+        refreshResources();
         return w;
     }
 
@@ -2180,6 +2531,9 @@ private:
         switching_ = true;
         const QPixmap old = stack_->grab();
         stack_->setCurrentIndex(idx);
+        if (idx == 2) refreshInstalledMods();     // Mod 页：刷新已装列表
+        else if (idx == 3) refreshVersionList();
+        else if (idx == 5) refreshResources();    // 资源页
         if (old.isNull()) return;
         auto* ov = new FadeOverlay(stack_, old);
         fadeOverlay_ = ov;
@@ -2613,6 +2967,27 @@ private:
         launchLog_->appendPlainText("Java: " + QString::fromStdString(java.path.string()));
         launchLog_->appendPlainText("主类: " + QString::fromStdString(plan.mainClass));
         launchLog_->appendPlainText("classpath " + QString::number(plan.argv.size()) + " 个参数");
+        // 日志落盘：<游戏目录>/note/launch-<版本>-<时间>.log，只留最近 10 个
+        {
+            const auto noteDir = layout_.gameDir / "note";
+            std::string lerr;
+            const auto logPath = core::newLogPath(noteDir, core::versionDirName(cfg_), lerr);
+            if (!logPath.empty()) {
+                launchLogPath_ = logPath;
+                launchLogFile_.setFileName(QString::fromStdString(logPath.string()));
+                if (launchLogFile_.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                    launchLogFile_.write(
+                        QString("== %1 ==\nJava: %2\n主类: %3\n参数: %4 个\n\n")
+                            .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"),
+                                 QString::fromStdString(java.path.string()),
+                                 QString::fromStdString(plan.mainClass))
+                            .arg(plan.argv.size())
+                            .toUtf8());
+                    launchLogFile_.flush();
+                    launchLog_->appendPlainText("日志: " + QString::fromStdString(logPath.string()));
+                }
+            }
+        }
         launchProc_ = new QProcess(this);
         launchProc_->setProcessChannelMode(QProcess::MergedChannels);
         launchProc_->setWorkingDirectory(QString::fromStdString(plan.workDir.string()));
@@ -2621,10 +2996,16 @@ private:
         launchProc_->setProgram(QString::fromStdString(plan.argv[0]));
         launchProc_->setArguments(args);
         connect(launchProc_, &QProcess::readyReadStandardOutput, this, [this] {
-            launchLog_->appendPlainText(QString::fromUtf8(launchProc_->readAllStandardOutput()).trimmed());
+            const QByteArray chunk = launchProc_->readAllStandardOutput();
+            launchLog_->appendPlainText(QString::fromUtf8(chunk).trimmed());
+            if (launchLogFile_.isOpen()) { launchLogFile_.write(chunk); launchLogFile_.flush(); }
         });
         connect(launchProc_, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
             launchState_->setText("game exited (" + QString::number(code) + ")");
+            if (launchLogFile_.isOpen()) launchLogFile_.close();
+            const int removed = core::pruneLogs(layout_.gameDir / "note", 10);
+            if (removed > 0)
+                launchLog_->appendPlainText(QString("已清理 %1 个旧日志（最多保留 10 个）").arg(removed));
         });
         launchState_->setText("运行中......");
         launchProc_->start();
@@ -2714,6 +3095,15 @@ private:
     QLineEdit* extraArgsEdit_ = nullptr;
     QComboBox* langCombo_ = nullptr;
     QComboBox* themeCombo_ = nullptr;
+    QFile launchLogFile_;
+    std::filesystem::path launchLogPath_;
+    QLabel* instModState_ = nullptr;
+    QTableWidget* instModTable_ = nullptr;
+    QTabWidget* resTabs_ = nullptr;
+    QTableWidget* savesTable_ = nullptr;
+    QTableWidget* packsTable_ = nullptr;
+    QTableWidget* shadersTable_ = nullptr;
+    QLabel* resState_ = nullptr;
     QCheckBox* snapCheck_ = nullptr;
     QListWidget* verList_ = nullptr;
     QLabel* verSummary_ = nullptr;
