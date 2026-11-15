@@ -799,6 +799,13 @@ public:
         setupAutoSave();
         refreshLocalVersions();
         refreshJava();
+        // 冒烟/文档用：MC263_SHOT=/tmp/x.png 时把首屏抓成 PNG 后退出
+        const QByteArray shotPath = qgetenv("MC263_SHOT");
+        if (!shotPath.isEmpty())
+            QTimer::singleShot(1500, this, [this, shotPath] {
+                grab().save(QString::fromLocal8Bit(shotPath));
+                qApp->quit();
+            });
         statusBar()->showMessage("游戏目录 " + QString::fromStdString(layout_.gameDir.string()) +
                                  " | 配置 " + QString::fromStdString(layout_.configFile.string()) +
                                  "（改动即自动保存）");
