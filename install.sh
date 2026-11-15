@@ -1,23 +1,31 @@
 #!/bin/sh
 # mc263 一键安装
 #   按发行版分流（不是按"装了哪个包管理器"）：
-#     Arch 系  → pacman 装 .pkg.tar.zst
+#     Arch 系   → pacman 装 .pkg.tar.zst
+#     Debian 系 → apt 装 .deb（Ubuntu 26.04+ / Debian 13+）
 #     Fedora 系 → 不装，打印 COPR 的 dnf 命令后退出（COPR 用 Fedora 密钥签名）
-#     SUSE 系  → 不装，打印 COPR 的 zypper addrepo 命令后退出（同一个项目有 Tumbleweed chroot）
-#     其它     → 独立 ELF
-#   --elf / --rpm / --pacman / --uninstall / --tag <tag> 可强制指定路线
+#     SUSE 系   → 不装，打印 COPR 的 zypper addrepo 命令后退出（同一个项目有 Tumbleweed chroot）
+#     其它      → 独立 ELF
+#   --elf / --rpm / --pacman / --deb / --uninstall / --tag <tag> 可强制指定路线
 #
 #   curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --tag pre非生产     # 装某个 pre-release
 #
-# 环境变量：MC263_VER、MC263_REPO、MC263_TAG
+# 环境变量：MC263_VER、MC263_DEB_REV、MC263_REPO、MC263_TAG
 set -eu
 
 REPO="${MC263_REPO:-zzxwithbus19/one-263-linux}"
 VER="${MC263_VER:-26.3}"
 PKGREL="${MC263_PKGREL:-10}"   # 与 packaging/PKGBUILD 的 pkgrel 保持一致
+DEBREV="${MC263_DEB_REV:-1}"   # 与 packaging/build-deb.sh 的修订号保持一致
 TAG="${MC263_TAG:-}"
 ARCH="$(uname -m)"
+# dpkg 的架构名和 uname 不一样：x86_64 → amd64，aarch64 → arm64
+case "$ARCH" in
+    x86_64)  DEB_ARCH=amd64 ;;
+    aarch64) DEB_ARCH=arm64 ;;
+    *)       DEB_ARCH="$ARCH" ;;
+esac
 API="https://api.github.com/repos/$REPO"
 BASE="https://github.com/$REPO/releases/latest/download"
 
@@ -45,6 +53,8 @@ distro_ids() (
 DISTRO_IDS="$(distro_ids | tr '[:upper:]' '[:lower:]')"
 case "$DISTRO_IDS" in
     *arch*|*manjaro*|*endeavouros*|*garuda*) DISTRO_FAMILY=arch ;;
+    *debian*|*ubuntu*|*linuxmint*|*pop*|*elementary*|*kali*|*raspbian*|*zorin*|*neon*|*deepin*|*mx*)
+                                              DISTRO_FAMILY=debian ;;
     *fedora*|*rhel*|*centos*|*rocky*|*alma*)  DISTRO_FAMILY=fedora ;;
     *suse*)                                   DISTRO_FAMILY=suse ;;
     *)                                        DISTRO_FAMILY=other ;;
@@ -53,6 +63,7 @@ esac
 if command -v dnf >/dev/null 2>&1; then PM=dnf
 elif command -v zypper >/dev/null 2>&1; then PM=zypper
 elif command -v pacman >/dev/null 2>&1; then PM=pacman
+elif command -v apt-get >/dev/null 2>&1; then PM=apt
 else PM=""; fi
 
 MODE="auto"
@@ -61,10 +72,11 @@ while [ $# -gt 0 ]; do
         --elf) MODE=elf ;;
         --rpm) MODE=rpm ;;
         --pacman) MODE=pacman ;;
+        --deb) MODE=deb ;;
         -u|--uninstall) MODE=uninstall ;;
         --tag) TAG="${2:-}"; shift ;;
-        -h|--help) sed -n '2,9p' "$0" 2>/dev/null || true; exit 0 ;;
-        *) die "未知参数: $1（可用 --elf / --rpm / --pacman / --tag <tag> / --uninstall）" ;;
+        -h|--help) sed -n '2,10p' "$0" 2>/dev/null || true; exit 0 ;;
+        *) die "未知参数: $1（可用 --elf / --rpm / --pacman / --deb / --tag <tag> / --uninstall）" ;;
     esac
     shift
 done
@@ -86,6 +98,14 @@ uninstall() {
     fi
     if command -v pacman >/dev/null 2>&1 && pacman -Q mc263 >/dev/null 2>&1; then
         $SUDO pacman -R --noconfirm mc263
+    fi
+    if command -v dpkg >/dev/null 2>&1 && dpkg -s mc263 >/dev/null 2>&1; then
+        # apt remove 会留下自动装的依赖，用户想清就 apt autoremove —— 脚本不替人删
+        if command -v apt-get >/dev/null 2>&1; then
+            $SUDO apt-get remove -y mc263
+        else
+            $SUDO dpkg -r mc263
+        fi
     fi
     for p in "$HOME/.local/bin/mc263-qt" "/usr/local/bin/mc263-qt"; do
         [ -e "$p" ] && { $SUDO rm -f "$p"; echo "  已删除 $p"; }
@@ -167,6 +187,10 @@ if [ "$MODE" = auto ]; then
             command -v pacman >/dev/null 2>&1 || die "检测到 Arch 系（$DISTRO_IDS），但没找到 pacman"
             MODE=pacman
             ;;
+        debian)
+            command -v dpkg >/dev/null 2>&1 || die "检测到 Debian 系（$DISTRO_IDS），但没找到 dpkg"
+            MODE=deb
+            ;;
         fedora)
             # Fedora 45 起拒装未签名 rpm；COPR 那条线是官方密钥签名，直接导过去
             guide_copr
@@ -183,7 +207,7 @@ if [ "$MODE" = auto ]; then
 fi
 
 case "$MODE" in
-    rpm|pacman) ask_for_root ;;
+    rpm|pacman|deb) ask_for_root ;;
 esac
 
 # ---------- 通过 GitHub API 找资产：支持 prerelease、任意资产名 ----------
@@ -204,9 +228,9 @@ resolve_via_api() {
         # 仓库只有 prerelease 时 /releases/latest 会 404，退回列表取最新一个
         fetch "$API/releases?per_page=1" "$TMP/rel.json" 2>/dev/null || return 1
     fi
-    out="$(python3 - "$TMP/rel.json" "$MODE" "$VER" "$ARCH" "$PKGREL" <<'PY'
+    out="$(python3 - "$TMP/rel.json" "$MODE" "$VER" "$ARCH" "$PKGREL" "$DEBREV" "$DEB_ARCH" <<'PY'
 import json, sys
-path, mode, ver, arch, pkgrel = sys.argv[1:6]
+path, mode, ver, arch, pkgrel, debrev, debarch = sys.argv[1:8]
 try:
     data = json.load(open(path))
 except Exception:
@@ -231,6 +255,14 @@ def pick():
         return next((a for a in assets
                      if a.get("name", "").startswith("mc263-")
                      and a.get("name", "").endswith(".pkg.tar.zst")), None)
+    if mode == "deb":
+        exact = f"mc263_{ver}-{debrev}_{debarch}.deb"
+        hit = next((a for a in assets if a.get("name") == exact), None)
+        if hit:
+            return hit
+        return next((a for a in assets
+                     if a.get("name", "").startswith("mc263_")
+                     and a.get("name", "").endswith(".deb")), None)
     exact = f"mc263-qt-{ver}-{arch}"
     hit = next((a for a in assets if a.get("name") == exact), None)
     if hit:
@@ -260,6 +292,7 @@ if resolve_via_api; then
 else
     if [ "$MODE" = rpm ]; then ASSET="mc263-$VER-1.$ARCH.rpm"
     elif [ "$MODE" = pacman ]; then ASSET="mc263-$VER-$PKGREL-$ARCH.pkg.tar.zst"
+    elif [ "$MODE" = deb ]; then ASSET="mc263_${VER}-${DEBREV}_${DEB_ARCH}.deb"
     else ASSET="mc263-qt-$VER-$ARCH"; fi
     URL="$BASE/$ASSET"
     warn "拿不到 release 元数据（API 不可达或没有 python3），按固定文件名下载：$ASSET"
@@ -313,6 +346,36 @@ install_elf() {
     esac
 }
 
+# ---------- deb ----------
+# 顺序：apt-get install ./x.deb（自动补依赖）→ dpkg -i → apt-get -f install。
+# 不 --force-depends、不预先 apt install 一堆依赖、不碰 /etc/apt：
+# 最后一步 apt-get -f install 只会把「这个本地包声明的依赖」补齐，不会乱动别的包。
+install_deb() {
+    step "安装 mc263（apt 会从官方源补齐依赖）"
+    deb="$1"
+    if command -v apt-get >/dev/null 2>&1; then
+        if $SUDO apt-get install -y "$deb"; then return 0; fi
+        warn "apt-get install 失败，退回 dpkg -i + apt-get -f install（不强制装）"
+    fi
+    $SUDO dpkg -i "$deb" || true
+    if command -v apt-get >/dev/null 2>&1; then
+        $SUDO apt-get -f install -y || true
+    fi
+    if command -v dpkg >/dev/null 2>&1 && dpkg -s mc263 2>/dev/null | grep -q '^Status: install ok installed'; then
+        return 0
+    fi
+    keep="$(keep_pkg "$(basename "$deb")")"
+    printf '\n安装未完成：依赖没补齐或被系统策略挡住。\n\n' >&2
+    printf '包已留在：%s\n\n' "$keep" >&2
+    printf '手动排查：\n' >&2
+    printf '  sudo apt install %s\n' "$keep" >&2
+    printf '  sudo dpkg -i %s && sudo apt-get -f install\n\n' "$keep" >&2
+    printf 'Ubuntu 24.04 / Debian 12 的 Qt 6.4 缺 QPalette::Accent，本包要求 Qt 6.6+，\n' >&2
+    printf '支持范围是 Ubuntu 26.04+ / Debian 13+。版本不够请改走独立 ELF：\n' >&2
+    printf '  curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | sh -s -- --elf\n' "$REPO" >&2
+    die "安装失败：$(basename "$deb")"
+}
+
 # ---------- rpm ----------
 # 签名校验失败就失败：不自动跳过 GPG、不退化到 rpm --nosignature、不碰 /etc/rpm。
 # 要不要冒这个险是用户自己的决定，脚本只负责把可复制的命令摆出来。
@@ -357,6 +420,8 @@ elif [ "$MODE" = pacman ]; then
         echo "然后重跑：sh install.sh --pacman" >&2
         die "安装失败：$ASSET"
     fi
+elif [ "$MODE" = deb ]; then
+    install_deb "$TMP/$ASSET"
 else
     if fetch "$BASE/mc263-signing-key.asc" "$TMP/key.asc" 2>/dev/null; then
         step "导入签名公钥"

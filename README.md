@@ -20,7 +20,7 @@ minecraft/               ← 游戏目录（首次运行自动建，可在设置
 
 ## 1. 安装
 
-主线是 **Arch Linux和Fedora**。AUR 上没有（我没账户啊啊啊），copr倒是有
+主线是 **Arch Linux、Debian/Ubuntu 和 Fedora**。AUR 上没有（我没账户啊啊啊），copr倒是有
 
 ### 1.1 
 
@@ -33,9 +33,10 @@ curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/ins
 ```sh
 sh install.sh --pacman       # 只装 Arch 的 .pkg.tar.zst（sudo pacman -U）
 sh install.sh --rpm          # 只装 rpm
+sh install.sh --deb          # 只装 Debian/Ubuntu 的 .deb（sudo apt install ./x.deb）
 sh install.sh --elf          # 只装独立 ELF，不碰包管理器
 sh install.sh --tag pre非生产  # 装指定 tag（pre-release 也支持）
-sh install.sh --uninstall    # 卸载（pacman 包 / rpm / ELF 都会处理）
+sh install.sh --uninstall    # 卸载（pacman / deb / rpm / ELF 都会处理）
 ```
 
 ### 1.2 免安装 ELF
@@ -48,8 +49,20 @@ chmod +x mc263-qt-26.3-x86_64
 ./mc263-qt-26.3-x86_64
 ```
 
-> 自备了 Qt6 运行时的其它发行版也能这么跑；但它们目前**不提供打包支持**，自己干去（记得开源或者不商用）
-> Fedora / openSUSE 请用 rpm（详见copr）。
+> 自备了 Qt6 运行时的其它发行版也能这么跑；Debian 系有 .deb（见 1.3），Fedora / openSUSE 请用 rpm（详见copr）。
+
+### 1.3 Debian / Ubuntu（Ubuntu 26.04+ / Debian 13+）
+
+需要 Qt 6.6+ 的 `QPalette::Accent`，所以不支持 Ubuntu 24.04（Qt 6.4）。
+
+```sh
+sudo apt install build-essential qt6-base-dev qt6-wayland python3 curl
+bash packaging/build-deb.sh                   # → dist/deb/mc263_26.3-1_amd64.deb
+sudo apt install ./dist/deb/mc263_26.3-1_amd64.deb   # 注意 ./，否则 apt 当成包名
+mc263-qt
+```
+
+细节（依赖映射、t64 包名、Wayland 插件包名、验收清单）见 [docs/debian-handoff.md](docs/debian-handoff.md)。
 
 ---
 
@@ -115,9 +128,9 @@ Mod 下载也装进对应版本的目录，而不是全局 `minecraft/mods/`。
 
 ```
 mc26-one/
-├── Makefile                    all / check / rpm / arch / info / clean
+├── Makefile                    all / check / rpm / arch / deb / info / clean
 ├── README.md
-├── install.sh                  一键安装（pacman / rpm / ELF 自动选择 + 摘要校验）
+├── install.sh                  一键安装（pacman / deb / rpm / ELF 自动选择 + 摘要校验）
 ├── include/
 │   ├── launcher_core.hpp       布局 / 配置 / Java 探测 / 兼容性 / 启动 / meminfo / 版本隔离 / 加载器 / 目录扫描
 │   ├── download.hpp            curl 下载后端 + SHA1 + 并发池（兼容性网络检查用）
@@ -129,7 +142,8 @@ mc26-one/
 ├── src/
 │   └── mc263_qt.cpp            Qt6 主窗口（6 页，内嵌 python3 下载脚本）
 ├── docs/
-│   └── arch-handoff.md         Arch 打包与分发交接（无 AUR 的命令行路线）
+│   ├── arch-handoff.md         Arch 打包与分发交接（无 AUR 的命令行路线）
+│   └── debian-handoff.md       Debian / Ubuntu 打包与分发交接（Ubuntu 26.04+ / Debian 13+）
 ├── packaging/
 │   ├── PKGBUILD                Arch 包模板（主线，源码构建）
 │   ├── build-arch.sh           源码包 → PKGBUILD → makepkg → 校验 → 冒烟
@@ -138,10 +152,11 @@ mc26-one/
 │   ├── mc263.metainfo.xml      AppStream 元数据（GNOME Software / KDE Discover）
 │   ├── mc263.spec              rpm spec（参考；完整线与 COPR 在 fedora 分支）
 │   ├── build-rpm.sh            make → rpmbuild → dist/*.rpm + 独立 ELF + SHA256SUMS
+│   ├── build-deb.sh            make → 暂存树 → dpkg-deb → dist/deb/*.deb + SHA256SUMS
 │   ├── mc263.desktop           应用菜单项（Exec=mc263-qt）
 │   └── mc263.svg               图标
 └── tests/
-    ├── core_test.cpp           57 项核心单测
+    ├── core_test.cpp           81 项核心单测
     ├── downloader_test.sh      内嵌下载器 + mock CDN 自测（7 项）
     ├── mock_cdn.py             离线模拟 Mojang 下载端点（真实 SHA1）
     └── probe_endpoints.py      真实端点诊断
