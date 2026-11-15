@@ -19,3 +19,6 @@ __pycache__/
 docs/copr-publish.md
 .vscode/
 *.code-workspace
+
+# 机器相关：换发行版/机器后跑 make compile-db 重新生成
+compile_commands.json
