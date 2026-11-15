@@ -10,7 +10,7 @@ Qt6 Widgets 原生界面（无 Electron、无内嵌浏览器、无 moc），启�
 Wayland 原生运行。
 
 ```
-mc263-qt                 ← 唯一可执行文件（约 750 KB）
+mc263-qt                 ← 唯一可执行文件（约 820 KB）
 minecraft/               ← 游戏目录（首次运行自动建，可在设置里改）
 .mc263/
 ├── config.json          版本 / 内存 / Java / 镜像 / 组件（改完即存）
@@ -103,8 +103,9 @@ sudo dnf install gcc-c++ make qt6-qtbase-devel qt6-qtwayland python3
 sudo zypper install gcc-c++ make qt6-qtbase-devel libQt6WaylandClient6 python3
 
 make                 # 编译 build/mc263-qt
-make check           # 81 项核心单测 + 7 项内嵌下载器自测（全部离线）
+make check           # 90 项核心单测 + 7 项内嵌下载器自测（全部离线）
 make rpm             # 出 rpm（本分支主线，见第 6 节）
+make compile-db      # 生成 compile_commands.json（clangd / IDE 用）
 make info            # 编译器 / Qt6 / 产物路径
 
 build/mc263-qt                            # 运行
@@ -122,12 +123,13 @@ MC263_SHOT=/tmp/ui.png build/mc263-qt     # 抓首屏 PNG 后退出（看布局�
 
 | 页面 | 能力 |
 |------|------|
-| 启动游戏 | 本地版本下拉、玩家名、一键启动；`QProcess` 异步 exec java，日志实时刷新 |
+| 启动游戏 | 本地版本下拉、玩家名、一键启动；`QProcess` 异步 exec java，日志实时刷新；**启动日志落盘**到 `<游戏目录>/note/launch-<版本>-<时间>.log`，只留最近 10 个 |
 | 下载游戏 | 在线版本列表（可勾「含预览版」把 snapshot 一起列出来）、组件勾选、official / bmclapi 镜像、并发线程（默认 10）；JSON 进度条与日志；**清除下载缓存**按钮（只删元数据缓存，已下载的 jar / 库 / 资源不受影响） |
-| Mod 下载 | 搜 Modrinth：关键词 + 加载器 + 游戏版本过滤，**排序可选下载量 / 相关度 / 关注数 / 最新发布 / 最近更新**；双击即装，SHA1 校验、已存在则跳过；**自动补齐 Mod 的 required 前置**，拿不到文件的转成手动下载清单 |
+| Mod 下载 | 搜 Modrinth：关键词 + 加载器 + 游戏版本过滤，**排序可选下载量 / 相关度 / 关注数 / 最新发布 / 最近更新**；双击即装，SHA1 校验、已存在则跳过；**自动补齐 Mod 的 required 前置**，拿不到文件的转成手动下载清单；同页的**已装 Mod 列表**可启用 / 禁用（`.disabled`）、删除、**检查更新**（本地 jar 的 SHA1 反查 Modrinth） |
 | 版本管理 | 左栏是已装版本（卡片列表，选中态实心强调色），右栏是**该版本的 Java 与兼容性查验**：扫配置 / Mojang JRE / `JAVA_HOME` / `PATH` / `/usr/lib/jvm`，11 项检查（架构、Java 版本、依赖库、natives、图形音频库、内存、磁盘、路径守卫，可选网络连通性） |
 | 加载器 | Fabric / Quilt 版本列表拉取 + 一键安装：抓 profile json、与原版 json 合并、下载依赖到 `libraries/`，生成 `versions/<版本>+<加载器>/` |
 | 游戏目录 | 独立一页：自动扫描 ELF 旁 / XDG 数据目录 / `~/.minecraft`（**只列真实存在的目录**），列出各自的版本数与 mods 数，选中即切换，避免两套装各用一份 |
+| 资源 | 世界 / 资源包 / 光影分标签页，扫当前版本目录；导入 zip、启用 / 禁用（`.disabled`）、删除（世界不能禁用，只能删或换目录） |
 | 设置 / 内存 | **配色来源可选**：自动（找到 Noctalia 色板就用）/ 跟随系统调色板 / Noctalia（Material You）；**内存默认交给 JVM 管理**（不传 `-Xmx`/`-Xms`），关掉自动后可手动拖；四段式内存条：程序占用 → 缓存 → 游戏堆 → 余下可用，2 秒刷新、超可用内存红字提示；额外 JVM 参数；**游戏语言默认跟随系统 locale**（识别不到就 `en_us`） |
 
 窗口圆角默认 12px（`kWindowRadius` 常量，合成器给了服务端装饰时它自己画圆角、这里就不画）。
@@ -265,7 +267,7 @@ bash packaging/build-rpm.sh --sign <密钥指纹或邮箱>
 
 ```
 mc26-one/
-├── Makefile                    all / check / rpm / arch / info / clean
+├── Makefile                    all / check / rpm / arch / compile-db / info / clean
 ├── README.md
 ├── install.sh                  一键安装（rpm / pacman / ELF 自动选择 + 摘要校验）
 ├── include/
@@ -277,19 +279,23 @@ mc26-one/
 │   ├── safe_path.hpp           路径守卫（黑名单 + 沙箱根 + 符号链接逃逸防护）
 │   └── fs_util.hpp             目录 / 文件 / 环境变量小工具
 ├── src/
-│   └── mc263_qt.cpp            Qt6 主窗口（6 页，内嵌 python3 下载脚本）
+│   └── mc263_qt.cpp            Qt6 主窗口（7 页，内嵌 python3 下载脚本）
+├── tools/
+│   └── gen_compile_db.py       make compile-db：生成 compile_commands.json（clangd 用）
 ├── packaging/
 │   ├── mc263.spec              rpm spec（装预编译二进制）
 │   ├── mc263-source.spec       rpm spec（从源码构建，给 COPR / OBS）
 │   ├── make-srcrpm.sh          spec + tarball → .src.rpm（COPR 只收这个）
+│   ├── make-source.sh          按 git 跟踪文件打源码 tarball（arch / COPR 共用）
 │   ├── build-rpm.sh            make → rpmbuild → dist/*.rpm + 独立 ELF + SHA256SUMS
 │   ├── make-repo.sh            用 createrepo_c 生成 dnf 仓库目录
 │   ├── mc263.repo.example      用户侧 repo 文件模板
 │   ├── mc263.desktop           应用菜单项（Exec=mc263-qt）
+│   ├── mc263.metainfo.xml      AppStream 元数据（软件中心显示）
 │   ├── niri-mc263.kdl          niri 窗口规则示例（浮动尺寸 / 圆角 / 边框）
 │   └── mc263.svg               图标
 └── tests/
-    ├── core_test.cpp           81 项核心单测
+    ├── core_test.cpp           90 项核心单测
     ├── downloader_test.sh      内嵌下载器 + mock CDN 自测（7 项）
     ├── mock_cdn.py             离线模拟 Mojang 下载端点（真实 SHA1）
     └── probe_endpoints.py      真实端点诊断
