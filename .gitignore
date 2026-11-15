@@ -4,7 +4,10 @@
 *.log
 *.rpm
 *.tmp-*
+
+# 内部资料（交接文档、COPR 流程、对话记录）：只留在本地
 docs/
+
 # 构建产物与运行期数据（工具已全部上移到仓库根，都限制在项目沙箱内）
 build/
 dist/
@@ -16,7 +19,8 @@ runtime-data/
 minecraft/
 __pycache__/
 *.pyc
-mc26-one.code-workspace
 .vscode/
-# clangd 的编译数据库：跟编译器版本和本机路径绑定，不进仓库
+*.code-workspace
+# 编译数据库：跟编译器版本和本机路径绑定，不进仓库
+# 换发行版/机器后跑 make compile-db 重新生成
 compile_commands.json

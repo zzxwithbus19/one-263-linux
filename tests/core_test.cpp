@@ -338,6 +338,41 @@ broken = "not-a-color"
               "加载器版本：父版本缺失时报缺 json");
     }
 
+    // 13) 本地文件管理：mods 启用/禁用、启动日志保留
+    {
+        std::string e;
+        fs::path d = root / "ent";
+        fs::create_directories(d / "world", ec);
+        { std::ofstream o(d / "a.jar"); o << "jar"; }
+        { std::ofstream o(d / "b.jar.disabled"); o << "jar"; }
+
+        auto list = listEntries(d);
+        check(list.size() == 3, "文件管理：列出 3 项（含子目录）");
+        std::string bName;
+        bool bDisabled = false;
+        for (const auto& x : list)
+            if (x.name == "b.jar") { bName = x.name; bDisabled = !x.enabled; }
+        check(bName == "b.jar" && bDisabled, "文件管理：.disabled 显示为禁用且名称去掉后缀");
+
+        fs::path bPath = d / "b.jar.disabled";
+        check(setEntryEnabled(bPath, true, e), "文件管理：启用（去 .disabled）");
+        check(fs::exists(d / "b.jar") && !fs::exists(bPath), "文件管理：启用后文件已改名");
+        check(setEntryEnabled(d / "b.jar", false, e), "文件管理：禁用（加 .disabled）");
+        check(fs::exists(bPath), "文件管理：禁用后文件带 .disabled");
+
+        fs::path note = root / "note";
+        fs::path logPath = newLogPath(note, "26.3+fabric", e);
+        check(!logPath.empty() && fs::is_directory(note), "日志：note 目录会创建");
+        check(logPath.filename().string().rfind("launch-26.3-fabric-", 0) == 0,
+              "日志：文件名含版本标签与时间");
+        for (int i = 0; i < 12; ++i) { std::ofstream o(note / ("x" + std::to_string(i) + ".log")); o << i; }
+        int removed = pruneLogs(note, 10);
+        int left = 0;
+        for (const auto& f : fs::directory_iterator(note))
+            if (f.path().extension() == ".log") ++left;
+        check(removed == 2 && left == 10, "日志：只保留最近 10 个");
+    }
+
     std::cout << "core: " << passed << " 项通过\n";
     return 0;
 }

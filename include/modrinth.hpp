@@ -44,6 +44,7 @@ struct Dependency {
 
 struct Version {
     std::string id;
+    std::string projectId;   // /version_file 查询时会带回来，更新检查要用
     std::string name;
     std::string number;
     std::vector<std::string> gameVersions;
@@ -103,6 +104,7 @@ inline bool parseSearch(const std::string& text, std::vector<Hit>& out, std::str
 inline Version parseVersionObject(const JValue& v) {
     Version x;
     x.id = field(v, "id");
+    x.projectId = field(v, "project_id");
     x.name = field(v, "name");
     x.number = field(v, "version_number");
     if (const JValue* gv = v.find("game_versions"); gv && gv->isArray())
@@ -191,6 +193,21 @@ inline bool project(const std::string& idOrSlug, const fs::path& cacheDir, Proje
     out.title = field(j, "title");
     out.projectType = field(j, "project_type");
     if (out.title.empty()) { err = "项目不存在或 API 拒绝访问"; return false; }
+    return true;
+}
+
+// 用文件 SHA1 反查它属于哪个版本（Modrinth 的 /version_file 端点）。
+// 更新检查的第一步：本地 jar → 版本 → project → 该 project 的最新兼容版本。
+inline bool versionByHash(const std::string& sha1, const fs::path& cacheDir, Version& out,
+                          std::string& err) {
+    if (sha1.empty()) { err = "SHA1 为空"; return false; }
+    const std::string url = "https://api.modrinth.com/v2/version_file/" + sha1 + "?algorithm=sha1";
+    std::string text;
+    if (!mc263::dl::fetchText(url, "", cacheDir, 25, text, err)) return false;
+    JValue j = mc263::jsonParse(text, err);
+    if (!err.empty()) return false;
+    out = parseVersionObject(j);
+    if (out.id.empty()) { err = "这个文件不在 Modrinth 上（或版本已被删除）"; return false; }
     return true;
 }
 
