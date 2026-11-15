@@ -1693,7 +1693,7 @@ private:
         verList_->clear();
         for (const auto& id : vers) verList_->addItem(QString::fromStdString(id));
         if (verList_->count() == 0) {
-            if (verSummary_) verSummary_->setText("还没有装任何游戏版本；去「下载游戏」页拉一个，或先装个加载器");
+            if (verSummary_) verSummary_->setText("还没有装任何游戏版本；去'下载页'拉一个，或先装个加载器");
             return;
         }
         int idx = 0;
@@ -1729,7 +1729,7 @@ private:
     QWidget* pageDirs() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        addPageHeader(v, "游戏目录", "自动扫描常见位置（ELF 旁 / rpm 的 XDG 目录 / ~/.minecraft，只列真实存在的），避免两套装各用一份、重复下载");
+        addPageHeader(v, "游戏目录");
 
         auto* box = new QGroupBox("目录", w);
         auto* bv = new QVBoxLayout(box);
@@ -1829,7 +1829,7 @@ private:
         legend->addStretch(1);
         mv->addLayout(legend);
 
-        memAuto_ = new QCheckBox("内存交给 JVM 自动管理（推荐，不传 -Xmx / -Xms）", w);
+        memAuto_ = new QCheckBox("内存交给 JVM ", w);
         memAuto_->setChecked(cfg_.autoMemory);
         mv->addWidget(memAuto_);
 
@@ -1856,10 +1856,10 @@ private:
         auto* form = new QFormLayout(gbox);
         setCardTitle(gbox, form, "其他");
         extraArgsEdit_ = new QLineEdit(w);
-        extraArgsEdit_->setPlaceholderText("例如 -XX:+UseZGC，空格分隔");
+        extraArgsEdit_->setPlaceholderText("例如 滚木！");
         form->addRow("额外 JVM 参数", extraArgsEdit_);
         langCombo_ = new QComboBox(w);
-        langCombo_->addItem(QString("跟随系统（%1）")
+        langCombo_->addItem(QString("跟随系统(%1)")
                                 .arg(QString::fromStdString(core::detectSystemLanguage())), QString());
         for (const char* code : {"en_us", "zh_cn", "zh_tw", "ja_jp", "ko_kr", "de_de",
                                   "fr_fr", "es_es", "pt_br", "ru_ru"})
@@ -2032,8 +2032,8 @@ private:
         v->setContentsMargins(0, 10, 0, 0);
 
         QString text =
-            "本项目源码许可：GPL-3.0-or-later（见 LICENSE）\n"
-            "Qt6 运行时：LGPL-3.0-only OR GPL-3.0-only WITH Qt-GPL-exception-1.0（动态链接）\n"
+            "许可GPL-3.0-or-later\n"
+            "Qt6 运行时:LGPL-3.0-only OR GPL-3.0-only WITH Qt-GPL-exception-1.0（动态链接）\n"
             "游戏文件、Mojang Java 运行时与第三方库各自适用其原有许可，本工具不随仓库分发它们。";
         auto* licBox = new QGroupBox("许可与说明", w);
         auto* licLayout = new QVBoxLayout(licBox);
@@ -2050,7 +2050,7 @@ private:
         auto* docRow = new QHBoxLayout();
         docRow->addWidget(new QLabel("说明文档：", w));
         if (readme.isEmpty()) {
-            auto* miss = new QLabel("未找到 README.md（已从应用目录向上找 4 层）", w);
+            auto* miss = new QLabel("未找到 说明文档", w);
             miss->setStyleSheet("color:" + (dark ? QStringLiteral("#9aa4b2")
                                                   : QStringLiteral("#5b6472")) + ";");
             docRow->addWidget(miss, 1);
@@ -2085,9 +2085,9 @@ private:
         // 实际生效的显示后端（Wayland 原生 / XWayland / offscreen），方便排查
         const QString plat = QGuiApplication::platformName();
         QString platNote = plat;
-        if (plat.startsWith("wayland")) platNote += "（原生 Wayland，不经过 XWayland）";
-        else if (plat == "xcb") platNote += "（X11 / XWayland 转发）";
-        auto* platLabel = new QLabel("显示后端：" + platNote + "　·　Qt " +
+        if (plat.startsWith("wayland")) platNote += "原生 Wayland";
+        else if (plat == "xcb") platNote += "X11 / XWayland 转发";
+        auto* platLabel = new QLabel("显示后端：" + platNote + " * Qt " +
                                          QString::fromLatin1(qVersion()), w);
         platLabel->setStyleSheet("color:" +
                                  (dark ? QStringLiteral("#9aa4b2") : QStringLiteral("#5b6472")) + ";");
@@ -2107,7 +2107,7 @@ private:
         const QString cCache = mc.cache.name();
         const QString cAvail = dark ? QStringLiteral("#9aa4b2") : QStringLiteral("#5b6472");
         const int pct = mi.totalMb ? static_cast<int>(mi.usedMb * 100 / mi.totalMb) : 0;
-        memSummary_->setText(QString("物理内存 <b>%1</b> · 其他程序占用 <b>%2</b>（%3%）")
+        memSummary_->setText(QString("物理内存 <b>%1</b> · 其他程序占用 <b>%2</b>(%3%)")
                                  .arg(fmtMem(mi.totalMb), fmtMem(mi.usedMb)).arg(pct));
         usedStat_->setText(QString("<span style='color:%1'>■</span> 程序占用 <b>%2</b>")
                                .arg(cUsed, fmtMem(mi.usedMb)));
@@ -2130,13 +2130,13 @@ private:
         const int pTotal = total ? static_cast<int>(want * 100 / total) : 0;
         const int pAvail = avail ? static_cast<int>(want * 100 / avail) : 0;
         QString line = autoMode
-                           ? QString("JVM 自动：预计上限约 %1（不传 -Xmx）").arg(fmtMem(static_cast<uint64_t>(want)))
-                           : QString("-Xmx%1M　·　占物理内存 %2%　·　占当前可用 %3%")
+                           ? QString("JVM 自动：预计上限约 %1(不传 -Xmx)").arg(fmtMem(static_cast<uint64_t>(want)))
+                           : QString("-Xmx%1M * 占物理内存 %2% * 占当前可用 %3%")
                                  .arg(want).arg(pTotal).arg(pAvail);
         if (avail) {
             const uint64_t left = static_cast<uint64_t>(want) < avail
                                       ? avail - static_cast<uint64_t>(want) : 0;
-            line += "　·　启动后预计剩余 " + fmtMem(left);
+            line += " * 启动后预计剩余 " + fmtMem(left);
         }
         memPreview_->setText(line);
         if (gameStat_) {
@@ -2152,7 +2152,7 @@ private:
         if (autoMode) { memWarn_->hide(); return; }
         const bool dark = palette().color(QPalette::Window).lightness() < 128;
         if (avail && static_cast<uint64_t>(want) > avail) {
-            memWarn_->setText(QString("注意：超出当前可用内存 %1（仅可用 %2），启动后可能被系统 OOM 杀掉")
+            memWarn_->setText(QString("注意：超出当前可用内存 %1(仅可用 %2),启动后可能被系统 OOM 杀掉")
                                   .arg(fmtMem(static_cast<uint64_t>(want) - avail), fmtMem(avail)));
             memWarn_->setStyleSheet(QString("color:%1;").arg(dark ? "#f87171" : "#b91c1c"));
             memWarn_->show();
@@ -2235,11 +2235,11 @@ private:
         if (!themeHint_) return;
         QString txt;
         if (m3_.valid())
-            txt = QStringLiteral("读的是 %1（%2）")
+            txt = QStringLiteral("读的是 %1(%2)")
                       .arg(QString::fromStdString(m3_.path),
                            m3_.dark() ? QStringLiteral("深色") : QStringLiteral("浅色"));
         else
-            txt = QStringLiteral("没找到 Noctalia 色板（会依次找 %1）")
+            txt = QStringLiteral("没找到 Noctalia 色板(会依次找 %1)")
                       .arg(QString::fromStdString(core::paletteCandidates().front()));
         if (core::isNiriSession()) txt += QStringLiteral(" · niri 会话");
         themeHint_->setText(txt);
@@ -2413,10 +2413,10 @@ private:
             if (guard) {
                 if (id.isEmpty()) {
                     downloadLog_->appendPlainText(
-                        "拿不到最新预览版：" + QString::fromUtf8(p->readAllStandardError()).trimmed());
+                        "拿不到最新预览版:" + QString::fromUtf8(p->readAllStandardError()).trimmed());
                 } else {
                     downloadVersion_->setCurrentText(id);
-                    downloadLog_->appendPlainText("最新预览版：" + id + "（点「开始下载」拉到本地）");
+                    downloadLog_->appendPlainText("最新预览版: " + id + " ( 点'开始下载'拉到本地 ) ");
                 }
             }
             p->deleteLater();
@@ -2447,7 +2447,7 @@ private:
     }
 
     void refreshJava() {
-        javaState_->setText("后台扫描 Java 中…");
+        javaState_->setText("后台扫描 Java 中......");
         core::Layout l = layout_;
         core::Config c = cfg_;
         QPointer<LauncherWindow> guard(this);
@@ -2459,7 +2459,7 @@ private:
         }).detach();
     }
     void runCompat() {
-        compatState_->setText("后台查验中…");
+        compatState_->setText("后台查验中......");
         core::Layout l = layout_;
         core::Config c = cfg_;
         auto javas = javas_;
@@ -2480,11 +2480,11 @@ private:
         dirUsage(cache, files, bytes);
         if (files == 0) {
             downloadLog_->appendPlainText("[" + QTime::currentTime().toString("HH:mm:ss") +
-                                         "] 缓存已是空的：" + QString::fromStdString(cache.string()));
+                                         "] 缓存已是空的 : " + QString::fromStdString(cache.string()));
             downloadLabel_->setText("缓存为空");
             return;
         }
-        const QString msg = QString("将删除 %1 个缓存文件（%2）：\n%3\n\n只清元数据缓存，已下载的游戏文件（jar / libraries / assets）不受影响。")
+        const QString msg = QString("将删除 %1 个缓存文件(%2):\n%3\n\n只清元数据缓存,已下载的游戏文件(jar / libraries / assets)不受影响...吗？")
                                 .arg(files)
                                 .arg(fmtMem(bytes / (1024 * 1024)))
                                 .arg(QString::fromStdString(cache.string()));
@@ -2503,7 +2503,7 @@ private:
                                           .arg(QTime::currentTime().toString("HH:mm:ss"))
                                           .arg(files)
                                           .arg(fmtMem(bytes / (1024 * 1024))));
-        downloadLabel_->setText(QString("缓存已清除（%1）").arg(fmtMem(bytes / (1024 * 1024))));
+        downloadLabel_->setText(QString("缓存已清除(%1)").arg(fmtMem(bytes / (1024 * 1024))));
     }
 
     void startDownload() {
@@ -2516,7 +2516,7 @@ private:
         cfg_.save(layout_.configFile, err);
         saveDownloaderScript();
         downloadLog_->clear();
-        downloadLog_->appendPlainText("启动 python3 下载器（多线程并发 " + QString::number(cfg_.jobs) + "）…");
+        downloadLog_->appendPlainText("启动 python3 下载器 (多线程并发 " + QString::number(cfg_.jobs) + ") ......");
         QStringList comps;
         for (const auto& s : cfg_.components) comps << QString::fromStdString(s);
         downloadProc_ = new QProcess(this);
@@ -2536,7 +2536,7 @@ private:
         connect(downloadProc_, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
             downloadBtn_->setEnabled(true);
             cancelBtn_->setEnabled(false);
-            downloadLabel_->setText(code == 0 ? "下载完成" : "下载结束（退出码 " + QString::number(code) + "）");
+            downloadLabel_->setText(code == 0 ? "下载完成" : "下载结束(退出码 " + QString::number(code) + ")");
             if (code == 0) {
                 refreshLocalVersions();
                 refreshJava();  // 运行时下载完可能就有 Java 25 了，重新过一遍闸门
@@ -2622,9 +2622,9 @@ private:
             launchLog_->appendPlainText(QString::fromUtf8(launchProc_->readAllStandardOutput()).trimmed());
         });
         connect(launchProc_, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
-            launchState_->setText("游戏已退出（" + QString::number(code) + "）");
+            launchState_->setText("game exited (" + QString::number(code) + ")");
         });
-        launchState_->setText("运行中…");
+        launchState_->setText("运行中......");
         launchProc_->start();
     }
 
@@ -2747,7 +2747,7 @@ int main(int argc, char** argv) {
                      "mc263-qt: %s\n"
                      "  Fedora : sudo dnf install qt6-qtwayland\n"
                      "  openSUSE: sudo zypper install libQt6WaylandClient6\n"
-                     "  或在有 X11/XWayland 时指定：QT_QPA_PLATFORM=xcb %s\n",
+                     "  或在有 X11/XWayland 时指定：'QT_QPA_PLATFORM=xcb' %s\n",
                      pick.note.c_str(), argv[0]);
         return 1;
     }

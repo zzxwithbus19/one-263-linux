@@ -1,8 +1,36 @@
 [
   {
-    "file": "src/mc263_qt.cpp",
+    "file": "/home/cxc/文档/deepseek-harness/default-workspace/one-263-linux/src/mc263_qt.cpp",
     "arguments": [
-      "/usr/bin/g++",
+      "g++",
+      "-std=c++23",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-Iinclude",
+      "-rdynamic",
+      "-pthread",
+      "-fPIC",
+      "-I/usr/include/x86_64-linux-gnu/qt6/QtWidgets",
+      "-I/usr/include/x86_64-linux-gnu/qt6",
+      "-DQT_WIDGETS_LIB",
+      "-I/usr/include/x86_64-linux-gnu/qt6/QtGui",
+      "-DQT_GUI_LIB",
+      "-I/usr/include/x86_64-linux-gnu/qt6/QtCore",
+      "-DQT_CORE_LIB",
+      "-I/usr/lib/x86_64-linux-gnu/qt6/mkspecs/linux-g++",
+      "/home/cxc/文档/deepseek-harness/default-workspace/one-263-linux/src/mc263_qt.cpp",
+      "-o",
+      "/home/cxc/文档/deepseek-harness/default-workspace/one-263-linux/build/mc263-qt"
+    ],
+    "directory": "/home/cxc/文档/deepseek-harness/default-workspace/one-263-linux",
+    "output": "/home/cxc/文档/deepseek-harness/default-workspace/one-263-linux/build/mc263-qt"
+  },
+  {
+    "file": "/home/cxc/文档/deepseek-harness/default-workspace/one-263-linux/tests/core_test.cpp",
+    "arguments": [
+      "g++",
       "-std=c++23",
       "-O2",
       "-Wall",
@@ -10,20 +38,11 @@
       "-Wpedantic",
       "-Iinclude",
       "-pthread",
-      "-fPIC",
-      "-I/usr/include/qt6/QtWidgets",
-      "-I/usr/include/qt6",
-      "-DQT_WIDGETS_LIB",
-      "-I/usr/include/qt6/QtGui",
-      "-DQT_GUI_LIB",
-      "-I/usr/include/qt6/QtCore",
-      "-DQT_CORE_LIB",
-      "-I/usr/lib/qt6/mkspecs/linux-g++",
-      "src/mc263_qt.cpp",
+      "/home/cxc/文档/deepseek-harness/default-workspace/one-263-linux/tests/core_test.cpp",
       "-o",
-      "build/mc263-qt"
+      "/home/cxc/文档/deepseek-harness/default-workspace/one-263-linux/build/core-test"
     ],
-    "directory": "/home/bus/Documents/deepseek-harness/workspace for github",
-    "output": "build/mc263-qt"
+    "directory": "/home/cxc/文档/deepseek-harness/default-workspace/one-263-linux",
+    "output": "/home/cxc/文档/deepseek-harness/default-workspace/one-263-linux/build/core-test"
   }
 ]
