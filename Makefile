@@ -7,6 +7,8 @@
 #   make deb       调 packaging/build-deb.sh 打 .deb（Ubuntu 26.04+ / Debian 13+）
 #   make info      显示编译器 / Qt6 状态
 
+#   make compile-db 重新生成 compile_commands.json（换发行版/机器后跑一次）
+
 CXX      ?= g++
 STD      := -std=c++23
 OPT      := -O2
@@ -27,7 +29,7 @@ ifeq ($(QT6_LIBS),)
 $(warning 未找到 Qt6 开发包；Fedora: sudo dnf install qt6-qtbase-devel / openSUSE: sudo zypper install qt6-qtbase-devel)
 endif
 
-.PHONY: all check qt rpm arch deb info clean help
+.PHONY: all check qt rpm arch deb compile-db info clean help
 
 all: $(QT_APP)
 
@@ -57,6 +59,9 @@ arch:
 deb: all
 	bash packaging/build-deb.sh
 
+compile-db:
+	@CXX="$(CXX)" python3 tools/gen_compile_db.py
+
 info:
 	@$(CXX) --version | head -1
 	@printf '标准      : %s\n' '$(STD)'
@@ -68,11 +73,12 @@ clean:
 	rm -rf $(BUILD) $(DIST)
 
 help:
-	@printf '目标: all / check / rpm / arch / deb / info / clean\n'
+	@printf '目标: all / check / rpm / arch / deb / compile-db / info / clean\n'
 	@printf '  make              编译 Qt6 启动器 build/mc263-qt\n'
 	@printf '  make check        核心单测 + 内嵌下载器（mock CDN）自测\n'
 	@printf '  make rpm          调 packaging/build-rpm.sh 打 rpm\n'
 	@printf '  make arch [ARCH_ARGS=--nodeps]  打 pacman 包（源码构建，不走 AUR）\n'
 	@printf '  make deb          打 .deb（Ubuntu 26.04+ / Debian 13+）\n'
+	@printf '  make compile-db   重新生成 compile_commands.json（VSCode/clangd 用）\n'
 	@printf '  make clean        删除 build/ 与 dist/\n'
 	@printf '变量: CXX=clang++ 换编译器；MC263_SANDBOX_ROOT=<dir> 改沙箱根\n'

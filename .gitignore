@@ -20,5 +20,6 @@ __pycache__/
 docs/
 .vscode/
 *.code-workspace
-# clangd 的编译数据库：跟编译器版本和本机路径绑定，不进仓库
+# 编译数据库：跟编译器版本和本机路径绑定，不进仓库
+# 换发行版/机器后跑 make compile-db 重新生成
 compile_commands.json
