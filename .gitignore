@@ -16,6 +16,9 @@ runtime-data/
 minecraft/
 __pycache__/
 *.pyc
-docs/copr-publish.md
+# 内部资料（交接文档、COPR 流程、对话记录）：只留在本地
+docs/
 .vscode/
 *.code-workspace
+# clangd 的编译数据库：跟编译器版本和本机路径绑定，不进仓库
+compile_commands.json
