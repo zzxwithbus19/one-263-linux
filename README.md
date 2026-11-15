@@ -62,7 +62,7 @@ sudo apt install ./dist/deb/mc263_26.3-1_amd64.deb   # 注意 ./，否则 apt �
 mc263-qt
 ```
 
-细节（依赖映射、t64 包名、Wayland 插件包名、验收清单）见 [docs/debian-handoff.md](docs/debian-handoff.md)。
+依赖映射、t64 包名、Wayland 插件包名的细节记在本地交接文档里，不随仓库发布。
 
 ---
 
@@ -141,9 +141,6 @@ mc26-one/
 │   └── fs_util.hpp             目录 / 文件 / 环境变量小工具
 ├── src/
 │   └── mc263_qt.cpp            Qt6 主窗口（6 页，内嵌 python3 下载脚本）
-├── docs/
-│   ├── arch-handoff.md         Arch 打包与分发交接（无 AUR 的命令行路线）
-│   └── debian-handoff.md       Debian / Ubuntu 打包与分发交接（Ubuntu 26.04+ / Debian 13+）
 ├── packaging/
 │   ├── PKGBUILD                Arch 包模板（主线，源码构建）
 │   ├── build-arch.sh           源码包 → PKGBUILD → makepkg → 校验 → 冒烟
