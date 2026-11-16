@@ -1,6 +1,6 @@
 # mc263 — Minecraft 26.3 Linux 启动器（Qt6 / C++23）
 
-> 许可：GPL-3.0-or-later（ [LICENSE](LICENSE)）
+> 许可：AGPL-3.0-or-later（ [LICENSE](LICENSE)）
 
 包形态**一个 ELF + 旁边的 `minecraft/` 与 `.mc263/`**。
 Qt6 Widgets 原生界面（无 Electron、无内嵌浏览器、无 moc），启动时自动选择
@@ -176,13 +176,16 @@ A：**暂时不能**。启动参数是离线模式（`--accessToken 0 --userType
 
 ## 9. 许可与法律声明
 
-本项目源码采用 **GPL-3.0-or-later**。上游 `zhanbalao/mc26-one` 未声明许可证，
+本项目源码采用 **AGPL-3.0-or-later**。上游 `zhanbalao/mc26-one` 未声明许可证，
 且其唯一的 `build_262.py` 已从本仓库移除；当前代码为全新 C++23 实现，不含上游代码。
 
+AGPLv3 在 GPLv3 之外多一条网络条款：修改本项目后若通过网络提供服务，需向访问者
+提供修改后的源码；单纯运行游戏或调用第三方 API 不触发这条。
+
 Qt6 为 `LGPL-3.0-only OR GPL-3.0-only WITH Qt-GPL-exception-1.0`，本项目按
-**LGPL-3.0-only** 动态链接使用：LGPL 与 GPLv3 兼容，项目许可不变。
+**LGPL-3.0-only** 动态链接使用：LGPL-3.0 与 AGPL-3.0 兼容，Qt 代码本体仍按 LGPL。
 分发二进制时需随附 LGPL-3.0 文本、声明使用了 Qt、保持动态链接以便替换 Qt 库，
-并提供 Qt 源码获取途径。`mc263.spec` 的 `License` 为 `GPL-3.0-or-later`（不含 Qt 代码本体）。
+并提供 Qt 源码获取途径。`mc263.spec` 的 `License` 为 `AGPL-3.0-or-later`（不含 Qt 代码本体）。
 
 本仓库**不包含** Minecraft 游戏文件、Java 运行时或任何 Mojang / Microsoft 版权素材。
 下载器只从 Mojang 官方 CDN 或公共镜像获取公开资源文件，
