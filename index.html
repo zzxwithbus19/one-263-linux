@@ -4,11 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="light dark">
-<meta name="description" content="mc263 —— Minecraft 26.3 的 Linux 原生启动器。Qt6 Widgets / C++23，单个 ELF，无 Electron、无 CMake、无 moc；Wayland 优先，版本隔离常开。">
 <meta name="theme-color" content="#0052D9" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0e1116" media="(prefers-color-scheme: dark)">
 <meta property="og:title" content="mc263 — Minecraft 26.3 Linux 启动器">
-<meta property="og:description" content="单个 ELF 的原生 Qt6 启动器：版本隔离、Java 闸门、Modrinth 安装与加载器管理。">
+<meta property="og:description" content="单个 ELF 的原生Wayland启动器">
 <meta property="og:type" content="website">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <title>mc263 — Minecraft 26.3 Linux 启动器</title>
@@ -257,7 +256,6 @@ footer{border-top:1px solid var(--line);background:var(--bg-soft);padding:34px 0
       <a href="#install">安装</a>
       <a href="#build">构建</a>
       <a href="#faq">常见问题</a>
-      <a href="#license">许可</a>
     </nav>
     <a class="nav-cta" href="https://github.com/zzxwithbus19/one-263-linux">
       GitHub
@@ -270,97 +268,22 @@ footer{border-top:1px solid var(--line);background:var(--bg-soft);padding:34px 0
   <section class="hero" id="top">
     <div class="container hero-grid">
       <div>
-        <p class="eyebrow">Qt6 Widgets · C++23 · Wayland</p>
-        <h1>一个 ELF，<br><em>把启动器留在本地</em></h1>
-        <p class="lead">mc263 是 Minecraft 26.3 的 Linux 原生启动器。<b>不用 Electron、不用 CMake、不需要 moc</b>，界面是手写的 Qt6 Widgets；启动前查 Java，启动时按版本隔离游戏目录。</p>
+        <p class="lead"><b>mc263是Minecraft的Linux启动器#仅限java版，不支持微软账户登录</b></p>
         <div class="hero-actions">
           <a class="btn btn-primary" href="#install">安装 mc263</a>
-          <a class="btn btn-secondary" href="https://github.com/zzxwithbus19/one-263-linux">查看源码</a>
-        </div>
-        <div class="hero-meta">
-          <span>GPL-3.0-or-later</span>
-          <span>x86_64 Linux</span>
-          <span>版本 26.3</span>
-          <span>7 个页面 / 单文件</span>
         </div>
       </div>
-
       <div class="terminal" aria-label="运行时目录结构">
         <div class="term-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="term-title">~/.local/share/mc263</span></div>
-<pre class="term-body"><b>mc263-qt</b>              <i>唯一可执行文件 · 约 820 KB</i>
+<pre class="term-body">
 <b>minecraft/</b>            <i>游戏目录，首次运行自动建</i>
 ├── <b>versions/</b>
 │   ├── <b>26.3/</b>          <i>mods saves logs …</i>
-│   └── <b>26.3+fabric/</b>   <i>与上者互不影响</i>
+│   └──
 <b>.mc263/</b>
 ├── config.json        <i>版本 / 内存 / Java / 镜像</i>
 └── mc263_downloader.py <i>运行时释放的下载脚本</i>
-
-<u>$</u> curl -fsSL …/install.sh | sh
-<u>$</u> mc263-qt</pre>
-      </div>
-    </div>
-  </section>
-
-  <section class="facts" aria-label="项目数据">
-    <div class="container facts-grid">
-      <div class="fact"><div class="fact-num">820<small>KB</small></div><div class="fact-label">单个 ELF</div><div class="fact-note">不含游戏与 Java 运行时</div></div>
-      <div class="fact"><div class="fact-num">7<small>页</small></div><div class="fact-label">功能界面</div><div class="fact-note">启动 / 下载 / Mod / 资源 …</div></div>
-      <div class="fact"><div class="fact-num">90<small>项</small></div><div class="fact-label">核心单测</div><div class="fact-note">另有 7 项下载器自测，全离线</div></div>
-      <div class="fact"><div class="fact-num">25<small>+</small></div><div class="fact-label">主线 Java 要求</div><div class="fact-note">26.x 需 Java 25 或更高</div></div>
-    </div>
-  </section>
-
-  <section class="section" id="features">
-    <div class="container">
-      <div class="section-head">
-        <p class="eyebrow">功能</p>
-        <h2>七个页面，各管一件事</h2>
-        <p>下载、Mod、加载器、环境检查分开摆，不挤在同一个视图里。</p>
-      </div>
-      <div class="grid">
-        <article class="card">
-          <div class="card-icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/></svg></div>
-          <h3>启动游戏</h3>
-          <p>版本下拉、玩家名、一键启动；<code>QProcess</code> 异步执行 java，日志实时刷新。启动日志同时落盘到 <code>note/launch-*.log</code>，只留最近 10 个。</p>
-          <span class="tagline">QProcess / 日志落盘</span>
-        </article>
-        <article class="card">
-          <div class="card-icon"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 18v2h16v-2"/></svg></div>
-          <h3>下载游戏</h3>
-          <p>在线版本列表（可勾预览版）、组件勾选、official 与 bmclapi 镜像、默认 10 并发；SHA1 校验 + 断点续传，已一致的文件跳过。</p>
-          <span class="tagline">10 并发 / SHA1</span>
-        </article>
-        <article class="card">
-          <div class="card-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div>
-          <h3>Mod 下载</h3>
-          <p>检索 Modrinth：关键词 + 加载器 + 游戏版本过滤，五种排序；双击安装、自动补齐 required 前置。同页还能装 Fabric / Quilt 加载器。</p>
-          <span class="tagline">Modrinth / 无需 key</span>
-        </article>
-        <article class="card">
-          <div class="card-icon"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="17" r="2"/></svg></div>
-          <h3>Mod 管理</h3>
-          <p>已装 Mod 列表：启用 / 禁用（改 <code>.disabled</code>）、删除、按 SHA1 反查 Modrinth 检查更新，只认有新版本的文件。</p>
-          <span class="tagline">启停 / 删除 / 更新</span>
-        </article>
-        <article class="card">
-          <div class="card-icon"><svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z"/><path d="M9 12l2 2 4-4"/></svg></div>
-          <h3>版本管理</h3>
-          <p>左栏是已装版本，右栏是该版本的 Java 与兼容性查验：扫配置 / Mojang JRE / <code>JAVA_HOME</code> / <code>PATH</code> / <code>/usr/lib/jvm</code>，11 项逐条判定。</p>
-          <span class="tagline">启动前闸门 · 11 项</span>
-        </article>
-        <article class="card">
-          <div class="card-icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M8 14h8"/></svg></div>
-          <h3>资源</h3>
-          <p>世界 / 资源包 / 光影分标签页，扫的是当前版本目录；导入 zip、启用 / 禁用、删除。世界不能禁用，只能删或换目录。</p>
-          <span class="tagline">saves / packs / shaders</span>
-        </article>
-        <article class="card">
-          <div class="card-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10l2 2M19 5l-2 2M7 17l-2 2"/></svg></div>
-          <h3>设置 / 内存</h3>
-          <p>配色可选自动 / 系统调色板 / Noctalia（Material You）；内存默认交给 JVM，四段式内存条 2 秒刷新；语言跟随系统 locale。</p>
-          <span class="tagline">无 -Xmx / 跟随 locale</span>
-        </article>
+</pre>
       </div>
     </div>
   </section>
