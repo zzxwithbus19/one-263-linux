@@ -2606,7 +2606,7 @@ private:
         v->setContentsMargins(0, 10, 0, 0);
 
         QString text =
-            "许可GPL-3.0-or-later\n"
+            "许可AGPL-3.0-or-later\n"
             "Qt6 运行时:LGPL-3.0-only OR GPL-3.0-only WITH Qt-GPL-exception-1.0（动态链接）\n"
             "游戏文件、Mojang Java 运行时与第三方库各自适用其原有许可，本工具不随仓库分发它们。";
         auto* licBox = new QGroupBox("许可与说明", w);

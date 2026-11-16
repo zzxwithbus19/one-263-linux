@@ -15,7 +15,7 @@ Name:           mc263
 Version:        %{mc263_version}
 Release:        4%{?dist}
 Summary:        Minecraft 26.3 launcher (Qt6 native, Wayland-ready)
-License:        GPL-3.0-or-later
+License:        AGPL-3.0-or-later
 URL:            https://github.com/zzxwithbus19/one-263-linux
 # 必须是具体架构：默认 noarch 会让 mock 构建失败（产物是 x86_64 ELF）
 BuildArch:      %{?_arch}

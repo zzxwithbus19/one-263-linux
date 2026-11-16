@@ -116,9 +116,9 @@ mkdir -p "$STAGE/usr/share/doc/mc263" "$STAGE/DEBIAN"
     printf 'Source: https://github.com/zzxwithbus19/one-263-linux\n\n'
     printf 'Files: *\n'
     printf 'Copyright: 2026 mc263 contributors\n'
-    printf 'License: GPL-3.0-or-later\n'
-    printf ' On Debian systems, the complete text of the GNU General Public\n'
-    printf ' License version 3 can be found in "/usr/share/common-licenses/GPL-3".\n'
+    printf 'License: AGPL-3.0-or-later\n'
+    printf ' The full text of the GNU Affero General Public License version 3\n'
+    printf ' is shipped in /usr/share/licenses/mc263/LICENSE.\n'
     printf 'Comment: 许可证全文也随包安装在 /usr/share/licenses/mc263/LICENSE。\n'
 } > "$STAGE/usr/share/doc/mc263/copyright"
 
