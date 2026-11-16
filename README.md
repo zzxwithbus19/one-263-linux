@@ -3,6 +3,8 @@
 GitHub Pages 用的单页站点：`index.html` + `favicon.svg`，内联 CSS/JS，无构建步骤、
 无外部请求，直接当静态文件托管即可。
 
+站点与启动器源码采用 **AGPL-3.0-or-later**（见 `LICENSE`）。
+
 启动器源码不在这个分支：
 
 | 分支 | 内容 |
