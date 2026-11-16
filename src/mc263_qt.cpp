@@ -14,6 +14,7 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDialog>
@@ -80,6 +81,9 @@
 #include <vector>
 
 namespace core = mc263::core;
+
+// 启动器自身崩溃时写的文件。路径在窗口构造里填好，信号处理器只做 open/write。
+static char g_crashLogPath[4096] = {0};
 
 // ---------------------------------------------------------------- 内嵌脚本 ----
 static const char* kDownloaderPy = R"PY(#!/usr/bin/env python3
@@ -176,6 +180,44 @@ def run_stage(stage, tasks, jobs):
     return failed
 
 
+def probe_local(task):
+    """只看本地：缺 = missing，SHA1 不符 = bad，其余 ok。"""
+    dest = task["dest"]
+    want = task.get("sha1", "")
+    if not os.path.isfile(dest):
+        return "missing"
+    if want:
+        with open(dest, "rb") as f:
+            if sha1(f.read()) != want:
+                return "bad"
+    return "ok"
+
+
+def verify_stage(stage, tasks, jobs, stats):
+    """先本地比对，只把缺失/损坏的补下来。"""
+    if not tasks:
+        return 0
+    total = len(tasks)
+    broken = []
+    checked = 0
+    with ThreadPoolExecutor(max_workers=max(1, min(16, jobs))) as pool:
+        futures = {pool.submit(probe_local, t): t for t in tasks}
+        for fut in as_completed(futures):
+            checked += 1
+            task = futures[fut]
+            if fut.result() != "ok":
+                broken.append(task)
+            if checked % 200 == 0 or checked == total:
+                emit(stage, checked, total,
+                     "校验 %d/%d，异常 %d" % (checked, total, len(broken)))
+    stats["checked"] += total
+    stats["bad"] += len(broken)
+    if not broken:
+        return 0
+    emit(stage, 0, len(broken), "补下 %d 个文件" % len(broken))
+    return run_stage(stage, broken, jobs)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mc-dir", required=True)
@@ -187,6 +229,7 @@ def main():
     ap.add_argument("--base-url", default="")
     ap.add_argument("--list-versions", action="store_true")
     ap.add_argument("--snapshots", action="store_true")
+    ap.add_argument("--verify", action="store_true")
     ap.add_argument("--latest-snapshot", action="store_true")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
@@ -196,31 +239,43 @@ def main():
         os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 
     try:
-        mtext = get(mirror_url(MANIFEST, args.mirror, args.base_url))
-        manifest = json.loads(mtext)
-        if args.latest_snapshot:
-            print(json.dumps({"version": manifest.get("latest", {}).get("snapshot", "")},
-                             ensure_ascii=False), flush=True)
-            return 0
-        if args.list_versions:
-            types = {"release", "snapshot"} if args.snapshots else {"release"}
-            rel = [v["id"] for v in manifest.get("versions", []) if v.get("type") in types]
-            rel = rel[:(30 if args.snapshots else 20)]
-            print(json.dumps({"versions": rel}, ensure_ascii=False), flush=True)
-            return 0
-        wanted = args.version
-        if wanted in ("latest", "latest-snapshot"):
-            key = "snapshot" if wanted == "latest-snapshot" else "release"
-            wanted = manifest.get("latest", {}).get(key, "26.3")
-        entry = next((v for v in manifest.get("versions", []) if v.get("id") == wanted), None)
-        if not entry:
-            emit("error", 0, 0, "找不到版本 " + wanted, False, "")
-            return 2
-        vdir = os.path.join(args.mc_dir, "versions", wanted)
-        vjson = os.path.join(vdir, wanted + ".json")
-        failed = run_stage("version", [{
-            "url": mirror_url(entry["url"], args.mirror, args.base_url),
-            "dest": vjson, "sha1": entry.get("sha1", ""), "label": wanted + ".json"}], 1)
+        stats = {"checked": 0, "bad": 0}
+        if args.verify:
+            # 校验只信本地 json：连版本都没下过就没什么可校验的
+            wanted = args.version
+            vdir = os.path.join(args.mc_dir, "versions", wanted)
+            vjson = os.path.join(vdir, wanted + ".json")
+            if not os.path.isfile(vjson):
+                emit("error", 0, 0, "本地没有 " + wanted + " 的版本 json", False,
+                     "先下载这个版本，再校验")
+                return 2
+            failed = 0
+        else:
+            mtext = get(mirror_url(MANIFEST, args.mirror, args.base_url))
+            manifest = json.loads(mtext)
+            if args.latest_snapshot:
+                print(json.dumps({"version": manifest.get("latest", {}).get("snapshot", "")},
+                                 ensure_ascii=False), flush=True)
+                return 0
+            if args.list_versions:
+                types = {"release", "snapshot"} if args.snapshots else {"release"}
+                rel = [v["id"] for v in manifest.get("versions", []) if v.get("type") in types]
+                rel = rel[:(30 if args.snapshots else 20)]
+                print(json.dumps({"versions": rel}, ensure_ascii=False), flush=True)
+                return 0
+            wanted = args.version
+            if wanted in ("latest", "latest-snapshot"):
+                key = "snapshot" if wanted == "latest-snapshot" else "release"
+                wanted = manifest.get("latest", {}).get(key, "26.3")
+            entry = next((v for v in manifest.get("versions", []) if v.get("id") == wanted), None)
+            if not entry:
+                emit("error", 0, 0, "找不到版本 " + wanted, False, "")
+                return 2
+            vdir = os.path.join(args.mc_dir, "versions", wanted)
+            vjson = os.path.join(vdir, wanted + ".json")
+            failed = run_stage("version", [{
+                "url": mirror_url(entry["url"], args.mirror, args.base_url),
+                "dest": vjson, "sha1": entry.get("sha1", ""), "label": wanted + ".json"}], 1)
         if failed:
             return 2
         with open(vjson, "r", encoding="utf-8") as f:
@@ -264,7 +319,10 @@ def main():
                     tasks.append({"url": mirror_url(a["url"], args.mirror, args.base_url),
                                   "dest": os.path.join(args.mc_dir, "libraries", a["path"]),
                                   "sha1": a.get("sha1", ""), "label": a["path"]})
-        failed += run_stage("libraries", tasks, args.jobs)
+        if args.verify:
+            failed += verify_stage("verify", tasks, args.jobs, stats)
+        else:
+            failed += run_stage("libraries", tasks, args.jobs)
 
         if "assets" in comps and aid.get("url"):
             ipath = os.path.join(args.mc_dir, "assets", "indexes", asset_id + ".json")
@@ -284,9 +342,12 @@ def main():
                              "sha1": h, "label": name})
             if args.limit:
                 objs = objs[:args.limit]
-            failed += run_stage("assets", objs, args.jobs)
+            if args.verify:
+                failed += verify_stage("verify", objs, args.jobs, stats)
+            else:
+                failed += run_stage("assets", objs, args.jobs)
 
-        if "runtime" in comps and args.arch != "aarch64":
+        if "runtime" in comps and args.arch != "aarch64" and not args.verify:
             component = vj.get("javaVersion", {}).get("component", "java-runtime-epsilon")
             allj = json.loads(get(mirror_url(RUNTIME_ALL, args.mirror, args.base_url)))
             entries = allj.get("linux", {}).get(component, [])
@@ -312,6 +373,9 @@ def main():
                     rtasks = rtasks[:args.limit]
                 failed += run_stage("runtime", rtasks, args.jobs)
 
+        if args.verify:
+            emit("summary", 0, 0, "检查 %d 项，异常 %d，补下失败 %d"
+                 % (stats["checked"], stats["bad"], failed))
         print(json.dumps({"stage": "done", "ok": failed == 0, "failed": failed},
                          ensure_ascii=False), flush=True)
         return 0 if failed == 0 else 1
@@ -791,6 +855,14 @@ public:
         if (!layout_.ensure(err)) {
             QMessageBox::critical(this, "路径被拒绝", QString::fromStdString(err));
         }
+        // 启动器自己崩掉时把调用栈写进 note/，下次启动能看到
+        {
+            const auto noteDir = layout_.gameDir / "note";
+            std::error_code nec;
+            std::filesystem::create_directories(noteDir, nec);
+            const auto cp = noteDir / ("launcher-crash-" + core::trashStamp() + ".log");
+            std::snprintf(g_crashLogPath, sizeof g_crashLogPath, "%s", cp.c_str());
+        }
         defaultPalette_ = qApp->palette();
         requiredJava_ = core::requiredJavaMajor(layout_, cfg_.version);
         saveDownloaderScript();
@@ -804,6 +876,22 @@ public:
         setupAutoSave();
         refreshLocalVersions();
         refreshJava();
+        // 上次启动器自己崩过就提一句，别让人以为没事发生
+        {
+            std::error_code cec;
+            std::filesystem::path newest;
+            const auto noteDir = layout_.gameDir / "note";
+            for (std::filesystem::directory_iterator it(noteDir, cec), end; !cec && it != end;
+                 it.increment(cec)) {
+                if (it->path().filename().string().rfind("launcher-crash-", 0) != 0) continue;
+                if (newest.empty() ||
+                    it->last_write_time() > std::filesystem::last_write_time(newest))
+                    newest = it->path();
+            }
+            if (!newest.empty())
+                launchLog_->appendPlainText("上次启动器崩溃的调用栈：" +
+                                            QString::fromStdString(newest.string()));
+        }
         // 冒烟/文档用：MC263_SHOT=/tmp/x.png 时把首屏抓成 PNG 后退出
         const QByteArray shotPath = qgetenv("MC263_SHOT");
         if (!shotPath.isEmpty())
@@ -1250,9 +1338,12 @@ private:
         downloadBtn_->setObjectName("primary");
         cancelBtn_ = new QPushButton("取消", w); cancelBtn_->setEnabled(false);
         clearCacheBtn_ = new QPushButton("清除下载缓存", w);
+        auto* verifyBtn = new QPushButton("校验已装文件", w);
         clearCacheBtn_->setToolTip("只删元数据缓存（版本清单 / Modrinth 查询 / 加载器 profile），已下载的游戏文件不动");
+        verifyBtn->setToolTip("按 <版本>.json 的 SHA1 核对 jar / libraries / assets；缺的、坏的自动补下");
         row->addWidget(downloadBtn_);
         row->addWidget(cancelBtn_);
+        row->addWidget(verifyBtn);
         row->addWidget(clearCacheBtn_);
         row->addStretch(1);
         v->addLayout(row);
@@ -1266,6 +1357,7 @@ private:
             if (downloadProc_) downloadProc_->terminate();
         });
         connect(clearCacheBtn_, &QPushButton::clicked, this, &LauncherWindow::clearDownloadCache);
+        connect(verifyBtn, &QPushButton::clicked, this, &LauncherWindow::verifyInstalled);
         connect(onlineBtn, &QPushButton::clicked, this, &LauncherWindow::refreshOnlineVersions);
         connect(latestSnapBtn, &QPushButton::clicked, this, &LauncherWindow::fetchLatestSnapshot);
         return w;
@@ -1682,19 +1774,24 @@ private:
         const auto rows = instModTable_->selectionModel()->selectedRows();
         if (rows.isEmpty()) { instModState_->setText("先在列表里选一个"); return; }
         if (QMessageBox::question(this, "删除 Mod",
-                                  QString("确定删除选中的 %1 个 Mod 文件？（不进回收站）").arg(rows.size()),
+                                  QString("删除选中的 %1 个 Mod？会移到回收站（资源页「回收站」标签可恢复）")
+                                      .arg(rows.size()),
                                   QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
             return;
         int removed = 0;
         for (const auto& idx : rows) {
             auto* nameItem = instModTable_->item(idx.row(), 0);
             if (!nameItem) continue;
-            std::error_code ec;
-            if (std::filesystem::remove(std::filesystem::path(nameItem->data(Qt::UserRole).toString().toStdString()), ec))
+            std::string err;
+            std::filesystem::path moved;
+            if (core::moveToTrash(std::filesystem::path(nameItem->data(Qt::UserRole).toString().toStdString()),
+                                  core::trashRoot(layout_), moved, err))
                 ++removed;
+            else
+                modLog_->appendPlainText("删除失败：" + QString::fromStdString(err));
         }
         refreshInstalledMods();
-        instModState_->setText(QString("已删除 %1 个").arg(removed));
+        instModState_->setText(QString("已移到回收站 %1 个（资源页「回收站」可恢复）").arg(removed));
     }
 
     // 更新检查：本地 jar 的 SHA1 → Modrinth /version_file → 项目最新兼容版本
@@ -1994,6 +2091,7 @@ private:
         const int idx = resTabs_ ? resTabs_->currentIndex() : 0;
         if (idx == 1) return base / "resourcepacks";
         if (idx == 2) return base / "shaderpacks";
+        if (idx == 3) return core::trashRoot(layout_);   // 回收站是全局的，不按版本分
         return base / "saves";
     }
 
@@ -2026,6 +2124,22 @@ private:
         }
     }
 
+    void fillTrashTable(QTableWidget* table) {
+        if (!table) return;
+        table->setRowCount(0);
+        for (const auto& t : core::listTrash(core::trashRoot(layout_))) {
+            const int r = table->rowCount();
+            table->insertRow(r);
+            auto* nameItem = new QTableWidgetItem(QString::fromStdString(t.name));
+            nameItem->setData(Qt::UserRole, QString::fromStdString(t.payload.string()));
+            nameItem->setToolTip(QString("原位置：%1").arg(QString::fromStdString(t.original.string())));
+            table->setItem(r, 0, nameItem);
+            table->setItem(r, 1, new QTableWidgetItem(QString::fromStdString(t.when)));
+            table->setItem(r, 2, new QTableWidgetItem(
+                QString::fromStdString(mc263::fsx::humanSize(t.size))));
+        }
+    }
+
     void refreshResources() {
         if (!resTabs_) return;
         const auto base = core::isolatedGameDir(layout_, cfg_);
@@ -2035,12 +2149,21 @@ private:
         fillResTable(savesTable_, base / "saves", true);
         fillResTable(packsTable_, base / "resourcepacks", false);
         fillResTable(shadersTable_, base / "shaderpacks", false);
-        if (resState_)
-            resState_->setText(QString("当前版本目录：%1（世界 %2 / 资源包 %3 / 光影 %4）")
-                                   .arg(QString::fromStdString(base.string()))
-                                   .arg(savesTable_ ? savesTable_->rowCount() : 0)
-                                   .arg(packsTable_ ? packsTable_->rowCount() : 0)
-                                   .arg(shadersTable_ ? shadersTable_->rowCount() : 0));
+        fillTrashTable(trashTable_);
+        if (resState_) {
+            const auto trashItems = core::listTrash(core::trashRoot(layout_));
+            const uint64_t trashBytes = core::trashSize(core::trashRoot(layout_));
+            QString line = QString("当前版本目录：%1（世界 %2 / 资源包 %3 / 光影 %4）")
+                               .arg(QString::fromStdString(base.string()))
+                               .arg(savesTable_ ? savesTable_->rowCount() : 0)
+                               .arg(packsTable_ ? packsTable_->rowCount() : 0)
+                               .arg(shadersTable_ ? shadersTable_->rowCount() : 0);
+            if (!trashItems.empty())
+                line += QString("；回收站 %1 项（%2）")
+                            .arg(trashItems.size())
+                            .arg(QString::fromStdString(mc263::fsx::humanSize(trashBytes)));
+            resState_->setText(line);
+        }
     }
 
     QTableWidget* currentResTable() const {
@@ -2048,6 +2171,7 @@ private:
         const int idx = resTabs_->currentIndex();
         if (idx == 1) return packsTable_;
         if (idx == 2) return shadersTable_;
+        if (idx == 3) return trashTable_;
         return savesTable_;
     }
 
@@ -2060,23 +2184,31 @@ private:
         savesTable_ = makeResTable(w, {"世界名", "状态", "大小"});
         packsTable_ = makeResTable(w, {"资源包", "状态", "大小"});
         shadersTable_ = makeResTable(w, {"光影包", "状态", "大小"});
+        trashTable_ = makeResTable(w, {"名称", "删除时间", "大小"});
         resTabs_->addTab(savesTable_, "世界");
         resTabs_->addTab(packsTable_, "资源包");
         resTabs_->addTab(shadersTable_, "光影");
+        resTabs_->addTab(trashTable_, "回收站");
         v->addWidget(resTabs_, 1);
 
         auto* row = new QHBoxLayout();
         auto* refresh = new QPushButton("刷新", w);
         auto* toggle = new QPushButton("启用 / 禁用", w);
         auto* del = new QPushButton("删除", w);
+        auto* restoreBtn = new QPushButton("恢复", w);
         auto* importBtn = new QPushButton("导入…", w);
         auto* openBtn = new QPushButton("打开目录", w);
+        auto* emptyBtn = new QPushButton("清空回收站", w);
+        restoreBtn->setToolTip("把回收站里选中的条目放回原位置；目标已存在时自动加序号，不覆盖");
+        emptyBtn->setToolTip("彻底删除回收站里的全部条目，删掉不可恢复");
         row->addWidget(refresh);
         row->addWidget(toggle);
         row->addWidget(del);
+        row->addWidget(restoreBtn);
         row->addWidget(importBtn);
         row->addWidget(openBtn);
         row->addStretch(1);
+        row->addWidget(emptyBtn);
         v->addLayout(row);
         resState_ = new QLabel("", w);
         resState_->setObjectName("muted");
@@ -2086,6 +2218,7 @@ private:
         connect(resTabs_, &QTabWidget::currentChanged, this, [this](int) { refreshResources(); });
         connect(toggle, &QPushButton::clicked, this, [this] {
             if (resTabs_->currentIndex() == 0) { resState_->setText("世界不能禁用，只能删除或换目录"); return; }
+            if (resTabs_->currentIndex() == 3) { resState_->setText("回收站里的条目不能启用 / 禁用，先恢复再操作"); return; }
             auto* t = currentResTable();
             if (!t || !t->selectionModel()) return;
             const auto rows = t->selectionModel()->selectedRows();
@@ -2109,22 +2242,90 @@ private:
             if (!t || !t->selectionModel()) return;
             const auto rows = t->selectionModel()->selectedRows();
             if (rows.isEmpty()) { resState_->setText("先在列表里选一个"); return; }
-            if (QMessageBox::question(this, "删除",
-                                      QString("确定删除选中的 %1 项？目录会整个删掉（不进回收站）").arg(rows.size()),
+            const bool inTrash = resTabs_->currentIndex() == 3;
+            const QString ask =
+                inTrash ? QString("彻底删除选中的 %1 项？回收站里删掉就找不回来了").arg(rows.size())
+                        : QString("删除选中的 %1 项？会移到回收站，可在「回收站」标签里恢复").arg(rows.size());
+            if (QMessageBox::question(this, inTrash ? "彻底删除" : "删除", ask,
                                       QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
                 return;
-            int removed = 0;
+            const auto trashItems = inTrash ? core::listTrash(core::trashRoot(layout_))
+                                            : std::vector<core::TrashItem>{};
+            int done = 0;
             for (const auto& idx : rows) {
                 auto* nameItem = t->item(idx.row(), 0);
                 if (!nameItem) continue;
-                std::error_code ec;
                 const auto p = std::filesystem::path(nameItem->data(Qt::UserRole).toString().toStdString());
-                removed += static_cast<int>(std::filesystem::remove_all(p, ec));
+                if (inTrash) {
+                    for (const auto& it : trashItems) {
+                        if (it.payload != p) continue;
+                        std::error_code ec;
+                        done += static_cast<int>(std::filesystem::remove_all(it.dir, ec));
+                        break;
+                    }
+                } else {
+                    std::string err;
+                    std::filesystem::path moved;
+                    if (core::moveToTrash(p, core::trashRoot(layout_), moved, err))
+                        ++done;
+                    else
+                        resState_->setText("删除失败：" + QString::fromStdString(err));
+                }
             }
             refreshResources();
-            resState_->setText(QString("已删除 %1 项").arg(removed));
+            resState_->setText(inTrash ? QString("已彻底删除 %1 项").arg(done)
+                                       : QString("已移到回收站 %1 项（「回收站」标签可恢复）").arg(done));
+        });
+        connect(restoreBtn, &QPushButton::clicked, this, [this] {
+            if (resTabs_->currentIndex() != 3) {
+                resState_->setText("「恢复」只对回收站里的条目有效");
+                return;
+            }
+            if (!trashTable_ || !trashTable_->selectionModel()) return;
+            const auto rows = trashTable_->selectionModel()->selectedRows();
+            if (rows.isEmpty()) { resState_->setText("先在回收站里选一个"); return; }
+            const auto items = core::listTrash(core::trashRoot(layout_));
+            int done = 0;
+            QString lastErr;
+            for (const auto& idx : rows) {
+                auto* nameItem = trashTable_->item(idx.row(), 0);
+                if (!nameItem) continue;
+                const auto p = std::filesystem::path(nameItem->data(Qt::UserRole).toString().toStdString());
+                for (const auto& it : items) {
+                    if (it.payload != p) continue;
+                    std::string err;
+                    if (core::restoreTrash(it, err)) ++done;
+                    else lastErr = QString::fromStdString(err);
+                    break;
+                }
+            }
+            refreshResources();
+            resState_->setText(lastErr.isEmpty() ? QString("已恢复 %1 项").arg(done)
+                                                 : QString("恢复 %1 项，另有失败：%2").arg(done).arg(lastErr));
+        });
+        connect(emptyBtn, &QPushButton::clicked, this, [this] {
+            const auto root = core::trashRoot(layout_);
+            const auto items = core::listTrash(root);
+            if (items.empty()) { resState_->setText("回收站已经是空的"); return; }
+            const uint64_t bytes = core::trashSize(root);
+            const QString ask = QString("彻底清空回收站？%1 项，共 %2，删掉不可恢复")
+                                    .arg(items.size())
+                                    .arg(QString::fromStdString(mc263::fsx::humanSize(bytes)));
+            if (QMessageBox::question(this, "清空回收站", ask, QMessageBox::Yes | QMessageBox::No,
+                                      QMessageBox::No) != QMessageBox::Yes)
+                return;
+            uint64_t freed = 0;
+            const int n = core::emptyTrash(root, freed);
+            refreshResources();
+            resState_->setText(QString("已清空 %1 项，释放 %2")
+                                   .arg(n)
+                                   .arg(QString::fromStdString(mc263::fsx::humanSize(freed))));
         });
         connect(importBtn, &QPushButton::clicked, this, [this] {
+            if (resTabs_->currentIndex() == 3) {
+                resState_->setText("回收站里不能导入，先切回世界 / 资源包 / 光影");
+                return;
+            }
             const auto target = currentResDir();
             std::error_code ec;
             std::filesystem::create_directories(target, ec);
@@ -2923,6 +3124,54 @@ private:
         cancelBtn_->setEnabled(true);
         downloadProc_->start();
     }
+
+    // 校验已装文件：只信本地 <版本>.json，缺/坏的文件由下载器补回，不重新拉清单
+    void verifyInstalled() {
+        if (downloadProc_ && downloadProc_->state() != QProcess::NotRunning) {
+            QMessageBox::information(this, "正在运行", "下载或校验任务已经在运行");
+            return;
+        }
+        collectUiToConfig();
+        std::string err;
+        cfg_.save(layout_.configFile, err);
+        saveDownloaderScript();
+        const std::string ver = downloadVersion_->currentText().toStdString();
+        downloadLog_->clear();
+        if (!mc263::fsx::isFile(layout_.versionJson(ver))) {
+            downloadLog_->appendPlainText("本地没有 " + QString::fromStdString(ver) +
+                                          " 的版本 json，先下载这个版本再校验。");
+            downloadLabel_->setText("这个版本还没下载过");
+            return;
+        }
+        downloadLog_->appendPlainText("开始校验 " + QString::fromStdString(ver) +
+                                      "：按 SHA1 核对 jar / libraries / assets，只补缺失与损坏的文件");
+        downloadProc_ = new QProcess(this);
+        downloadProc_->setProcessChannelMode(QProcess::SeparateChannels);
+        downloadProc_->setProgram(pythonBin());
+        downloadProc_->setArguments({QString::fromStdString(scriptPath_.string()),
+                                     "--mc-dir", QString::fromStdString(layout_.gameDir.string()),
+                                     "--version", QString::fromStdString(ver),
+                                     "--mirror", QString::fromStdString(cfg_.mirror),
+                                     "--jobs", QString::number(cfg_.jobs),
+                                     "--arch", QString::fromStdString(cfg_.arch),
+                                     "--components", "jar,libraries,assets",
+                                     "--verify"});
+        connect(downloadProc_, &QProcess::readyReadStandardOutput, this, &LauncherWindow::onDownloadOutput);
+        connect(downloadProc_, &QProcess::readyReadStandardError, this, [this] {
+            downloadLog_->appendPlainText(QString::fromUtf8(downloadProc_->readAllStandardError()).trimmed());
+        });
+        connect(downloadProc_, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
+            downloadBtn_->setEnabled(true);
+            cancelBtn_->setEnabled(false);
+            downloadLabel_->setText(code == 0 ? "校验完成"
+                                              : "校验结束(退出码 " + QString::number(code) + ")");
+            if (code == 0) refreshLocalVersions();
+        });
+        downloadBtn_->setEnabled(false);
+        cancelBtn_->setEnabled(true);
+        downloadProc_->start();
+    }
+
     void onDownloadOutput() {
         buffer_ += QString::fromUtf8(downloadProc_->readAllStandardOutput());
         int idx;
@@ -2939,6 +3188,12 @@ private:
                 downloadLog_->appendPlainText(o.value("ok").toBool() ? "全部完成" : "部分文件失败");
                 continue;
             }
+            if (stage == "summary") {
+                const QString text = o.value("label").toString();
+                downloadLog_->appendPlainText(text);
+                downloadLabel_->setText(text);
+                continue;
+            }
             if (total > 0) {
                 downloadBar_->setRange(0, total);
                 downloadBar_->setValue(done);
@@ -2950,6 +3205,50 @@ private:
                                               QString::number(total) + " " + o.value("label").toString() +
                                               (o.value("ok").toBool() ? "" : " 失败: " + o.value("note").toString()));
         }
+    }
+
+    // 崩溃摘要预览：复制走剪贴板，完整内容留在 note/ 里
+    void showCrashReport(const std::filesystem::path& path) {
+        std::string rerr;
+        const QString text = QString::fromStdString(mc263::fsx::readText(path, rerr));
+        if (!rerr.empty()) {
+            launchLog_->appendPlainText("读不了崩溃摘要：" + QString::fromStdString(rerr));
+            return;
+        }
+        QDialog dlg(this);
+        dlg.setWindowTitle("游戏异常退出");
+        dlg.resize(780, 540);
+        auto* v = new QVBoxLayout(&dlg);
+        auto* head = new QLabel(QString("已生成崩溃摘要：%1").arg(QString::fromStdString(path.string())), &dlg);
+        head->setWordWrap(true);
+        head->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        v->addWidget(head);
+        auto* edit = new QPlainTextEdit(&dlg);
+        edit->setReadOnly(true);
+        edit->setPlainText(text.size() > 20000
+                               ? text.left(20000) + "\n…（预览截断，完整内容见上面的文件）"
+                               : text);
+        v->addWidget(edit, 1);
+        auto* row = new QHBoxLayout();
+        auto* copyBtn = new QPushButton("复制摘要", &dlg);
+        auto* openBtn = new QPushButton("打开目录", &dlg);
+        auto* closeBtn = new QPushButton("关闭", &dlg);
+        row->addWidget(copyBtn);
+        row->addWidget(openBtn);
+        row->addStretch(1);
+        row->addWidget(closeBtn);
+        v->addLayout(row);
+        connect(copyBtn, &QPushButton::clicked, &dlg, [edit] {
+            QApplication::clipboard()->setText(edit->toPlainText());
+        });
+        connect(openBtn, &QPushButton::clicked, &dlg, [path] {
+            // 用 QDesktopServices 而不是 xdg-open：Ubuntu / Arch 都装了实现，
+            // 少了 xdg-utils 也不会静默失败
+            QDesktopServices::openUrl(
+                QUrl::fromLocalFile(QString::fromStdString(path.parent_path().string())));
+        });
+        connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+        dlg.exec();
     }
 
     void startLaunch() {
@@ -3027,6 +3326,17 @@ private:
             const int removed = core::pruneLogs(layout_.gameDir / "note", 10);
             if (removed > 0)
                 launchLog_->appendPlainText(QString("已清理 %1 个旧日志（最多保留 10 个）").arg(removed));
+            if (code == 0) return;
+            // 非 0 退出当作崩溃：把本次日志、latest.log、hs_err、crash-report 拼成一份摘要
+            std::string cerr;
+            const auto report = core::collectCrashReport(layout_, core::versionDirName(cfg_),
+                                                         launchLogPath_, code, cerr);
+            if (report.empty()) {
+                launchLog_->appendPlainText("生成崩溃摘要失败：" + QString::fromStdString(cerr));
+                return;
+            }
+            launchLog_->appendPlainText("崩溃摘要：" + QString::fromStdString(report.string()));
+            showCrashReport(report);
         });
         launchState_->setText("运行中......");
         launchProc_->start();
@@ -3124,6 +3434,7 @@ private:
     QTableWidget* savesTable_ = nullptr;
     QTableWidget* packsTable_ = nullptr;
     QTableWidget* shadersTable_ = nullptr;
+    QTableWidget* trashTable_ = nullptr;
     QLabel* resState_ = nullptr;
     QCheckBox* snapCheck_ = nullptr;
     QListWidget* verList_ = nullptr;
@@ -3139,12 +3450,22 @@ private:
     bool loadingConfig_ = false;
 };
 
-// 崩溃时把调用栈打到 stderr：终端里跑 ./build/mc263-qt 就能看到，方便定位
+// 崩溃时把调用栈同时打到 stderr 和 note/launcher-crash-<时间>.log。
+// 信号处理器里只做 snprintf / open / write / close，不分配内存。
 static void fatalSignal(int sig) {
     void* frames[64];
     const int n = ::backtrace(frames, 64);
-    const std::string head = "\nmc263-qt: 收到信号 " + std::to_string(sig) + "，调用栈：\n";
-    ::write(2, head.data(), head.size());
+    char head[96];
+    const int len = std::snprintf(head, sizeof head, "\nmc263-qt: 收到信号 %d，调用栈：\n", sig);
+    if (g_crashLogPath[0]) {
+        const int fd = ::open(g_crashLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            ::write(fd, head, static_cast<size_t>(len));
+            ::backtrace_symbols_fd(frames, n, fd);
+            ::close(fd);
+        }
+    }
+    ::write(2, head, static_cast<size_t>(len));
     ::backtrace_symbols_fd(frames, n, 2);
     ::_Exit(128 + sig);
 }
