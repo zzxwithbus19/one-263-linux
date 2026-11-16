@@ -405,7 +405,7 @@ footer{border-top:1px solid var(--line);background:var(--bg-soft);padding:34px 0
       <div class="section-head">
         <p class="eyebrow">安装</p>
         <h2>按发行版选择</h2>
-        <p>主线是 Arch 的自建 pacman 源；Fedora / openSUSE 走 COPR 的 rpm；Debian 系出 .deb；没有包管理器的环境用独立 ELF。</p>
+        <p>Arch用sh安装;Fedora / openSUSE 走 COPR；Debian 系出 .deb；没有包管理器的环境用独立 ELF。</p>
       </div>
 
       <div class="tabs" role="tablist" aria-label="安装方式">
@@ -413,49 +413,27 @@ footer{border-top:1px solid var(--line);background:var(--bg-soft);padding:34px 0
         <button class="tab" role="tab" aria-selected="false" aria-controls="panel-fedora" data-tab="fedora">Fedora</button>
         <button class="tab" role="tab" aria-selected="false" aria-controls="panel-suse" data-tab="suse">openSUSE</button>
         <button class="tab" role="tab" aria-selected="false" aria-controls="panel-debian" data-tab="debian">Debian / Ubuntu</button>
-        <button class="tab" role="tab" aria-selected="false" aria-controls="panel-elf" data-tab="elf">独立 ELF</button>
       </div>
 
       <div class="panel is-active" id="panel-arch" role="tabpanel">
         <div class="install-grid">
           <div class="codebox">
             <div class="codebox-head"><span class="cmd">安装 / 指定 tag / 卸载</span><button class="copy" data-copy="URL=https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh&#10;curl -fsSL &quot;$URL&quot; | sh -s -- --pacman">复制</button></div>
-<pre>URL=https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh
-curl -fsSL "$URL" | sh -s -- --pacman
-
-<i># 指定 tag（pre-release 也支持）</i>
-sh install.sh --tag up3-2
-
+<pre>curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh | sh 
 <i># 卸载</i>
-sh install.sh --uninstall</pre>
-          </div>
-          <div class="side">
-            <h4>运行时依赖</h4>
-            <ul><li><code>qt6-base</code> <code>qt6-wayland</code></li><li><code>python</code> <code>curl</code></li></ul>
-            <h4>说明</h4>
-            <ul><li>下载 <code>.pkg.tar.zst</code> 后 <code>pacman -U</code> 安装</li><li>自建静态仓库由 <code>repo-add</code> 生成，不上 AUR</li><li>依赖不代装，脚本只装 mc263 本体</li></ul>
-          </div>
+sudo pacman -Rns mc263</pre>
         </div>
       </div>
 
       <div class="panel" id="panel-fedora" role="tabpanel">
         <div class="install-grid">
           <div class="codebox">
-            <div class="codebox-head"><span class="cmd">COPR 源（推荐，Fedora 密钥签名）</span><button class="copy" data-copy="sudo dnf copr enable cxc123/one-263-linux&#10;sudo dnf install mc263">复制</button></div>
 <pre>sudo dnf copr enable cxc123/one-263-linux
-sudo dnf install mc263
-
-<i># 一键脚本（同样打印上面两条命令）</i>
-URL=https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh
-curl -fsSL "$URL" | sh
-
-<i># 依赖</i>
-sudo dnf install qt6-qtbase qt6-qtwayland python3</pre>
+sudo dnf install mc263</pre>
           </div>
           <div class="side">
             <h4>说明</h4>
-            <ul><li>Fedora 45 起 RPM 默认 <code>_pkgverify_level all</code>，未签名包直接拒装</li><li>COPR 用 Fedora 密钥签名，<code>dnf install</code> 不需要 <code>--nogpgcheck</code></li><li>本地出包：<code>bash packaging/build-rpm.sh</code></li></ul>
-          </div>
+            <ul><li>COPR 有签名<li></ul>
         </div>
       </div>
 
@@ -466,15 +444,12 @@ sudo dnf install qt6-qtbase qt6-qtwayland python3</pre>
 <pre>BASE=https://download.copr.fedorainfracloud.org/results/cxc123/one-263-linux
 sudo rpm --import "$BASE/pubkey.gpg"
 sudo zypper addrepo "$BASE/opensuse-tumbleweed-x86_64/" one-263-linux
-sudo zypper refresh one-263-linux
-sudo zypper install mc263
-
-<i># 依赖</i>
-sudo zypper install qt6-qtbase libQt6WaylandClient6 python3</pre>
+sudo zypper refresh
+sudo zypper install mc263</pre>
           </div>
           <div class="side">
             <h4>说明</h4>
-            <ul><li>COPR 的 openSUSE chroot <b>rpm 签了名，仓库元数据没签</b></li><li>所以先 <code>rpm --import</code> 再 <code>zypper addrepo</code>，包签名照样验</li><li>之后升级走 <code>zypper update mc263</code></li></ul>
+            <ul><li>COPR有签名<li></ul>
           </div>
         </div>
       </div>
@@ -482,86 +457,26 @@ sudo zypper install qt6-qtbase libQt6WaylandClient6 python3</pre>
       <div class="panel" id="panel-debian" role="tabpanel">
         <div class="install-grid">
           <div class="codebox">
-            <div class="codebox-head"><span class="cmd">.deb（Ubuntu 26.04+ / Debian 13+）</span><button class="copy" data-copy="sh install.sh --deb">复制</button></div>
-<pre>sh install.sh --deb
-
-<i># 或手动装已下载的包</i>
-sudo apt install ./mc263_26.3-4_amd64.deb
-
-<i># 自己出包（需要 Qt6 开发包）</i>
-sudo apt install qt6-base-dev python3
+            <div class="codebox-head"><span class="cmd">.deb(Ubuntu 26.04+ / Debian 13.7+)</span><button class="copy" data-copy="sh install.sh --deb">复制</button></div>
+<pre>bash install.sh 
 make deb</pre>
           </div>
           <div class="side">
             <h4>说明</h4>
-            <ul><li>装包不需要编译器，Qt6 运行时由 apt 拉</li><li>一键脚本识别到 Debian 系会自动走 <code>apt install ./*.deb</code></li><li>强制走 deb：<code>sh install.sh --deb</code></li></ul>
+            <ul><li>脚本识别到 Debian 系会走 <code>apt install ./*.deb</code></li></ul>
+          </div>
+        </div>
+      </div>
+<i>#发行版包管理器安装时会自动补全依赖<i>
           </div>
         </div>
       </div>
 
-      <div class="panel" id="panel-elf" role="tabpanel">
-        <div class="install-grid">
-          <div class="codebox">
-            <div class="codebox-head"><span class="cmd">免安装</span><button class="copy" data-copy="chmod +x mc263-qt-26.3-x86_64 &amp;&amp; ./mc263-qt-26.3-x86_64">复制</button></div>
-<pre>chmod +x mc263-qt-26.3-x86_64
-./mc263-qt-26.3-x86_64
-
-<i># 自备 Qt6 运行时</i>
-<i># Fedora</i>
-sudo dnf install qt6-qtbase qt6-qtwayland python3
-<i># Arch</i>
-sudo pacman -S --needed qt6-base qt6-wayland python curl</pre>
-          </div>
-          <div class="side">
-            <h4>说明</h4>
-            <ul><li>不创建菜单项和图标，拷走 <code>chmod +x</code> 就能跑</li><li>装在只读位置时，<code>minecraft/</code> 与 <code>.mc263/</code> 自动改放 <code>~/.local/share/mc263/</code></li><li>强制走 ELF：<code>sh install.sh --elf</code></li></ul>
-          </div>
-        </div>
-      </div>
-
-      <p class="install-foot">产物、<code>SHA256SUMS</code> 与历史版本见 <a href="https://github.com/zzxwithbus19/one-263-linux/releases">GitHub Releases</a>；装完有问题到 <a href="https://github.com/zzxwithbus19/one-263-linux/issues">Issues</a> 反馈。</p>
+      <p class="install-foot"><a href="https://github.com/zzxwithbus19/one-263-linux/releases">releases</a> 
+        <a href="https://github.com/zzxwithbus19/one-263-linux/issues">issues</a></p>
     </div>
   </section>
-
-  <section class="section section-tint" id="build">
-    <div class="container">
-      <div class="section-head">
-        <p class="eyebrow">从源码构建</p>
-        <h2>只用 Makefile</h2>
-        <p>一个 C++23 编译器和 <code>pkg-config(Qt6Widgets)</code> 就够；没有 CMake，也不需要 moc。</p>
-      </div>
-      <div class="two-col">
-        <div class="block">
-          <table>
-            <thead><tr><th>目标</th><th>作用</th></tr></thead>
-            <tbody>
-              <tr><td><code>make</code></td><td>编译 <code>build/mc263-qt</code></td></tr>
-              <tr><td><code>make check</code></td><td>90 项核心单测 + 7 项下载器自测，全离线</td></tr>
-              <tr><td><code>make arch</code></td><td>源码包 → PKGBUILD → makepkg</td></tr>
-              <tr><td><code>make rpm</code></td><td>rpmbuild → <code>dist/*.rpm</code> + 独立 ELF</td></tr>
-              <tr><td><code>make deb</code></td><td>→ <code>dist/deb/*.deb</code></td></tr>
-              <tr><td><code>make compile-db</code></td><td>生成 <code>compile_commands.json</code></td></tr>
-              <tr><td><code>make info</code></td><td>编译器 / Qt6 / 产物路径</td></tr>
-              <tr><td><code>make clean</code></td><td>删掉 <code>build/</code> 与 <code>dist/</code></td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="block">
-          <h3>测试与产物</h3>
-          <p>核心逻辑不依赖 Qt，抽出头文件就能单独编译运行。</p>
-          <ul class="path-list">
-            <li><span>tests/core_test.cpp</span><span>90 项</span></li>
-            <li><span>tests/downloader_test.sh</span><span>7 项 · mock CDN</span></li>
-            <li><span>tests/mock_cdn.py</span><span>离线 Mojang 端点</span></li>
-            <li><span>tests/probe_endpoints.py</span><span>真实端点诊断</span></li>
-            <li><span>tools/gen_compile_db.py</span><span>make compile-db</span></li>
-          </ul>
-          <p class="block-note">冒烟：<code>QT_QPA_PLATFORM=offscreen build/mc263-qt</code>；抓首屏：<code>MC263_SHOT=/tmp/ui.png build/mc263-qt</code>。</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
+  
   <section class="section" id="faq">
     <div class="container">
       <div class="section-head">
@@ -570,28 +485,16 @@ sudo pacman -S --needed qt6-base qt6-wayland python curl</pre>
       </div>
       <div class="faq">
         <details>
-          <summary>没有 Java，能先把游戏下载下来吗？</summary>
-          <p>能。检测不到 Java 时，下载页会自动出现「Java 运行时」组件并默认勾选；下载完成或手动指定 java 会重新扫描，达标就放行。</p>
-        </details>
-        <details>
           <summary>能登录正版账号吗？</summary>
-          <p>暂时不能。启动参数是离线模式（<code>--accessToken 0 --userType legacy</code>），只能玩单人和局域网。正版登录要走 Microsoft OAuth → Xbox Live → XSTS → Minecraft Services 整条链路，还没做。</p>
+          <p>不能。启动参数是离线模式，只能玩单人和局域网</p>
         </details>
         <details>
           <summary>支持哪些发行版？</summary>
-          <p>Arch 系（含 Manjaro / CachyOS）走自建 pacman 源；Fedora / openSUSE 走 COPR 的 rpm；Debian 系用 .deb；其它发行版自备 Qt6 运行时装独立 ELF。</p>
-        </details>
-        <details>
-          <summary>Fedora 提示包没有签名、拒绝安装？</summary>
-          <p>45 起 RPM 默认拒绝未签名包。最省事的是用 COPR 源；脚本遇到拒绝会直接停下来，把三条路打出来，不会替你放宽校验。</p>
+          <p>Arch 系(含 CachyOS);Fedora / openSUSE 走 COPR ;Debian 系用 .deb分发方式；其它发行版使用ELF文件</p>
         </details>
         <details>
           <summary>两个版本的存档 / Mod 会串吗？</summary>
-          <p>不会。版本隔离始终开启，<code>--gameDir</code> 指向 <code>versions/&lt;版本&gt;/</code>，mods、saves、资源包、光影、日志都在各自目录下。</p>
-        </details>
-        <details>
-          <summary>仓库会附带游戏文件吗？</summary>
-          <p>不会。仓库里没有 Minecraft 游戏文件、Java 运行时或任何 Mojang / Microsoft 素材；下载器只从官方 CDN 或公共镜像取公开资源文件。</p>
+          <p>不会。版本隔离始终开启</p>
         </details>
       </div>
     </div>
@@ -601,33 +504,13 @@ sudo pacman -S --needed qt6-base qt6-wayland python curl</pre>
     <div class="container">
       <div class="section-head">
         <p class="eyebrow">许可与声明</p>
-        <h2>边界写清楚</h2>
-      </div>
-      <div class="license-grid">
-        <div class="license-item">
-          <h4>源码许可</h4>
-          <p>GPL-3.0-or-later。当前代码是全新的 C++23 实现，不含上游代码；上游未声明许可证，其构建脚本已从本仓库移除。</p>
-        </div>
-        <div class="license-item">
-          <h4>Qt6 链接方式</h4>
-          <p>按 LGPL-3.0-only 动态链接。分发二进制时需随附 LGPL-3.0 文本、声明使用 Qt、保持动态链接以便替换，并提供 Qt 源码获取途径。</p>
-        </div>
-        <div class="license-item">
-          <h4>不包含的内容</h4>
-          <p>Minecraft 游戏文件、Java 运行时、Mojang / Microsoft 版权素材都不在仓库内；下载到本地的第三方库与资源适用各自许可。</p>
-        </div>
-      </div>
-      <div class="limit"><strong>已知限制：</strong>暂不支持正版账号登录；游戏语言默认跟随系统 locale，识别不到回退 <code>en_us</code>；Wayland 为首选后端，缺插件时回退 XWayland，「关于」页能看到当前后端与 Qt 版本。</div>
+        <p>mc263 是开源的，遵循 GPL-3.0-or-later 许可</p>
     </div>
   </section>
 </main>
 
 <footer>
   <div class="container footer-row">
-    <div>
-      <div class="footer-brand">mc263</div>
-      <div>Minecraft 26.3 Linux 启动器 · GPL-3.0-or-later</div>
-    </div>
     <div class="footer-links">
       <a href="https://github.com/zzxwithbus19/one-263-linux">仓库</a>
       <a href="https://github.com/zzxwithbus19/one-263-linux/releases">Releases</a>
