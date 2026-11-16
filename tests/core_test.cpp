@@ -373,6 +373,81 @@ broken = "not-a-color"
         check(removed == 2 && left == 10, "日志：只保留最近 10 个");
     }
 
+    // 14) 回收站：移入 → 列出 → 恢复 → 清空
+    {
+        std::string e;
+        const fs::path trash = root / "trash";
+        const fs::path saves = root / "saves";
+        fs::create_directories(saves / "My World" / "region", ec);
+        { std::ofstream o(saves / "My World" / "level.dat"); o << "level-data"; }
+
+        fs::path moved;
+        check(moveToTrash(saves / "My World", trash, moved, e), "回收站：世界移入成功 " + e);
+        check(!fs::exists(saves / "My World"), "回收站：原位置已清空");
+        auto items = listTrash(trash);
+        check(items.size() == 1 && items[0].isDir && items[0].name == "My World",
+              "回收站：能列出目录条目");
+        check(items[0].original == saves / "My World", "回收站：记录了原始路径");
+        check(items[0].size >= 10, "回收站：统计出条目大小");
+
+        check(restoreTrash(items[0], e), "回收站：恢复成功 " + e);
+        check(fs::exists(saves / "My World" / "level.dat"), "回收站：文件回到原处");
+        check(listTrash(trash).empty(), "回收站：恢复后条目消失");
+
+        // 原位置被占用时恢复，不能覆盖
+        check(moveToTrash(saves / "My World", trash, moved, e), "回收站：再次移入");
+        fs::create_directories(saves / "My World", ec);
+        { std::ofstream o(saves / "My World" / "level.dat"); o << "new-level"; }
+        auto again = listTrash(trash);
+        check(again.size() == 1 && restoreTrash(again[0], e), "回收站：同名时恢复不覆盖 " + e);
+        check(fs::exists(saves / "My World" / "level.dat") &&
+                  fs::exists(saves / "My World (2)" / "level.dat"),
+              "回收站：重名自动加序号，两份都在");
+
+        // 已经在回收站里的东西不能再套一层
+        check(moveToTrash(saves / "My World (2)", trash, moved, e), "回收站：第三次移入");
+        auto third = listTrash(trash);
+        check(third.size() == 1 && !moveToTrash(third[0].payload, trash, moved, e),
+              "回收站：拒绝把回收站里的东西再移进去");
+
+        uint64_t freed = 0;
+        const int n = emptyTrash(trash, freed);
+        check(n > 0 && listTrash(trash).empty(), "回收站：清空后没有条目");
+        check(freed >= 10, "回收站：清空后报告释放字节");
+    }
+
+    // 15) 崩溃摘要：拼接本次日志 / latest.log / hs_err / crash-report
+    {
+        std::string e;
+        Layout cl = Layout::at(root / "crash", "");
+        cl.ensure(e);
+        const auto vdir = cl.versionDir("26.3");
+        fs::create_directories(vdir / "logs", ec);
+        fs::create_directories(vdir / "crash-reports", ec);
+        { std::ofstream o(vdir / "logs" / "latest.log"); o << "line-a\nline-b\n"; }
+        { std::ofstream o(vdir / "hs_err_pid123.log"); o << "SIGSEGV at foo\n"; }
+        { std::ofstream o(vdir / "crash-reports" / "crash-2026-11-16.txt"); o << "Description: crash\n"; }
+        const fs::path launchLog = cl.gameDir / "note" / "launch-x.log";
+        fs::create_directories(cl.gameDir / "note", ec);
+        { std::ofstream o(launchLog); o << "launcher line\n"; }
+
+        const auto rep = collectCrashReport(cl, "26.3", launchLog, 1, e);
+        check(!rep.empty() && fs::is_regular_file(rep), "崩溃摘要：文件已生成 " + e);
+        std::string rerr;
+        const std::string text = fsx::readText(rep, rerr);
+        check(text.find("退出码 : 1") != std::string::npos, "崩溃摘要：包含退出码");
+        check(text.find("launcher line") != std::string::npos, "崩溃摘要：包含本次启动日志");
+        check(text.find("line-b") != std::string::npos, "崩溃摘要：包含 latest.log");
+        check(text.find("SIGSEGV at foo") != std::string::npos, "崩溃摘要：包含 hs_err");
+        check(text.find("Description: crash") != std::string::npos, "崩溃摘要：包含 crash-report");
+
+        std::string many;
+        for (int i = 0; i < 300; ++i) many += "l" + std::to_string(i) + "\n";
+        const std::string tail = tailLines(many, 10);
+        check(tail.find("l299\n") != std::string::npos && tail.find("l288\n") == std::string::npos,
+              "崩溃摘要：只留最后 N 行");
+    }
+
     std::cout << "core: " << passed << " 项通过\n";
     return 0;
 }

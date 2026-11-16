@@ -1279,6 +1279,266 @@ inline int pruneLogs(const fs::path& noteDir, int keep) {
     return removed;
 }
 
+// ---------------------------------------------------------------- 回收站 ----
+// 删除不可逆最容易出事（尤其是世界存档），所以统一先进回收站：
+//   <gameDir>/trash/<时间戳>/
+//       origin.txt   原始父目录（一行）
+//       data/<名字>  被删的文件或目录
+// 恢复 = 把 data 挪回 origin.txt 记的目录。元数据用纯文本而不是 JSON，
+// 出问题时用户能直接看懂、手工挪回去，不依赖这个程序。
+struct TrashItem {
+    fs::path dir;       // trash/<时间戳>
+    fs::path payload;   // trash/<时间戳>/data/<名字>
+    fs::path origin;    // 原始父目录
+    fs::path original;  // 原始完整路径
+    std::string name;
+    std::string when;   // 时间戳目录名
+    uint64_t size = 0;
+    bool isDir = false;
+};
+
+inline fs::path trashRoot(const Layout& l) { return l.gameDir / "trash"; }
+
+inline std::string trashStamp() {
+    const std::time_t t = std::time(nullptr);
+    std::tm tmv{};
+    localtime_r(&t, &tmv);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y%m%d-%H%M%S", &tmv);
+    return buf;
+}
+
+inline bool pathInside(const fs::path& child, const fs::path& parent) {
+    std::error_code ec;
+    const std::string c = fs::absolute(child, ec).lexically_normal().string();
+    const std::string p = fs::absolute(parent, ec).lexically_normal().string();
+    if (c == p) return true;
+    return c.size() > p.size() && c.compare(0, p.size(), p) == 0 && c[p.size()] == '/';
+}
+
+// 挪进回收站；moved 返回落点（trash/<时间戳>/data/<名字>）
+inline bool moveToTrash(const fs::path& src, const fs::path& root, fs::path& moved,
+                        std::string& err) {
+    err.clear();
+    std::error_code ec;
+    if (src.empty() || src.filename().empty()) { err = "路径不合法"; return false; }
+    if (!fs::exists(src, ec)) { err = "目标不存在"; return false; }
+    if (pathInside(src, root)) { err = "源路径已经在回收站里"; return false; }
+    if (!fsx::makeDirs(root, err)) return false;
+
+    const std::string stamp = trashStamp();
+    fs::path dir = root / stamp;
+    for (int i = 2; fs::exists(dir, ec); ++i) dir = root / (stamp + "-" + std::to_string(i));
+    if (!fsx::makeDirs(dir / "data", err)) return false;
+    {
+        std::ofstream o(dir / "origin.txt");
+        o << fs::absolute(src).parent_path().string() << "\n";
+    }
+    const fs::path target = dir / "data" / src.filename();
+    fs::rename(src, target, ec);
+    if (ec) {
+        // 跨设备（游戏目录在另一个分区）时 rename 会失败，退化成 copy + delete
+        std::error_code ec2;
+        if (fs::is_directory(src, ec2))
+            fs::copy(src, target, fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec2);
+        else
+            fs::copy_file(src, target, fs::copy_options::overwrite_existing, ec2);
+        if (ec2) {
+            err = "移动到回收站失败: " + ec2.message();
+            std::error_code ign;
+            fs::remove_all(dir, ign);
+            return false;
+        }
+        std::error_code ign;
+        fs::remove_all(src, ign);
+    }
+    moved = target;
+    return true;
+}
+
+inline std::vector<TrashItem> listTrash(const fs::path& root) {
+    std::vector<TrashItem> out;
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) return out;
+    for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        TrashItem t;
+        t.dir = it->path();
+        t.when = t.dir.filename().string();
+        std::error_code ec2;
+        for (fs::directory_iterator dit(t.dir / "data", ec2), dend; !ec2 && dit != dend;
+             dit.increment(ec2)) {
+            t.payload = dit->path();
+            break;
+        }
+        if (t.payload.empty()) continue;   // 目录被手工改坏就跳过，不删它
+        t.name = t.payload.filename().string();
+        t.isDir = fs::is_directory(t.payload, ec2);
+        t.size = t.isDir ? fsx::dirSize(t.payload) : fsx::fileSize(t.payload);
+        std::string oerr;
+        std::string origin = fsx::readText(t.dir / "origin.txt", oerr);
+        while (!origin.empty() && (origin.back() == '\n' || origin.back() == '\r')) origin.pop_back();
+        if (!origin.empty()) t.origin = fs::path(origin);
+        t.original = t.origin.empty() ? t.payload : t.origin / t.name;
+        out.push_back(std::move(t));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const TrashItem& a, const TrashItem& b) { return a.when > b.when; });
+    return out;
+}
+
+// 恢复：目标已存在就加 " (2)" 后缀，绝不覆盖
+inline bool restoreTrash(const TrashItem& item, std::string& err) {
+    err.clear();
+    std::error_code ec;
+    if (!fs::exists(item.payload, ec)) { err = "回收站里找不到这个文件"; return false; }
+    const fs::path destDir = item.origin.empty() ? item.payload.parent_path() : item.origin;
+    if (!fsx::makeDirs(destDir, err)) return false;
+    fs::path dest = destDir / item.name;
+    for (int i = 2; fs::exists(dest, ec); ++i) {
+        const std::string stem = item.payload.stem().string();
+        const std::string ext = item.payload.extension().string();
+        dest = destDir / (stem + " (" + std::to_string(i) + ")" + ext);
+    }
+    fs::rename(item.payload, dest, ec);
+    if (ec) {
+        std::error_code ec2;
+        if (item.isDir)
+            fs::copy(item.payload, dest, fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec2);
+        else
+            fs::copy_file(item.payload, dest, fs::copy_options::overwrite_existing, ec2);
+        if (ec2) { err = "恢复失败: " + ec2.message(); return false; }
+        std::error_code ign;
+        fs::remove_all(item.payload, ign);
+    }
+    std::error_code ign;
+    fs::remove_all(item.dir, ign);
+    return true;
+}
+
+inline uint64_t trashSize(const fs::path& root) {
+    uint64_t total = 0;
+    for (const auto& t : listTrash(root)) total += t.size;
+    return total;
+}
+
+// 清空；freed 返回释放的字节数，返回值是被删的条目数
+inline int emptyTrash(const fs::path& root, uint64_t& freed) {
+    freed = 0;
+    int removed = 0;
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) return 0;
+    for (const auto& t : listTrash(root)) {
+        freed += t.size;
+        std::error_code rec;
+        const auto n = fs::remove_all(t.dir, rec);
+        if (!rec) removed += static_cast<int>(n);
+    }
+    return removed;
+}
+
+
+// ------------------------------------------------------------ 崩溃摘要 ----
+// 游戏异常退出时，用户只会说"打不开"。把能定位问题的东西拼成一份：
+// 本次启动日志、游戏 latest.log、JVM 的 hs_err、最新 crash-report。
+// 每份只留最后 200 行，整份控制在几百 KB 内，方便直接贴出来。
+inline std::string tailLines(const std::string& text, std::size_t keep) {
+    std::size_t seen = 0;
+    for (std::size_t i = text.size(); i > 0;) {
+        --i;
+        if (text[i] == '\n' && ++seen > keep) return text.substr(i + 1);
+    }
+    return text;
+}
+
+inline fs::path collectCrashReport(const Layout& l, const std::string& versionTag,
+                                   const fs::path& launchLog, int exitCode, std::string& err) {
+    err.clear();
+    const fs::path noteDir = l.gameDir / "note";
+    if (!fsx::makeDirs(noteDir, err)) return {};
+
+    std::time_t t = std::time(nullptr);
+    std::tm tmv{};
+    localtime_r(&t, &tmv);
+    char when[32];
+    std::strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", &tmv);
+
+    struct utsname u{};
+    const std::string sys = uname(&u) == 0
+                                ? std::string(u.sysname) + " " + u.release + " " + u.machine
+                                : "(未知)";
+
+    std::ostringstream out;
+    out << "mc263 崩溃摘要\n"
+        << "时间   : " << when << "\n"
+        << "版本   : " << versionTag << "\n"
+        << "退出码 : " << exitCode << "\n"
+        << "系统   : " << sys << "\n"
+        << "游戏目录: " << l.gameDir.string() << "\n";
+
+    auto addFile = [&out](const fs::path& p, const char* title) {
+        std::error_code ec;
+        if (p.empty() || !fs::is_regular_file(p, ec)) return;
+        std::string rerr;
+        const std::string text = fsx::readText(p, rerr);
+        if (text.empty() && !rerr.empty()) return;
+        const std::string tail = tailLines(text, 200);
+        out << "\n===== " << title << ": " << p.string();
+        if (tail.size() < text.size()) out << "（只保留最后 200 行）";
+        out << " =====\n" << tail << "\n";
+    };
+
+    const fs::path vdir = l.versionDir(versionTag);
+    addFile(launchLog, "本次启动日志");
+    addFile(vdir / "logs" / "latest.log", "游戏日志");
+    for (const fs::path& dir : {vdir, l.gameDir, l.gameDir / "logs"}) {
+        std::error_code ec;
+        for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            if (it->path().filename().string().rfind("hs_err", 0) == 0) addFile(it->path(), "JVM 崩溃日志");
+        }
+    }
+    {
+        std::error_code ec;
+        fs::path newest;
+        for (fs::directory_iterator it(vdir / "crash-reports", ec), end; !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            if (newest.empty() || it->last_write_time() > fs::last_write_time(newest)) newest = it->path();
+        }
+        addFile(newest, "Minecraft crash-report");
+    }
+
+    std::string safe;
+    for (char c : versionTag)
+        safe.push_back((std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_')
+                           ? c
+                           : '-');
+    if (safe.empty()) safe = "mc263";
+    char stamp[32];
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tmv);
+    const fs::path outPath = noteDir / ("crash-" + safe + "-" + stamp + ".txt");
+    {
+        std::ofstream o(outPath);
+        if (!o) { err = "写不了 " + outPath.string(); return {}; }
+        o << out.str();
+    }
+
+    // 只留最近 10 份，别让 note/ 越堆越大
+    std::vector<fs::path> reports;
+    std::error_code ec;
+    for (fs::directory_iterator it(noteDir, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (it->is_regular_file(ec) && name.rfind("crash-", 0) == 0 && it->path().extension() == ".txt")
+            reports.push_back(it->path());
+    }
+    std::sort(reports.begin(), reports.end());
+    if (reports.size() > 10) {
+        for (std::size_t i = 0; i + 10 < reports.size(); ++i) {
+            std::error_code ign;
+            fs::remove(reports[i], ign);
+        }
+    }
+    return outPath;
+}
 
 // ------------------------------------------------------ 主题来源（Noctalia）----
 // Noctalia（Quickshell 桌面外壳）把 Material You 色板渲染成一份扁平 TOML：

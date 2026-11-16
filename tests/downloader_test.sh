@@ -53,4 +53,19 @@ check "JRE bin/java 落盘且可执行" "test -x '$TMP/qtdl/runtime/java-runtime
 check "资产按 hash 存到 objects" "find '$TMP/qtdl/assets/objects' -type f | grep -q ."
 check "进度 JSON 覆盖多个阶段" "grep -q '\"stage\": \"libraries\"' '$TMP/qtdl.log' && grep -q '\"stage\": \"assets\"' '$TMP/qtdl.log'"
 
+# 校验模式：删一个库、把 client.jar 弄坏，跑 --verify 应只补这两处
+rm -f "$TMP/qtdl/libraries/mock/lib/1.0/lib-1.0.jar"
+printf 'broken' > "$TMP/qtdl/versions/26.3/26.3.jar"
+python3 "$TMP/mc263_downloader.py" --mc-dir "$TMP/qtdl" --version 26.3 \
+    --base-url "http://127.0.0.1:$PORT" --components jar,libraries,assets \
+    --jobs 3 --limit 2 --verify > "$TMP/verify.log" 2>&1 || { cat "$TMP/verify.log" >&2; exit 1; }
+check "校验：缺的库文件被补回" "grep -q 'MOCK-LIBRARY-JAR' '$TMP/qtdl/libraries/mock/lib/1.0/lib-1.0.jar'"
+check "校验：坏掉的 client.jar 重新可用" "python3 -c 'import zipfile,sys;assert zipfile.is_zipfile(sys.argv[1])' '$TMP/qtdl/versions/26.3/26.3.jar'"
+check "校验：输出汇总行" "grep -q '检查 .* 项，异常 ' '$TMP/verify.log'"
+
+python3 "$TMP/mc263_downloader.py" --mc-dir "$TMP/qtdl" --version 26.3 \
+    --base-url "http://127.0.0.1:$PORT" --components jar,libraries,assets \
+    --jobs 3 --limit 2 --verify > "$TMP/verify2.log" 2>&1 || { cat "$TMP/verify2.log" >&2; exit 1; }
+check "校验：干净目录报告 0 异常" "grep -q '异常 0' '$TMP/verify2.log'"
+
 printf '\033[32m下载器自测通过：%d 项\033[0m\n' "$PASS"
