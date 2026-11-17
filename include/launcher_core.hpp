@@ -202,6 +202,13 @@ struct Layout {
 };
 
 // ------------------------------------------------------------------ 配置 ----
+struct VersionOptions {
+    std::vector<std::string> extraJvmArgs;
+    std::string language;
+    std::string gameDisplay = "auto";
+    std::string appliedLanguage;
+};
+
 struct Config {
     std::string version = "26.3";
     std::string username;
@@ -226,6 +233,19 @@ struct Config {
     std::string themeSource = "auto";
     std::vector<std::string> extraJvmArgs;
     std::vector<std::string> components = {"jar", "libraries", "assets", "runtime"};
+    // 按版本目录名隔离的 JVM / 显示设置；没有条目时回退到上面的全局值
+    std::map<std::string, VersionOptions> versionOptions;
+
+    VersionOptions optionsFor(const std::string& id) const {
+        const auto it = versionOptions.find(id);
+        if (it != versionOptions.end()) return it->second;
+        VersionOptions o;
+        o.extraJvmArgs = extraJvmArgs;
+        o.language = language;
+        o.gameDisplay = gameDisplay;
+        o.appliedLanguage = appliedLanguage;
+        return o;
+    }
 
     JValue toJson() const {
         JValue j = JValue::objectV();
@@ -251,6 +271,18 @@ struct Config {
         JValue c = JValue::arrayV();
         for (const auto& s : components) c.push(JValue::stringV(s));
         j.set("components", c);
+        JValue vo = JValue::objectV();
+        for (const auto& [id, opt] : versionOptions) {
+            JValue x = JValue::objectV();
+            JValue args = JValue::arrayV();
+            for (const auto& a : opt.extraJvmArgs) args.push(JValue::stringV(a));
+            x.set("extraJvmArgs", args);
+            x.set("language", JValue::stringV(opt.language));
+            x.set("gameDisplay", JValue::stringV(opt.gameDisplay));
+            x.set("appliedLanguage", JValue::stringV(opt.appliedLanguage));
+            vo.set(id, x);
+        }
+        j.set("versionOptions", vo);
         return j;
     }
     static Config fromJson(const JValue& j) {
@@ -277,6 +309,24 @@ struct Config {
         if (a && a->isArray()) { c.extraJvmArgs.clear(); for (const auto& v : a->array()) if (v.isString()) c.extraJvmArgs.push_back(v.str()); }
         const JValue* cc = j.find("components");
         if (cc && cc->isArray()) { c.components.clear(); for (const auto& v : cc->array()) if (v.isString()) c.components.push_back(v.str()); }
+        const JValue* vo = j.find("versionOptions");
+        if (vo && vo->isObject()) {
+            for (const auto& [id, x] : vo->object()) {
+                VersionOptions opt;
+                if (const JValue* args = x.find("extraJvmArgs"); args && args->isArray())
+                    for (const auto& v : args->array())
+                        if (v.isString()) opt.extraJvmArgs.push_back(v.str());
+                if (const JValue* lv = x.find("language"); lv && lv->isString()) opt.language = lv->str();
+                if (const JValue* gv = x.find("gameDisplay"); gv && gv->isString())
+                    opt.gameDisplay = gv->str();
+                if (const JValue* av = x.find("appliedLanguage"); av && av->isString())
+                    opt.appliedLanguage = av->str();
+                if (opt.gameDisplay != "auto" && opt.gameDisplay != "wayland" &&
+                    opt.gameDisplay != "x11")
+                    opt.gameDisplay = "auto";
+                c.versionOptions[id] = std::move(opt);
+            }
+        }
         if (c.version.empty()) c.version = "26.3";
         if (c.arch.empty()) c.arch = detectArch();
         if (c.memoryMb < 256) c.memoryMb = 256;

@@ -474,6 +474,23 @@ broken = "not-a-color"
         check(Config{}.gameDisplay == "auto", "配置：gameDisplay 默认 auto");
     }
 
+    // 按版本隔离的 JVM / 显示设置
+    {
+        Config vc;
+        VersionOptions opt;
+        opt.extraJvmArgs = {"-Dfoo=1", "-XX:+UseG1GC"};
+        opt.language = "zh_cn";
+        opt.gameDisplay = "wayland";
+        opt.appliedLanguage = "zh_cn";
+        vc.versionOptions["26.3+fabric"] = opt;
+        Config back = Config::fromJson(vc.toJson());
+        const auto it = back.versionOptions.find("26.3+fabric");
+        check(it != back.versionOptions.end() && it->second.extraJvmArgs.size() == 2 &&
+                  it->second.language == "zh_cn" && it->second.gameDisplay == "wayland" &&
+                  it->second.appliedLanguage == "zh_cn",
+              "配置：按版本的 JVM/显示设置可往返");
+    }
+
     // 加载器目录被删/未装时退回原版
     {
         Layout ll = Layout::at(root / "launcher");

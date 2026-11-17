@@ -160,11 +160,15 @@ inline const File* primaryFile(const Version& v) {
 
 inline bool search(const std::string& query, const std::string& loader, const std::string& gameVersion,
                    const std::string& sort, const fs::path& cacheDir,
-                   std::vector<Hit>& out, std::string& err) {
-    std::string facets = "[[\"project_type:mod\"]";
-    // Quilt 强兼容 Fabric：选 Quilt 时把 fabric 类目也带上（内层数组 = OR）
-    if (loader == "quilt") facets += ",[\"categories:quilt\",\"categories:fabric\"]";
-    else if (!loader.empty()) facets += ",[\"categories:" + loader + "\"]";
+                   std::vector<Hit>& out, std::string& err,
+                   const std::string& projectType = "mod") {
+    std::string facets = "[[\"project_type:" + projectType + "\"]";
+    // 资源包 / 光影没有加载器分类；只有 Mod 才加 categories 过滤
+    if (projectType == "mod") {
+        // Quilt 强兼容 Fabric：选 Quilt 时把 fabric 类目也带上（内层数组 = OR）
+        if (loader == "quilt") facets += ",[\"categories:quilt\",\"categories:fabric\"]";
+        else if (!loader.empty()) facets += ",[\"categories:" + loader + "\"]";
+    }
     if (!gameVersion.empty()) facets += ",[\"versions:" + gameVersion + "\"]";
     facets += "]";
     const std::string index = sort.empty() ? "downloads" : sort;
