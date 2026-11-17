@@ -218,6 +218,9 @@ struct Config {
     std::string language;  // 游戏语言（en_us / zh_cn…）；空 = 跟随系统
     // 上次由启动器写进 options.txt 的语言（用来判断设置有没有变；空 = 还没写过）
     std::string appliedLanguage;
+    // 游戏窗口后端：auto = 让游戏（SDL）自己选；wayland = 强制 SDL_VIDEO_DRIVER=wayland；
+    // x11 = 强制 x11（走 XWayland）。只影响游戏进程，不影响启动器自己的 Qt 后端。
+    std::string gameDisplay = "auto";
     // 配色来源：auto = 检测到 Noctalia 色板就用它，否则跟随系统；system = 只用系统调色板；
     // noctalia = 强制读 Noctalia 的 Material You 色板（读不到就退回系统）
     std::string themeSource = "auto";
@@ -240,6 +243,7 @@ struct Config {
         j.set("profile", JValue::stringV(profile));
         j.set("language", JValue::stringV(language));
         j.set("appliedLanguage", JValue::stringV(appliedLanguage));
+        j.set("gameDisplay", JValue::stringV(gameDisplay));
         j.set("themeSource", JValue::stringV(themeSource));
         JValue a = JValue::arrayV();
         for (const auto& s : extraJvmArgs) a.push(JValue::stringV(s));
@@ -263,6 +267,7 @@ struct Config {
         const JValue* jobs = j.find("jobs"); if (jobs) c.jobs = static_cast<int>(jobs->number(10));
         const JValue* f = j.find("fabric"); if (f) c.fabric = f->boolean(false);
         s("profile", c.profile); s("language", c.language); s("appliedLanguage", c.appliedLanguage);
+        s("gameDisplay", c.gameDisplay);
         s("themeSource", c.themeSource);
         if (c.themeSource != "auto" && c.themeSource != "system" && c.themeSource != "noctalia")
             c.themeSource = "auto";

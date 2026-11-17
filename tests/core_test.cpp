@@ -499,6 +499,15 @@ broken = "not-a-color"
         check(effectiveGameLanguage(lc) == detectSystemLanguage(), "语言：空则跟随系统");
     }
 
+    // 16) 游戏显示后端配置往返
+    {
+        Config dc;
+        dc.gameDisplay = "wayland";
+        Config back = Config::fromJson(dc.toJson());
+        check(back.gameDisplay == "wayland", "配置：gameDisplay 可往返");
+        check(Config{}.gameDisplay == "auto", "配置：gameDisplay 默认 auto");
+    }
+
     std::cout << "core: " << passed << " 项通过\n";
     return 0;
 }

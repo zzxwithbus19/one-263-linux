@@ -2447,6 +2447,14 @@ private:
                                   "fr_fr", "es_es", "pt_br", "ru_ru"})
             langCombo_->addItem(QString::fromLatin1(code), QString::fromLatin1(code));
         form->addRow("游戏语言", langCombo_);
+        gameDisplay_ = new QComboBox(w);
+        gameDisplay_->addItem("自动（让游戏自己选）", "auto");
+        gameDisplay_->addItem("Wayland 原生", "wayland");
+        gameDisplay_->addItem("XWayland（强制 x11）", "x11");
+        gameDisplay_->setToolTip(
+            "只影响游戏进程的 SDL 后端。niri 没有 fifo-v1 时 SDL 会自动退回 XWayland；\n"
+            "想强制原生 Wayland 选第二项（SDL_VIDEO_DRIVER=wayland）。");
+        form->addRow("游戏显示后端", gameDisplay_);
         v->addWidget(gbox);
 
         auto* abox = new QGroupBox("外观", w);
@@ -2870,6 +2878,10 @@ private:
             const int ti = themeCombo_->findData(QString::fromStdString(cfg_.themeSource));
             themeCombo_->setCurrentIndex(ti >= 0 ? ti : 0);
         }
+        if (gameDisplay_) {
+            const int gi = gameDisplay_->findData(QString::fromStdString(cfg_.gameDisplay));
+            gameDisplay_->setCurrentIndex(gi >= 0 ? gi : 0);
+        }
         if (langCombo_) {
             const int li = langCombo_->findData(QString::fromStdString(cfg_.language));
             langCombo_->setCurrentIndex(li >= 0 ? li : 0);
@@ -2911,6 +2923,7 @@ private:
             cfg_.components.push_back("runtime");
         if (langCombo_) cfg_.language = langCombo_->currentData().toString().toStdString();
         if (themeCombo_) cfg_.themeSource = themeCombo_->currentData().toString().toStdString();
+        if (gameDisplay_) cfg_.gameDisplay = gameDisplay_->currentData().toString().toStdString();
         cfg_.extraJvmArgs.clear();
         QString extra = extraArgsEdit_->text().trimmed();
         if (!extra.isEmpty()) for (const QString& s : extra.split(' ', Qt::SkipEmptyParts))
@@ -2952,6 +2965,8 @@ private:
         connect(xmsSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &LauncherWindow::scheduleAutoSave);
         connect(langCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, &LauncherWindow::scheduleAutoSave);
+        connect(gameDisplay_, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &LauncherWindow::scheduleAutoSave);
         connect(themeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
             if (loadingConfig_) return;
@@ -3348,6 +3363,16 @@ private:
         }
         launchProc_ = new QProcess(this);
         launchProc_->setProcessChannelMode(QProcess::MergedChannels);
+        // 游戏窗口后端：Minecraft 26.x 用 SDL3，SDL_VIDEO_DRIVER 可以强制 wayland / x11
+        {
+            QProcessEnvironment penv = QProcessEnvironment::systemEnvironment();
+            if (cfg_.gameDisplay == "wayland") penv.insert("SDL_VIDEO_DRIVER", "wayland");
+            else if (cfg_.gameDisplay == "x11") penv.insert("SDL_VIDEO_DRIVER", "x11");
+            launchProc_->setProcessEnvironment(penv);
+            if (cfg_.gameDisplay != "auto")
+                launchLog_->appendPlainText("游戏显示后端：SDL_VIDEO_DRIVER=" +
+                                            QString::fromStdString(cfg_.gameDisplay));
+        }
         launchProc_->setWorkingDirectory(QString::fromStdString(plan.workDir.string()));
         QStringList args;
         for (size_t i = 1; i < plan.argv.size(); ++i) args << QString::fromStdString(plan.argv[i]);
@@ -3464,6 +3489,7 @@ private:
     QLineEdit* extraArgsEdit_ = nullptr;
     QComboBox* langCombo_ = nullptr;
     QComboBox* themeCombo_ = nullptr;
+    QComboBox* gameDisplay_ = nullptr;
     QFile launchLogFile_;
     std::filesystem::path launchLogPath_;
     QLabel* instModState_ = nullptr;
