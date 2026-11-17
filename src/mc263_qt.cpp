@@ -1734,8 +1734,8 @@ private:
     void refreshInstalledMods() {
         if (!instModTable_) return;
         const auto dir = currentModsDir();
-        std::error_code ec;
-        std::filesystem::create_directories(dir, ec);
+        // 只读：不要 create_directories —— 否则只是点开这一页就会凭空多出
+        // versions/<版本>+<加载器>/mods 这种目录
         const auto entries = core::listEntries(dir);
         instModTable_->setRowCount(0);
         int enabledCount = 0;
@@ -2154,9 +2154,6 @@ private:
     void refreshResources() {
         if (!resTabs_) return;
         const auto base = core::isolatedGameDir(layout_, cfg_);
-        std::error_code ec;
-        for (const char* sub : {"saves", "resourcepacks", "shaderpacks"})
-            std::filesystem::create_directories(base / sub, ec);
         fillResTable(savesTable_, base / "saves", true);
         fillResTable(packsTable_, base / "resourcepacks", false);
         fillResTable(shadersTable_, base / "shaderpacks", false);
@@ -2891,6 +2888,16 @@ private:
     void collectUiToConfig() {
         cfg_.version = launchVersion_->currentText().toStdString();
         if (cfg_.version.empty()) cfg_.version = "26.3";
+        // 下拉框里列的是 versions/ 下的真实目录名，可能是 "26.3+fabric"：
+        // 拆成 base + profile，避免再拼一次变成 "26.3+fabric+quilt"。
+        if (const auto plus = cfg_.version.rfind('+'); plus != std::string::npos) {
+            cfg_.profile = cfg_.version.substr(plus + 1);
+            cfg_.version = cfg_.version.substr(0, plus);
+            cfg_.fabric = (cfg_.profile == "fabric");
+        } else {
+            cfg_.profile.clear();
+            cfg_.fabric = false;
+        }
         cfg_.username = usernameEdit_->text().toStdString();
         cfg_.mirror = mirrorCombo_->currentData().toString().toStdString();
         cfg_.jobs = jobsSpin_->value();
@@ -3289,6 +3296,12 @@ private:
         } else {
             for (const auto& j : javas_) if (j.valid) { java = j; break; }
         }
+        if (core::effectiveVersionId(layout_, cfg_) != core::versionDirName(cfg_)) {
+            launchLog_->appendPlainText(
+                QString("找不到 %1，本次改用原版 %2 启动")
+                    .arg(QString::fromStdString(core::versionDirName(cfg_)),
+                         QString::fromStdString(core::effectiveVersionId(layout_, cfg_))));
+        }
         core::LaunchPlan plan = core::buildLaunchPlan(layout_, cfg_, java);
         if (!plan.ok()) {
             QMessageBox::warning(this, "无法启动", QString::fromStdString(plan.error));
@@ -3302,7 +3315,7 @@ private:
         {
             const auto noteDir = layout_.gameDir / "note";
             std::string lerr;
-            const auto logPath = core::newLogPath(noteDir, core::versionDirName(cfg_), lerr);
+            const auto logPath = core::newLogPath(noteDir, core::effectiveVersionId(layout_, cfg_), lerr);
             if (!logPath.empty()) {
                 launchLogPath_ = logPath;
                 launchLogFile_.setFileName(QString::fromStdString(logPath.string()));
@@ -3340,7 +3353,7 @@ private:
             if (code == 0) return;
             // 非 0 退出当作崩溃：把本次日志、latest.log、hs_err、crash-report 拼成一份摘要
             std::string cerr;
-            const auto report = core::collectCrashReport(layout_, core::versionDirName(cfg_),
+            const auto report = core::collectCrashReport(layout_, core::effectiveVersionId(layout_, cfg_),
                                                          launchLogPath_, code, cerr);
             if (report.empty()) {
                 launchLog_->appendPlainText("生成崩溃摘要失败：" + QString::fromStdString(cerr));

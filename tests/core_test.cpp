@@ -448,6 +448,32 @@ broken = "not-a-color"
               "崩溃摘要：只留最后 N 行");
     }
 
+    // 14) 加载器版本目录被删/未装时退回原版（玩家会手动删 versions/ 里的目录）
+    {
+        Layout ll = Layout::at(root / "launcher");
+        std::string e;
+        ll.ensure(e);
+        fs::create_directories(ll.versionDir("26.3"), ec);
+        { std::ofstream o(ll.versionJson("26.3")); o << kFakeVersion; }
+        Config cc;
+        cc.version = "26.3";
+        cc.profile = "quilt";
+        cc.arch = "x86_64";
+        check(effectiveVersionId(ll, cc) == "26.3", "版本目录：没有 +quilt 时退回原版");
+        check(isolatedGameDir(ll, cc).filename().string() == "26.3", "版本目录：隔离目录也退回原版");
+
+        fs::create_directories(ll.versionDir("26.3+quilt"), ec);
+        { std::ofstream o(ll.versionJson("26.3+quilt")); o << kFakeVersion; }
+        check(effectiveVersionId(ll, cc) == "26.3+quilt", "版本目录：有 +quilt 时用加载器版本");
+
+        Config missing;
+        missing.version = "26.4-snapshot-8";
+        missing.profile = "quilt";
+        missing.arch = "x86_64";
+        check(effectiveVersionId(ll, missing) == "26.4-snapshot-8+quilt",
+              "版本目录：两个都没有时返回原名（报错能指到具体文件）");
+    }
+
     std::cout << "core: " << passed << " 项通过\n";
     return 0;
 }

@@ -293,9 +293,21 @@ inline std::string versionDirName(const Config& c) {
     return c.fabric ? c.version + "+fabric" : c.version;
 }
 
+// 实际该用的版本目录名：配置里可能还留着 profile（quilt/fabric），
+// 但那个加载器版本已经被删/还没装 —— 这时退回原版版本，而不是报
+// "缺少版本 json: …+quilt/…+quilt.json"（玩家删 versions/ 里的目录很正常）。
+inline std::string effectiveVersionId(const Layout& l, const Config& c) {
+    const std::string composed = versionDirName(c);
+    if (composed == c.version) return composed;
+    std::error_code ec;
+    if (fs::is_regular_file(l.versionJson(composed), ec)) return composed;  // 加载器版本在
+    if (fs::is_regular_file(l.versionJson(c.version), ec)) return c.version;  // 退回原版
+    return composed;  // 两个都没有：保留原名，让报错指出去找的是哪个
+}
+
 // 版本隔离后的 gameDir：每个版本一个目录，存档 / mods / 资源包互不干扰
 inline fs::path isolatedGameDir(const Layout& l, const Config& c) {
-    return l.versionsDir / versionDirName(c);
+    return l.versionsDir / effectiveVersionId(l, c);
 }
 
 struct GameDirInfo {
@@ -715,7 +727,8 @@ struct VersionMeta {
 
 inline VersionMeta loadVersion(const Layout& l, const Config& c) {
     VersionMeta m;
-    fs::path vj = l.versionJson(versionDirName(c));
+    const std::string vid = effectiveVersionId(l, c);
+    fs::path vj = l.versionJson(vid);
     std::string err;
     std::string text = fsx::readText(vj, err);
     if (!err.empty()) { m.error = "缺少版本 json: " + vj.string(); return m; }
@@ -762,7 +775,7 @@ inline VersionMeta loadVersion(const Layout& l, const Config& c) {
     // 展平进了加载器 json（libraries / assetIndex 都在），但游戏本体仍然是
     // versions/<mc 版本>/<mc 版本>.jar。它必须进 classpath，否则 Knot 直接报
     // "Minecraft game provider couldn't locate the game!"。
-    const fs::path ownJar = l.versionJar(versionDirName(c));
+    const fs::path ownJar = l.versionJar(vid);
     std::error_code jec;
     if (!c.profile.empty() || c.fabric) {
         if (fs::exists(ownJar, jec)) {
@@ -917,7 +930,7 @@ inline LaunchPlan buildLaunchPlan(const Layout& l, const Config& c, const JavaIn
     if (!vm.ok()) { p.error = vm.error; return p; }
     std::string err;
     if (!l.ensure(err)) { p.error = "无法创建运行目录: " + err; return p; }
-    fs::path natives = l.nativesDir / versionDirName(c);
+    fs::path natives = l.nativesDir / effectiveVersionId(l, c);
     if (!extractNatives(vm.nativeJars, natives, err)) { p.error = err; return p; }
 
     // 版本隔离（始终开启，不提供关闭）：每个版本自己的 gameDir，存档 / mods / 资源包互不影响
