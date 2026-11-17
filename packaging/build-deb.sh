@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VER="${MC263_VER:-$(sed -n 's/^pkgver=//p' "$ROOT/packaging/PKGBUILD" | head -1)}"
 VER="${VER:-26.3}"
 # Debian 修订号与 Arch 的 pkgrel 是两条线，默认从 1 开始
-REV="${MC263_DEB_REV:-1}"
+REV="${MC263_DEB_REV:-2}"
 OUT="${MC263_DEB_OUT:-$ROOT/dist/deb}"
 STAGE="$ROOT/build/deb"
 HOST_ARCH="$(uname -m)"
@@ -131,7 +131,7 @@ Version: $VER-$REV
 Architecture: $DEB_ARCH
 Maintainer: $MAINTAINER
 Installed-Size: $INSTALLED_SIZE
-Depends: libqt6core6t64 | libqt6core6, libqt6gui6, libqt6widgets6, libqt6dbus6, libqt6waylandclient6, python3, curl, xdg-utils
+Depends: libqt6core6t64 | libqt6core6, libqt6gui6, libqt6widgets6, libqt6dbus6, libqt6waylandclient6, curl, xdg-utils
 Recommends: default-jre | java-runtime
 Section: games
 Priority: optional
@@ -140,7 +140,7 @@ Description: Minecraft 26.3 launcher (Qt6 native, Wayland-ready)
  面向 Minecraft 26.3 的 Linux 原生启动器，界面用 Qt6 Widgets 手写，
  不套 Electron、不内嵌浏览器，启动时自动选择 Wayland 或 XWayland。
  .
- 内置 Python3 多线程下载（Mojang / BMCLAPI 镜像，SHA1 校验 + 本地缓存）、
+ 内置 C++ 多线程下载（Mojang / BMCLAPI 镜像，SHA1 校验 + 本地缓存）、
  Java 运行时探测与版本闸门、兼容性查验、内存图形化配置。
  .
  本包不包含任何 Mojang 游戏文件或 Java 运行时，首次使用请在「下载游戏」页获取。
@@ -152,7 +152,7 @@ _CHANGELOG="$STAGE/usr/share/doc/mc263/changelog"
 {
     printf 'mc263 (%s-%s) unstable; urgency=medium\n\n' "$VER" "$REV"
     printf '  * 预编译 Qt6 启动器（单个 ELF，Wayland 优先）。\n'
-    printf '  * 内含 Python3 多线程下载器、Java 运行时探测、兼容性查验。\n'
+    printf '  * 内含 C++ 多线程下载器、Java 运行时探测、兼容性查验。\n'
     printf '  * 桌面项 / 图标 / AppStream 元数据。\n\n'
     printf ' -- %s  %s\n\n' "$MAINTAINER" "$(LC_ALL=C date -R)"
 } > "$_CHANGELOG"
@@ -176,7 +176,7 @@ chmod 0755 "$STAGE/DEBIAN"
 if command -v dpkg-query >/dev/null 2>&1; then
     missing=""
     for p in libqt6core6t64 libqt6gui6 libqt6widgets6 libqt6dbus6 \
-             libqt6waylandclient6 python3 curl xdg-utils; do
+             libqt6waylandclient6 curl xdg-utils; do
         dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || missing="$missing $p"
     done
     if [ -n "$missing" ]; then

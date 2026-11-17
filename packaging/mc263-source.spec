@@ -13,7 +13,7 @@
 
 Name:           mc263
 Version:        %{mc263_version}
-Release:        6%{?dist}
+Release:        7%{?dist}
 Summary:        Minecraft 26.3 launcher (Qt6 native, Wayland-ready)
 License:        AGPL-3.0-or-later
 URL:            https://github.com/zzxwithbus19/one-263-linux
@@ -24,6 +24,8 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  gcc-c++
 BuildRequires:  make
 BuildRequires:  python3
+# %check 的 C++ 下载器测试会实际调用系统 curl
+BuildRequires:  curl
 %if 0%{?fedora}
 BuildRequires:  pkgconfig(Qt6Widgets)
 BuildRequires:  qt6-qtbase-devel
@@ -35,7 +37,8 @@ BuildRequires:  cmake(Qt6Widgets)
 %endif
 
 # 运行时依赖：Qt6 库由 rpm 从 ELF 的 DT_NEEDED 自动生成，这里写死也行
-Requires:       python3
+# 下载器用系统 curl CLI；python3 只在 %check 的 mock CDN 测试里需要。
+Requires:       curl
 %if 0%{?fedora}
 Recommends:     qt6-qtwayland
 %endif
@@ -47,7 +50,7 @@ Recommends:     libQt6WaylandClient6
 Minecraft 26.3 的 Linux 原生启动器（Qt6 Widgets 手写界面，不用 moc、不套 Electron）。
 
 单个 ELF + 用户目录下的 minecraft/ 与 .mc263/：
-- 下载游戏：Mojang 官方 CDN 或 bmclapi 镜像，python3 多线程 + SHA1 校验 + 断点续传
+- 下载游戏：Mojang 官方 CDN 或 bmclapi 镜像，原生 C++ 多线程 + SHA1 校验 + 断点续传
 - Java 探测与版本闸门：后台扫描系统 Java 与 Mojang 运行时，不达标时拦住启动并给出下载入口
 - 兼容性查验：架构、Java 版本、依赖库、natives、图形音频库、内存与磁盘逐项检查
 - Mod 与加载器：搜索 Modrinth（可排序/过滤），一键安装 Fabric / Quilt 加载器
@@ -83,6 +86,9 @@ make check
 %{_datadir}/metainfo/mc263.metainfo.xml
 
 %changelog
+* Tue Nov 17 2026 mc263 <mc263@users.noreply.github.com> - %{mc263_version}-7
+- 下载器改为进程内 C++ 实现，移除运行时 python3 依赖，显式依赖 curl
+
 * Tue Nov 17 2026 mc263 <mc263@users.noreply.github.com> - %{mc263_version}-6
 - 同步 main：加载器区域置顶、版本隔离提示、Mod 关键词自动补全
 

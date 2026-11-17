@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -25,6 +27,9 @@
 namespace mc263::dl {
 
 namespace fs = std::filesystem;
+
+// 取消令牌：worker 只读，UI 只写；空函数表示不支持取消。
+using CancelFn = std::function<bool()>;
 
 // ------------------------------------------------------------------ SHA1 ----
 class Sha1 {
@@ -142,13 +147,23 @@ inline std::string mirrorUrl(const std::string& url, const std::string& mirror) 
 
 // ------------------------------------------------------------- curl 后端 ----
 // 用 fork + execv 调系统 curl，避免 shell 注入；argv 在 fork 前构造好。
-inline bool curlGet(const std::string& url, const fs::path& dest, int timeout, std::string& err) {
+// 父进程轮询 waitpid，这样取消按钮/关窗可以及时把正在跑的 curl 杀掉。
+inline bool curlGet(const std::string& url, const fs::path& dest, int timeout, std::string& err,
+                    const CancelFn& cancelled = {}, bool* wasCancelled = nullptr) {
+    if (wasCancelled) *wasCancelled = false;
     std::string t = std::to_string(timeout);
     std::vector<std::string> a = {
         "curl", "-fL", "-sS", "--retry", "2", "--retry-delay", "1",
         "--connect-timeout", "10", "--max-time", t,
-        "-A", "mc263-fetch/1.0", "-o", dest.string(), url
+        "-A", "mc263-fetch/1.0", "-o", dest.string()
     };
+    // 回环地址是离线自测/自建镜像，系统代理会把它转成 502，显式绕过。
+    if (url.find("127.0.0.1") != std::string::npos ||
+        url.find("localhost") != std::string::npos) {
+        a.push_back("--noproxy");
+        a.push_back("*");
+    }
+    a.push_back(url);
     std::vector<char*> av;
     for (auto& s : a) av.push_back(s.data());
     av.push_back(nullptr);
@@ -158,9 +173,58 @@ inline bool curlGet(const std::string& url, const fs::path& dest, int timeout, s
         ::execvp("curl", av.data());
         ::_exit(127);
     }
+
+    auto sleepBrief = [] { std::this_thread::sleep_for(std::chrono::milliseconds(10)); };
+    auto killAndReap = [&](int sig) {
+        ::kill(pid, sig);
+        int st = 0;
+        while (true) {
+            const pid_t r = ::waitpid(pid, &st, WNOHANG);
+            if (r == pid || (r < 0 && errno != EINTR)) return;
+            sleepBrief();
+        }
+    };
+
     int st = 0;
-    while (::waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    const auto hardDeadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(std::max(1, timeout) + 15);
+    while (true) {
+        const pid_t r = ::waitpid(pid, &st, WNOHANG);
+        if (r == pid) break;
+        if (r < 0 && errno != EINTR) {
+            err = "等待 curl 失败";
+            return false;
+        }
+        if (cancelled && cancelled()) {
+            ::kill(pid, SIGTERM);
+            const auto stopBy = std::chrono::steady_clock::now() +
+                                std::chrono::milliseconds(1500);
+            while (std::chrono::steady_clock::now() < stopBy) {
+                const pid_t rr = ::waitpid(pid, &st, WNOHANG);
+                if (rr == pid) break;
+                if (rr < 0 && errno != EINTR) break;
+                sleepBrief();
+            }
+            // SIGTERM 不退出就强杀，避免 worker 卡在取消上。
+            const pid_t rr = ::waitpid(pid, &st, WNOHANG);
+            if (rr == 0) killAndReap(SIGKILL);
+            if (wasCancelled) *wasCancelled = true;
+            err = "已取消";
+            return false;
+        }
+        if (std::chrono::steady_clock::now() > hardDeadline) {
+            killAndReap(SIGKILL);
+            err = "curl 超时: " + url;
+            return false;
+        }
+        sleepBrief();
+    }
     if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        if (wasCancelled && cancelled && cancelled()) {
+            *wasCancelled = true;
+            err = "已取消";
+            return false;
+        }
         err = "curl 失败 (exit=" + std::to_string(WIFEXITED(st) ? WEXITSTATUS(st) : -1) + "): " + url;
         return false;
     }
@@ -169,12 +233,13 @@ inline bool curlGet(const std::string& url, const fs::path& dest, int timeout, s
 }
 
 inline bool fetchText(const std::string& url, const std::string& mirror,
-                      const fs::path& cacheDir, int timeout, std::string& out, std::string& err) {
+                      const fs::path& cacheDir, int timeout, std::string& out, std::string& err,
+                      const CancelFn& cancelled = {}, bool* wasCancelled = nullptr) {
     std::error_code ec;
     fs::create_directories(cacheDir, ec);
     fs::path tmp = cacheDir / ("meta-" + std::to_string(::getpid()) + "-" +
                                std::to_string(std::hash<std::string>{}(url)) + ".tmp");
-    if (!curlGet(mirrorUrl(url, mirror), tmp, timeout, err)) {
+    if (!curlGet(mirrorUrl(url, mirror), tmp, timeout, err, cancelled, wasCancelled)) {
         fs::remove(tmp, ec);
         return false;
     }
@@ -194,8 +259,10 @@ struct Task {
 using ProgressCb = std::function<void(size_t done, size_t total, const std::string& label, bool ok, const std::string& err)>;
 
 inline bool fetchOne(const Task& t, const std::string& mirror, int timeout,
-                     bool onlyMissing, std::string& err, bool& cached) {
+                     bool onlyMissing, std::string& err, bool& cached,
+                     const CancelFn& cancelled = {}, bool* wasCancelled = nullptr) {
     cached = false;
+    if (wasCancelled) *wasCancelled = false;
     if (onlyMissing && mc263::fsx::isFile(t.dest) && sha1Matches(t.dest, t.sha1, err)) {
         cached = true;
         err.clear();
@@ -206,8 +273,10 @@ inline bool fetchOne(const Task& t, const std::string& mirror, int timeout,
     fs::path part = t.dest;
     part += ".part";
     fs::remove(part, ec);
-    if (!curlGet(mirrorUrl(t.url, mirror), part, timeout, err)) {
+    bool cancelledNow = false;
+    if (!curlGet(mirrorUrl(t.url, mirror), part, timeout, err, cancelled, &cancelledNow)) {
         fs::remove(part, ec);
+        if (wasCancelled) *wasCancelled = cancelledNow;
         return false;
     }
     if (!sha1Matches(part, t.sha1, err)) {
@@ -226,24 +295,107 @@ inline bool fetchOne(const Task& t, const std::string& mirror, int timeout,
     return true;
 }
 
-// 并发任务池。返回失败数；allowPartial=false 时任一失败即整体判定失败。
-inline size_t runTasks(const std::vector<Task>& tasks, const std::string& mirror,
-                       size_t jobs, int timeout, bool onlyMissing,
-                       const ProgressCb& cb, std::vector<std::string>& failures) {
-    if (tasks.empty()) return 0;
-    std::atomic<size_t> next{0}, done{0}, failed{0};
+// ------------------------------------------------------------- 本地探测 ----
+enum class ProbeState { Ok, Missing, Bad, Error };
+
+// 只读本地文件，不联网；verify 先并行探测，避免对几万个 assets 单线程重复算 SHA1。
+inline ProbeState probeFile(const Task& t, std::string& err) {
+    if (!mc263::fsx::isFile(t.dest)) {
+        err.clear();
+        return ProbeState::Missing;
+    }
+    if (t.sha1.empty()) {
+        err.clear();
+        return ProbeState::Ok;
+    }
+    if (sha1Matches(t.dest, t.sha1, err)) {
+        err.clear();
+        return ProbeState::Ok;
+    }
+    return err.empty() ? ProbeState::Bad : ProbeState::Error;
+}
+
+struct ProbeResult {
+    std::vector<Task> broken;
+    size_t checked = 0;
+    size_t bad = 0;
+    bool cancelled = false;
+};
+
+using ProbeCb = std::function<void(size_t checked, size_t total, size_t bad)>;
+
+inline ProbeResult probeTasks(const std::vector<Task>& tasks, size_t jobs,
+                              const CancelFn& cancelled = {},
+                              const ProbeCb& cb = {}) {
+    ProbeResult result;
+    if (tasks.empty()) return result;
+    std::atomic<size_t> next{0}, done{0}, bad{0};
+    std::atomic<bool> stop{false};
     std::mutex mtx;
     jobs = std::max<size_t>(1, std::min<size_t>(jobs, 16));
     std::vector<std::thread> pool;
     for (size_t k = 0; k < jobs; ++k) {
         pool.emplace_back([&] {
-            while (true) {
+            while (!stop.load()) {
+                if (cancelled && cancelled()) {
+                    stop.store(true);
+                    break;
+                }
+                const size_t i = next.fetch_add(1);
+                if (i >= tasks.size()) break;
+                const Task& t = tasks[i];
+                std::string e;
+                const ProbeState st = probeFile(t, e);
+                if (st != ProbeState::Ok) {
+                    bad.fetch_add(1);
+                    std::lock_guard<std::mutex> lk(mtx);
+                    result.broken.push_back(t);
+                }
+                const size_t d = done.fetch_add(1) + 1;
+                if (cb && (d % 200 == 0 || d == tasks.size())) {
+                    std::lock_guard<std::mutex> lk(mtx);
+                    cb(d, tasks.size(), bad.load());
+                }
+            }
+        });
+    }
+    for (auto& th : pool) th.join();
+    result.checked = done.load();
+    result.bad = bad.load();
+    result.cancelled = stop.load();
+    return result;
+}
+
+// 并发任务池。返回失败数；cancelled 置位后不再领取新任务，并杀掉正在跑的 curl。
+inline size_t runTasks(const std::vector<Task>& tasks, const std::string& mirror,
+                       size_t jobs, int timeout, bool onlyMissing,
+                       const ProgressCb& cb, std::vector<std::string>& failures,
+                       const CancelFn& cancelled = {}, bool* wasCancelled = nullptr) {
+    if (wasCancelled) *wasCancelled = false;
+    if (tasks.empty()) return 0;
+    std::atomic<size_t> next{0}, done{0}, failed{0};
+    std::atomic<bool> stop{false};
+    std::mutex mtx;
+    jobs = std::max<size_t>(1, std::min<size_t>(jobs, 16));
+    std::vector<std::thread> pool;
+    for (size_t k = 0; k < jobs; ++k) {
+        pool.emplace_back([&] {
+            while (!stop.load()) {
+                if (cancelled && cancelled()) {
+                    stop.store(true);
+                    break;
+                }
                 size_t i = next.fetch_add(1);
                 if (i >= tasks.size()) break;
                 const Task& t = tasks[i];
                 std::string e;
                 bool cached = false;
-                bool ok = fetchOne(t, mirror, timeout, onlyMissing, e, cached);
+                bool cancelledNow = false;
+                bool ok = fetchOne(t, mirror, timeout, onlyMissing, e, cached, cancelled, &cancelledNow);
+                if (cancelledNow) {
+                    stop.store(true);
+                    break;
+                }
                 size_t d = done.fetch_add(1) + 1;
                 if (!ok) {
                     failed.fetch_add(1);
@@ -258,6 +410,7 @@ inline size_t runTasks(const std::vector<Task>& tasks, const std::string& mirror
         });
     }
     for (auto& th : pool) th.join();
+    if (wasCancelled) *wasCancelled = stop.load() && cancelled && cancelled();
     return failed.load();
 }
 

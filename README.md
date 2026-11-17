@@ -10,11 +10,10 @@ Qt6 Widgets 原生界面（无 Electron、无内嵌浏览器、无 moc），启�
 Wayland 原生运行。
 
 ```
-mc263-qt                 ← 唯一可执行文件（约 920 KB）
+mc263-qt                 ← 唯一可执行文件（约 1.2 MB）
 minecraft/               ← 游戏目录（首次运行自动建，可在设置里改）
 .mc263/
-├── config.json          版本 / 内存 / Java / 镜像 / 组件（改完即存）
-└── mc263_downloader.py  内嵌 python3 下载脚本（运行时释放）
+└── config.json          版本 / 内存 / Java / 镜像 / 组件（改完即存）
 ```
 
 > 装在 `/usr/bin` 这类只读位置时，这两个目录自动改放 `~/.local/share/mc263/`。
@@ -82,14 +81,14 @@ COPR 的 openSUSE 仓库有个细节：**rpm 是签名的，但仓库元数据�
 
 | 发行版 / 方式 | 文件 | 做法 |
 |---|---|---|
-| Fedora / openSUSE | `mc263-26.3-5.<arch>.rpm` | `sudo dnf install ./mc263-26.3-5.x86_64.rpm` |
+| Fedora / openSUSE | `mc263-26.3-7.<arch>.rpm` | `sudo dnf install ./mc263-26.3-7.x86_64.rpm` |
 | 免安装 | `mc263-qt-26.3-<arch>` | `chmod +x` 后直接跑 |
 
-独立 ELF 没有菜单项和图标，需要自己准备 Qt6 运行时与 python3：
+独立 ELF 没有菜单项和图标，需要自己准备 Qt6 运行时与 curl：
 
 ```sh
-sudo dnf install qt6-qtbase qt6-qtwayland python3          # Fedora
-sudo zypper install qt6-qtbase libQt6WaylandClient6 python3  # openSUSE
+sudo dnf install qt6-qtbase qt6-qtwayland curl          # Fedora
+sudo zypper install qt6-qtbase libQt6WaylandClient6 curl  # openSUSE
 ```
 
 ---
@@ -97,13 +96,13 @@ sudo zypper install qt6-qtbase libQt6WaylandClient6 python3  # openSUSE
 ## 2. 从源码构建
 
 ```bash
-# Fedora
-sudo dnf install gcc-c++ make qt6-qtbase-devel qt6-qtwayland python3
+# Fedora（python3 只用于 make check 的离线 mock CDN）
+sudo dnf install gcc-c++ make qt6-qtbase-devel qt6-qtwayland python3 curl
 # openSUSE Tumbleweed
-sudo zypper install gcc-c++ make qt6-qtbase-devel libQt6WaylandClient6 python3
+sudo zypper install gcc-c++ make qt6-qtbase-devel libQt6WaylandClient6 python3 curl
 
 make                 # 编译 build/mc263-qt
-make check           # 112 项核心单测 + 11 项内嵌下载器自测（全部离线）
+make check           # 130 项核心单测 + 15 项 C++ 下载器自测（全部离线）
 make rpm             # 出 rpm（本分支主线，见第 6 节）
 make compile-db      # 生成 compile_commands.json（clangd / IDE 用）
 make info            # 编译器 / Qt6 / 产物路径
@@ -272,14 +271,14 @@ mc26-one/
 ├── install.sh                  一键安装（rpm / pacman / ELF 自动选择 + 摘要校验）
 ├── include/
 │   ├── launcher_core.hpp       布局 / 配置 / Java 探测 / 兼容性 / 启动 / meminfo / 版本隔离 / 加载器 / 目录扫描
-│   ├── download.hpp            curl 下载后端 + SHA1 + 并发池（兼容性网络检查用）
+│   ├── download.hpp            curl 下载后端 + SHA1 + 并发池 + 取消/校验探测
 │   ├── modrinth.hpp            Modrinth 搜索 / 版本 / 下载（公开 API，无需 key）
 │   ├── mini_json.hpp           JSON 解析与生成
 │   ├── mini_zip.hpp            ZIP 读取（扫 natives）
 │   ├── safe_path.hpp           路径守卫（黑名单 + 沙箱根 + 符号链接逃逸防护）
 │   └── fs_util.hpp             目录 / 文件 / 环境变量小工具
 ├── src/
-│   └── mc263_qt.cpp            Qt6 主窗口（7 页，内嵌 python3 下载脚本）
+│   └── mc263_qt.cpp            Qt6 主窗口（7 页，进程内 C++ 下载器）
 ├── tools/
 │   └── gen_compile_db.py       make compile-db：生成 compile_commands.json（clangd 用）
 ├── packaging/
@@ -295,8 +294,9 @@ mc26-one/
 │   ├── niri-mc263.kdl          niri 窗口规则示例（浮动尺寸 / 圆角 / 边框）
 │   └── mc263.svg               图标
 └── tests/
-    ├── core_test.cpp           112 项核心单测
-    ├── downloader_test.sh      内嵌下载器 + mock CDN 自测（11 项）
+    ├── core_test.cpp           130 项核心单测
+    ├── downloader_test.cpp     C++ 下载器测试 CLI
+    ├── downloader_test.sh      下载器 + mock CDN 自测（15 项）
     ├── mock_cdn.py             离线模拟 Mojang 下载端点（真实 SHA1）
     └── probe_endpoints.py      真实端点诊断
 ```

@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import io
 import json
+import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -71,10 +72,19 @@ def build_world():
     version["assetIndex"]["size"] = len(index_bytes)
     version_bytes = json.dumps(version, indent=2).encode()
     vurl = f"{META}/v1/packages/mock/26.3.json"
+    snapshot = dict(version)
+    snapshot["id"] = "26.4-snapshot-1"
+    snapshot["type"] = "snapshot"
+    snapshot_bytes = json.dumps(snapshot, indent=2).encode()
+    snap_url = f"{META}/v1/packages/mock/26.4-snapshot-1.json"
     manifest = {
         "latest": {"release": "26.3", "snapshot": "26.4-snapshot-1"},
-        "versions": [{"id": "26.3", "type": "release", "url": vurl,
-                      "sha1": sha1(version_bytes), "time": "2026-11-01T00:00:00+00:00"}],
+        "versions": [
+            {"id": "26.3", "type": "release", "url": vurl,
+             "sha1": sha1(version_bytes), "time": "2026-11-01T00:00:00+00:00"},
+            {"id": "26.4-snapshot-1", "type": "snapshot", "url": snap_url,
+             "sha1": sha1(snapshot_bytes), "time": "2026-11-02T00:00:00+00:00"},
+        ],
     }
     runtime_all = {
         "linux": {"java-runtime-epsilon": [{
@@ -88,6 +98,7 @@ def build_world():
     routes = {
         "/mc/game/version_manifest_v2.json": json.dumps(manifest).encode(),
         "/v1/packages/mock/26.3.json": version_bytes,
+        "/v1/packages/mock/26.4-snapshot-1.json": snapshot_bytes,
         "/v1/packages/mock/34.json": index_bytes,
         "/v1/packages/mock/runtime.json": runtime_bytes,
         f"/v1/objects/{cs}/client.jar": client,
@@ -103,6 +114,7 @@ def build_world():
 
 class Handler(BaseHTTPRequestHandler):
     routes = {}
+    delay_ms = 0
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -110,6 +122,8 @@ class Handler(BaseHTTPRequestHandler):
         if data is None:
             self.send_error(404, "mock 404")
             return
+        if self.delay_ms:
+            time.sleep(self.delay_ms / 1000.0)
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
@@ -123,8 +137,11 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=18777)
+    ap.add_argument("--delay-ms", type=int, default=0,
+                    help="每个响应延迟毫秒数，用于取消测试")
     args = ap.parse_args()
     Handler.routes, hashes = build_world()
+    Handler.delay_ms = max(0, args.delay_ms)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"mock cdn listening on 127.0.0.1:{args.port} assets_sha1={hashes['asset']}", flush=True)
     server.serve_forever()

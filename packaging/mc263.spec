@@ -33,7 +33,7 @@ Source4:        mc263.metainfo.xml
 
 # Qt6 的库依赖由 rpm 自动从 ELF 的 DT_NEEDED 生成（libQt6Widgets.so.6 等），
 # Fedora / openSUSE 都能解析，不用写死发行版的包名。
-Requires:       python3
+Requires:       curl
 %if 0%{?fedora}
 Recommends:     qt6-qtwayland
 %endif
@@ -45,7 +45,7 @@ Recommends:     libQt6WaylandClient6
 Minecraft 26.3 的 Linux 原生启动器（Qt6 Widgets 手写界面，不用 moc、不套 Electron）。
 
 单个 ELF + 用户目录下的 minecraft/ 与 .mc263/：
-- 下载游戏：Mojang 官方 CDN 或 bmclapi 镜像，python3 多线程 + SHA1 校验 + 断点续传
+- 下载游戏：Mojang 官方 CDN 或 bmclapi 镜像，原生 C++ 多线程 + SHA1 校验 + 断点续传
 - Java 探测与版本闸门：后台扫描系统 Java 与 Mojang 运行时，不达标时拦住启动并给出下载入口
 - 兼容性查验：架构、Java 版本、依赖库、natives、图形音频库、内存与磁盘逐项检查
 - Mod 与加载器：搜索 Modrinth（可排序/过滤），一键安装 Fabric / Quilt 加载器
@@ -78,5 +78,7 @@ install -D -m 0644 %{SOURCE4}              %{buildroot}%{_datadir}/metainfo/mc26
 %{_datadir}/metainfo/mc263.metainfo.xml
 
 %changelog
+* Tue Nov 17 2026 mc263 <mc263@users.noreply.github.com> - 26.3-7
+- 下载器改为进程内 C++ 实现，移除运行时 python3 依赖，显式依赖 curl
 * Sat Nov 07 2026 mc263 <noreply@example.com> - 26.3-1
 - Qt6 native launcher (Wayland-first), prebuilt binary package

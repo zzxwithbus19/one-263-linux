@@ -1,7 +1,7 @@
 // mc263_qt.cpp -- HMCL 式 Qt6 原生启动器（单个 ELF）
 //
-// 形态：[mc263-qt ELF][appDir/minecraft/ 游戏目录][appDir/.mc263/ 配置与内嵌脚本]
-// 下载：内嵌 Python3 脚本（ThreadPoolExecutor 多线程 + SHA1 + JSON 进度），QProcess 异步调用；
+// 形态：[mc263-qt ELF][appDir/minecraft/ 游戏目录][appDir/.mc263/ 配置]
+// 下载：进程内 C++ 下载核心（curl + SHA1 + 并发任务池），后台线程执行；
 // Java 探测与兼容性查验：std::thread 后台执行，QMetaObject::invokeMethod 回主线程刷 UI；
 // 启动：QProcess 异步 exec java，主线程显示日志。全程不阻塞界面。
 //
@@ -35,10 +35,6 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonValue>
 #include <QLabel>
 #include <QLibraryInfo>
 #include <csignal>
@@ -81,6 +77,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <exception>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
@@ -91,309 +89,6 @@ namespace core = mc263::core;
 
 // 启动器自身崩溃时写的文件。路径在窗口构造里填好，信号处理器只做 open/write。
 static char g_crashLogPath[4096] = {0};
-
-// ---------------------------------------------------------------- 内嵌脚本 ----
-static const char* kDownloaderPy = R"PY(#!/usr/bin/env python3
-"""mc263-qt 内嵌下载器：多线程 + SHA1 校验 + JSON 进度（由 Qt ELF 释放到 .mc263/）"""
-import argparse
-import hashlib
-import json
-import os
-import sys
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
-RUNTIME_ALL = "https://launchermeta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json"
-ASSET_CDN = "https://resources.download.minecraft.net"
-
-MIRRORS = {
-    "https://piston-meta.mojang.com/": "https://bmclapi2.bangbang93.com/",
-    "https://piston-data.mojang.com/": "https://bmclapi2.bangbang93.com/",
-    "https://launchermeta.mojang.com/": "https://bmclapi2.bangbang93.com/",
-    "https://libraries.minecraft.net/": "https://bmclapi2.bangbang93.com/maven/",
-    "https://resources.download.minecraft.net/": "https://bmclapi2.bangbang93.com/assets/",
-}
-
-
-def emit(stage, done, total, label, ok=True, note=""):
-    print(json.dumps({"stage": stage, "done": done, "total": total,
-                      "label": label, "ok": ok, "note": note},
-                     ensure_ascii=False), flush=True)
-
-
-def mirror_url(url, mirror, base):
-    if base:
-        i = url.find("://")
-        p = url.find("/", i + 3) if i >= 0 else -1
-        return base.rstrip("/") + (url[p:] if p >= 0 else "")
-    if mirror == "bmclapi":
-        for a, b in MIRRORS.items():
-            if url.startswith(a):
-                return b + url[len(a):]
-    return url
-
-
-def get(url, timeout=60):
-    req = urllib.request.Request(url, headers={"User-Agent": "mc263-qt/1.0"})
-    # 回环地址（离线自测 / 自建镜像）绕过系统代理，否则代理会返回 502
-    if "127.0.0.1" in url or "localhost" in url:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    else:
-        opener = urllib.request.build_opener()
-    with opener.open(req, timeout=timeout) as r:
-        return r.read()
-
-
-def sha1(data):
-    return hashlib.sha1(data).hexdigest()
-
-
-def fetch_one(task):
-    dest = task["dest"]
-    want = task.get("sha1", "")
-    if want and os.path.isfile(dest):
-        with open(dest, "rb") as f:
-            if sha1(f.read()) == want:
-                return "cached", task
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    data = get(task["url"], 180)
-    if want and sha1(data) != want:
-        raise ValueError("SHA1 校验失败")
-    tmp = dest + ".part"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, dest)
-    os.chmod(dest, task.get("mode", 0o644))
-    return "ok", task
-
-
-def run_stage(stage, tasks, jobs):
-    if not tasks:
-        return 0
-    total = len(tasks)
-    done = failed = 0
-    with ThreadPoolExecutor(max_workers=max(1, min(16, jobs))) as pool:
-        futures = {pool.submit(fetch_one, t): t for t in tasks}
-        for fut in as_completed(futures):
-            done += 1
-            task = futures[fut]
-            try:
-                state, _ = fut.result()
-                emit(stage, done, total, task["label"], True, "cached" if state == "cached" else "")
-            except Exception as exc:
-                failed += 1
-                emit(stage, done, total, task["label"], False, str(exc))
-    return failed
-
-
-def probe_local(task):
-    """只看本地：缺 = missing，SHA1 不符 = bad，其余 ok。"""
-    dest = task["dest"]
-    want = task.get("sha1", "")
-    if not os.path.isfile(dest):
-        return "missing"
-    if want:
-        with open(dest, "rb") as f:
-            if sha1(f.read()) != want:
-                return "bad"
-    return "ok"
-
-
-def verify_stage(stage, tasks, jobs, stats):
-    """先本地比对，只把缺失/损坏的补下来。"""
-    if not tasks:
-        return 0
-    total = len(tasks)
-    broken = []
-    checked = 0
-    with ThreadPoolExecutor(max_workers=max(1, min(16, jobs))) as pool:
-        futures = {pool.submit(probe_local, t): t for t in tasks}
-        for fut in as_completed(futures):
-            checked += 1
-            task = futures[fut]
-            if fut.result() != "ok":
-                broken.append(task)
-            if checked % 200 == 0 or checked == total:
-                emit(stage, checked, total,
-                     "校验 %d/%d，异常 %d" % (checked, total, len(broken)))
-    stats["checked"] += total
-    stats["bad"] += len(broken)
-    if not broken:
-        return 0
-    emit(stage, 0, len(broken), "补下 %d 个文件" % len(broken))
-    return run_stage(stage, broken, jobs)
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mc-dir", required=True)
-    ap.add_argument("--version", default="26.3")
-    ap.add_argument("--mirror", default="official")
-    ap.add_argument("--jobs", type=int, default=10)
-    ap.add_argument("--arch", default="x86_64")
-    ap.add_argument("--components", default="jar,libraries,assets,runtime")
-    ap.add_argument("--base-url", default="")
-    ap.add_argument("--list-versions", action="store_true")
-    ap.add_argument("--snapshots", action="store_true")
-    ap.add_argument("--verify", action="store_true")
-    ap.add_argument("--latest-snapshot", action="store_true")
-    ap.add_argument("--limit", type=int, default=0)
-    args = ap.parse_args()
-    comps = set(x for x in args.components.split(",") if x)
-    if args.base_url:
-        os.environ["no_proxy"] = "127.0.0.1,localhost"
-        os.environ["NO_PROXY"] = "127.0.0.1,localhost"
-
-    try:
-        stats = {"checked": 0, "bad": 0}
-        if args.verify:
-            # 校验只信本地 json：连版本都没下过就没什么可校验的
-            wanted = args.version
-            vdir = os.path.join(args.mc_dir, "versions", wanted)
-            vjson = os.path.join(vdir, wanted + ".json")
-            if not os.path.isfile(vjson):
-                emit("error", 0, 0, "本地没有 " + wanted + " 的版本 json", False,
-                     "先下载这个版本，再校验")
-                return 2
-            failed = 0
-        else:
-            mtext = get(mirror_url(MANIFEST, args.mirror, args.base_url))
-            manifest = json.loads(mtext)
-            if args.latest_snapshot:
-                print(json.dumps({"version": manifest.get("latest", {}).get("snapshot", "")},
-                                 ensure_ascii=False), flush=True)
-                return 0
-            if args.list_versions:
-                types = {"release", "snapshot"} if args.snapshots else {"release"}
-                rel = [v["id"] for v in manifest.get("versions", []) if v.get("type") in types]
-                rel = rel[:(30 if args.snapshots else 20)]
-                print(json.dumps({"versions": rel}, ensure_ascii=False), flush=True)
-                return 0
-            wanted = args.version
-            if wanted in ("latest", "latest-snapshot"):
-                key = "snapshot" if wanted == "latest-snapshot" else "release"
-                wanted = manifest.get("latest", {}).get(key, "26.3")
-            entry = next((v for v in manifest.get("versions", []) if v.get("id") == wanted), None)
-            if not entry:
-                emit("error", 0, 0, "找不到版本 " + wanted, False, "")
-                return 2
-            vdir = os.path.join(args.mc_dir, "versions", wanted)
-            vjson = os.path.join(vdir, wanted + ".json")
-            failed = run_stage("version", [{
-                "url": mirror_url(entry["url"], args.mirror, args.base_url),
-                "dest": vjson, "sha1": entry.get("sha1", ""), "label": wanted + ".json"}], 1)
-        if failed:
-            return 2
-        with open(vjson, "r", encoding="utf-8") as f:
-            vj = json.load(f)
-        aid = vj.get("assetIndex", {})
-        asset_id = aid.get("id", wanted)
-        tasks = []
-        if "jar" in comps and "client" in vj.get("downloads", {}):
-            c = vj["downloads"]["client"]
-            tasks.append({"url": mirror_url(c["url"], args.mirror, args.base_url),
-                          "dest": os.path.join(vdir, wanted + ".jar"),
-                          "sha1": c.get("sha1", ""), "label": wanted + ".jar"})
-        if "libraries" in comps:
-            keys = (["natives-linux-arm64", "natives-linux-aarch64", "natives-linux"]
-                    if args.arch == "aarch64" else ["natives-linux", "natives-linux-x86_64"])
-            for lib in vj.get("libraries", []):
-                rules = lib.get("rules", [])
-                if rules:
-                    allowed = False
-                    for r in rules:
-                        osn = r.get("os", {}).get("name", "")
-                        match = not osn or osn in ("linux", "unix", "unknown")
-                        if "features" in r:
-                            match = False
-                        if match:
-                            allowed = r.get("action", "allow") == "allow"
-                    if not allowed:
-                        continue
-                d = lib.get("downloads", {})
-                arts = []
-                if "artifact" in d:
-                    arts.append(d["artifact"])
-                cls = d.get("classifiers", {})
-                for k in keys:
-                    if k in cls:
-                        arts.append(cls[k])
-                        break
-                for a in arts:
-                    if not a.get("path") or not a.get("url"):
-                        continue
-                    tasks.append({"url": mirror_url(a["url"], args.mirror, args.base_url),
-                                  "dest": os.path.join(args.mc_dir, "libraries", a["path"]),
-                                  "sha1": a.get("sha1", ""), "label": a["path"]})
-        if args.verify:
-            failed += verify_stage("verify", tasks, args.jobs, stats)
-        else:
-            failed += run_stage("libraries", tasks, args.jobs)
-
-        if "assets" in comps and aid.get("url"):
-            ipath = os.path.join(args.mc_dir, "assets", "indexes", asset_id + ".json")
-            failed += run_stage("asset-index", [{
-                "url": mirror_url(aid["url"], args.mirror, args.base_url),
-                "dest": ipath, "sha1": aid.get("sha1", ""), "label": asset_id + ".json"}], 1)
-            with open(ipath, "r", encoding="utf-8") as f:
-                idx = json.load(f)
-            objs = []
-            for name, meta in idx.get("objects", {}).items():
-                h = meta.get("hash", "")
-                if len(h) < 3:
-                    continue
-                objs.append({"url": mirror_url(ASSET_CDN + "/" + h[:2] + "/" + h,
-                                               args.mirror, args.base_url),
-                             "dest": os.path.join(args.mc_dir, "assets", "objects", h[:2], h),
-                             "sha1": h, "label": name})
-            if args.limit:
-                objs = objs[:args.limit]
-            if args.verify:
-                failed += verify_stage("verify", objs, args.jobs, stats)
-            else:
-                failed += run_stage("assets", objs, args.jobs)
-
-        if "runtime" in comps and args.arch != "aarch64" and not args.verify:
-            component = vj.get("javaVersion", {}).get("component", "java-runtime-epsilon")
-            allj = json.loads(get(mirror_url(RUNTIME_ALL, args.mirror, args.base_url)))
-            entries = allj.get("linux", {}).get(component, [])
-            if entries:
-                mf = json.loads(get(mirror_url(entries[0]["manifest"]["url"],
-                                               args.mirror, args.base_url)))
-                rt_root = os.path.join(args.mc_dir, "runtime", component)
-                rtasks = []
-                for rel, meta in mf.get("files", {}).items():
-                    t = meta.get("type", "file")
-                    if t == "directory":
-                        os.makedirs(os.path.join(rt_root, rel), exist_ok=True)
-                        continue
-                    raw = meta.get("downloads", {}).get("raw")
-                    if not raw:
-                        continue
-                    rtasks.append({"url": mirror_url(raw["url"], args.mirror, args.base_url),
-                                   "dest": os.path.join(rt_root, rel),
-                                   "sha1": raw.get("sha1", ""),
-                                   "mode": 0o755 if meta.get("executable") else 0o644,
-                                   "label": rel})
-                if args.limit:
-                    rtasks = rtasks[:args.limit]
-                failed += run_stage("runtime", rtasks, args.jobs)
-
-        if args.verify:
-            emit("summary", 0, 0, "检查 %d 项，异常 %d，补下失败 %d"
-                 % (stats["checked"], stats["bad"], failed))
-        print(json.dumps({"stage": "done", "ok": failed == 0, "failed": failed},
-                         ensure_ascii=False), flush=True)
-        return 0 if failed == 0 else 1
-    except Exception as exc:
-        emit("error", 0, 0, "下载失败", False, str(exc))
-        return 3
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-)PY";
 
 // ------------------------------------------------------------ 显示后端选择 ----
 static const char* kRepoUrl = "https://github.com/zzxwithbus19/one-263-linux";
@@ -880,7 +575,6 @@ public:
         }
         defaultPalette_ = qApp->palette();
         requiredJava_ = core::requiredJavaMajor(layout_, cfg_.version);
-        saveDownloaderScript();
         applyPalette();   // 先定调色板：buildUi 里的内联颜色会跟着它走
         buildUi();
         applyStyleSheet();
@@ -1002,23 +696,12 @@ protected:
         collectUiToConfig();
         std::string err;
         cfg_.save(layout_.configFile, err);
-        if (downloadProc_ && downloadProc_->state() != QProcess::NotRunning) downloadProc_->terminate();
+        if (downloadCancel_) downloadCancel_->store(true);
         if (launchProc_ && launchProc_->state() != QProcess::NotRunning) launchProc_->terminate();
         QMainWindow::closeEvent(ev);
     }
 
 private:
-    void saveDownloaderScript() {
-        std::string err;
-        scriptPath_ = layout_.configDir / "mc263_downloader.py";
-        mc263::fsx::writeText(scriptPath_, kDownloaderPy, err);
-        ::chmod(scriptPath_.c_str(), 0755);
-    }
-    static QString pythonBin() {
-        QString p = QString::fromLocal8Bit(qgetenv("MC263_PYTHON"));
-        return p.isEmpty() ? QStringLiteral("python3") : p;
-    }
-
     // 圆角窗口：paintEvent 自己画一层圆角背景，QSS 里 QMainWindow 是透明的。
     // 只在没有系统装饰时启用（niri 的 prefer-no-csd / QT_WAYLAND_DISABLE_WINDOWDECORATION=1）：
     // 有 CSD/SSD 时圆角只作用在客户端区域，反而难看，保持系统外观。
@@ -1451,7 +1134,11 @@ private:
         v->addWidget(downloadLog_, 1);
         connect(downloadBtn_, &QPushButton::clicked, this, &LauncherWindow::startDownload);
         connect(cancelBtn_, &QPushButton::clicked, this, [this] {
-            if (downloadProc_) downloadProc_->terminate();
+            if (downloadCancel_) {
+                downloadCancel_->store(true);
+                downloadLabel_->setText("正在取消...");
+                cancelBtn_->setEnabled(false);
+            }
         });
         connect(clearCacheBtn_, &QPushButton::clicked, this, &LauncherWindow::clearDownloadCache);
         connect(verifyBtn, &QPushButton::clicked, this, &LauncherWindow::verifyInstalled);
@@ -3771,48 +3458,39 @@ private:
     }
     // 取 Mojang 的 latest.snapshot（预览版），填进版本框，让用户自己点开始下载
     void fetchLatestSnapshot() {
-        auto* p = new QProcess(this);
-        p->setProgram(pythonBin());
-        p->setArguments({QString::fromStdString(scriptPath_.string()), "--latest-snapshot",
-                         "--mc-dir", QString::fromStdString(layout_.gameDir.string())});
+        collectUiToConfig();
+        const core::Layout l = layout_;
+        const std::string mirror = cfg_.mirror;
         QPointer<LauncherWindow> guard(this);
-        connect(p, &QProcess::finished, this, [this, guard, p](int, QProcess::ExitStatus) {
-            const QJsonDocument doc = QJsonDocument::fromJson(p->readAllStandardOutput());
-            const QString id = doc.isObject() ? doc.object().value("version").toString() : QString();
-            if (guard) {
-                if (id.isEmpty()) {
-                    downloadLog_->appendPlainText(
-                        "拿不到最新预览版:" + QString::fromUtf8(p->readAllStandardError()).trimmed());
+        std::thread([guard, l, mirror] {
+            std::string err;
+            const std::string id = core::latestSnapshot(mirror, l.configDir / "cache", err);
+            QMetaObject::invokeMethod(qApp, [guard, id, err] {
+                if (!guard) return;
+                if (id.empty()) {
+                    guard->downloadLog_->appendPlainText(
+                        "拿不到最新预览版: " + QString::fromStdString(err));
                 } else {
-                    downloadVersion_->setCurrentText(id);
-                    downloadLog_->appendPlainText("最新预览版: " + id + " ");
+                    guard->downloadVersion_->setCurrentText(QString::fromStdString(id));
+                    guard->downloadLog_->appendPlainText("最新预览版: " + QString::fromStdString(id));
                 }
-            }
-            p->deleteLater();
-        });
-        p->start();
+            }, Qt::QueuedConnection);
+        }).detach();
     }
 
     void refreshOnlineVersions() {
-        auto* p = new QProcess(this);
-        p->setProgram(pythonBin());
-        QStringList listArgs{QString::fromStdString(scriptPath_.string()), "--list-versions",
-                             "--mc-dir", QString::fromStdString(layout_.gameDir.string())};
-        if (snapCheck_ && snapCheck_->isChecked()) listArgs << "--snapshots";
-        p->setArguments(listArgs);
+        collectUiToConfig();
+        const core::Layout l = layout_;
+        const std::string mirror = cfg_.mirror;
+        const bool snapshots = snapCheck_ && snapCheck_->isChecked();
         QPointer<LauncherWindow> guard(this);
-        connect(p, &QProcess::finished, this, [this, guard, p](int, QProcess::ExitStatus) {
-            QByteArray out = p->readAllStandardOutput();
-            std::vector<std::string> vers;
-            QJsonDocument doc = QJsonDocument::fromJson(out);
-            if (doc.isObject()) {
-                QJsonArray arr = doc.object().value("versions").toArray();
-                for (const auto& v : arr) vers.push_back(v.toString().toStdString());
-            }
-            if (guard) applyOnlineVersions(vers, vers.empty() ? QString::fromUtf8(p->readAllStandardError()) : QString());
-            p->deleteLater();
-        });
-        p->start();
+        std::thread([guard, l, mirror, snapshots] {
+            std::string err;
+            auto vers = core::onlineVersions(mirror, l.configDir / "cache", snapshots, 0, err);
+            QMetaObject::invokeMethod(qApp, [guard, vers, err] {
+                if (guard) guard->applyOnlineVersions(vers, QString::fromStdString(err));
+            }, Qt::QueuedConnection);
+        }).detach();
     }
 
     void refreshJava() {
@@ -3876,126 +3554,150 @@ private:
     }
 
     void startDownload() {
-        if (downloadProc_ && downloadProc_->state() != QProcess::NotRunning) {
+        if (downloadRunning_) {
             QMessageBox::information(this, "正在下载", "下载任务已经在运行");
             return;
         }
         collectUiToConfig();
         std::string err;
         cfg_.save(layout_.configFile, err);
-        saveDownloaderScript();
+        core::Config job = cfg_;
+        job.version = downloadVersion_->currentText().toStdString();
         downloadLog_->clear();
-        downloadLog_->appendPlainText("启动下载中 " + QString::number(cfg_.jobs) + ") ......");
-        QStringList comps;
-        for (const auto& s : cfg_.components) comps << QString::fromStdString(s);
-        downloadProc_ = new QProcess(this);
-        downloadProc_->setProcessChannelMode(QProcess::SeparateChannels);
-        downloadProc_->setProgram(pythonBin());
-        downloadProc_->setArguments({QString::fromStdString(scriptPath_.string()),
-                                     "--mc-dir", QString::fromStdString(layout_.gameDir.string()),
-                                     "--version", downloadVersion_->currentText(),
-                                     "--mirror", QString::fromStdString(cfg_.mirror),
-                                     "--jobs", QString::number(cfg_.jobs),
-                                     "--arch", QString::fromStdString(cfg_.arch),
-                                     "--components", comps.join(',')});
-        connect(downloadProc_, &QProcess::readyReadStandardOutput, this, &LauncherWindow::onDownloadOutput);
-        connect(downloadProc_, &QProcess::readyReadStandardError, this, [this] {
-            downloadLog_->appendPlainText(QString::fromUtf8(downloadProc_->readAllStandardError()).trimmed());
-        });
-        connect(downloadProc_, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
-            downloadBtn_->setEnabled(true);
-            cancelBtn_->setEnabled(false);
-            downloadLabel_->setText(code == 0 ? "下载完成" : "下载结束(退出码 " + QString::number(code) + ")");
-            if (code == 0) {
-                refreshLocalVersions();
-                refreshJava();  // 运行时下载完可能就有 Java 25 了，重新过一遍闸门
-            }
-        });
-        downloadBtn_->setEnabled(false);
-        cancelBtn_->setEnabled(true);
-        downloadProc_->start();
+        downloadLog_->appendPlainText("启动下载中（" + QString::number(job.jobs) + " 线程）......");
+        startDownloadJob(job, {}, false);
     }
 
     // 校验已装文件：只信本地 <版本>.json，缺/坏的文件由下载器补回，不重新拉清单
     void verifyInstalled() {
-        if (downloadProc_ && downloadProc_->state() != QProcess::NotRunning) {
+        if (downloadRunning_) {
             QMessageBox::information(this, "正在运行", "下载或校验任务已经在运行");
             return;
         }
         collectUiToConfig();
         std::string err;
         cfg_.save(layout_.configFile, err);
-        saveDownloaderScript();
-        const std::string ver = downloadVersion_->currentText().toStdString();
-        downloadLog_->clear();
+        const std::string ver = core::baseGameVersion(downloadVersion_->currentText().toStdString());
         if (!mc263::fsx::isFile(layout_.versionJson(ver))) {
+            downloadLog_->clear();
             downloadLog_->appendPlainText("本地没有 " + QString::fromStdString(ver) +
                                           " 的版本 json，先下载这个版本再校验。");
             downloadLabel_->setText("这个版本还没下载过");
             return;
         }
-        downloadLog_->appendPlainText("开始校验 " + QString::fromStdString(ver) +
-                                      "你在打什么主意");
-        downloadProc_ = new QProcess(this);
-        downloadProc_->setProcessChannelMode(QProcess::SeparateChannels);
-        downloadProc_->setProgram(pythonBin());
-        downloadProc_->setArguments({QString::fromStdString(scriptPath_.string()),
-                                     "--mc-dir", QString::fromStdString(layout_.gameDir.string()),
-                                     "--version", QString::fromStdString(ver),
-                                     "--mirror", QString::fromStdString(cfg_.mirror),
-                                     "--jobs", QString::number(cfg_.jobs),
-                                     "--arch", QString::fromStdString(cfg_.arch),
-                                     "--components", "jar,libraries,assets",
-                                     "--verify"});
-        connect(downloadProc_, &QProcess::readyReadStandardOutput, this, &LauncherWindow::onDownloadOutput);
-        connect(downloadProc_, &QProcess::readyReadStandardError, this, [this] {
-            downloadLog_->appendPlainText(QString::fromUtf8(downloadProc_->readAllStandardError()).trimmed());
-        });
-        connect(downloadProc_, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
-            downloadBtn_->setEnabled(true);
-            cancelBtn_->setEnabled(false);
-            downloadLabel_->setText(code == 0 ? "校验完成"
-                                              : "校验结束(退出码 " + QString::number(code) + ")");
-            if (code == 0) refreshLocalVersions();
-        });
-        downloadBtn_->setEnabled(false);
-        cancelBtn_->setEnabled(true);
-        downloadProc_->start();
+        core::Config job = cfg_;
+        job.version = ver;
+        job.components = {"jar", "libraries", "assets"};
+        core::DownloadOptions opt;
+        opt.mode = core::DownloadMode::Verify;
+        downloadLog_->clear();
+        downloadLog_->appendPlainText("开始校验 " + QString::fromStdString(ver) + " ...");
+        startDownloadJob(job, opt, true);
     }
 
-    void onDownloadOutput() {
-        buffer_ += QString::fromUtf8(downloadProc_->readAllStandardOutput());
-        int idx;
-        while ((idx = buffer_.indexOf('\n')) >= 0) {
-            QString line = buffer_.left(idx).trimmed();
-            buffer_.remove(0, idx + 1);
-            if (line.isEmpty()) continue;
-            QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8());
-            if (!doc.isObject()) { downloadLog_->appendPlainText(line); continue; }
-            QJsonObject o = doc.object();
-            QString stage = o.value("stage").toString();
-            int done = o.value("done").toInt(), total = o.value("total").toInt();
-            if (stage == "done") {
-                downloadLog_->appendPlainText(o.value("ok").toBool() ? "全部完成" : "部分文件失败");
-                continue;
+    // worker 线程只通过 queued 回调碰 UI；generation 用来丢弃取消后迟到的旧任务事件。
+    void startDownloadJob(core::Config job, core::DownloadOptions opt, bool verifyMode) {
+        const quint64 gen = ++downloadGeneration_;
+        auto token = std::make_shared<std::atomic_bool>(false);
+        downloadCancel_ = token;
+        downloadRunning_ = true;
+        downloadBtn_->setEnabled(false);
+        cancelBtn_->setEnabled(true);
+        downloadBar_->setRange(0, 0);
+        downloadLabel_->setText(verifyMode ? "校验中..." : "下载中...");
+        const core::Layout l = layout_;
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, l, job, opt, token, gen, verifyMode] {
+            struct Throttle {
+                std::chrono::steady_clock::time_point last{};
+                std::string stage;
+            };
+            auto throttle = std::make_shared<Throttle>();
+            auto progress = [guard, gen, throttle](const core::DownloadProgress& p) {
+                const auto now = std::chrono::steady_clock::now();
+                const bool force = !p.ok || p.done == p.total || p.stage == "summary" ||
+                                   p.stage == "done" || p.stage != throttle->stage;
+                if (!force && now - throttle->last < std::chrono::milliseconds(100)) return;
+                throttle->last = now;
+                throttle->stage = p.stage;
+                QMetaObject::invokeMethod(qApp, [guard, gen, p] {
+                    if (guard && guard->downloadGeneration_ == gen)
+                        guard->applyDownloadProgress(p);
+                }, Qt::QueuedConnection);
+            };
+            core::DownloadResult res;
+            try {
+                res = core::downloadAll(l, job, progress, opt,
+                    [token] { return token->load(); });
+            } catch (const std::exception& ex) {
+                res.error = std::string("下载线程异常: ") + ex.what();
+            } catch (...) {
+                res.error = "下载线程未知异常";
             }
-            if (stage == "summary") {
-                const QString text = o.value("label").toString();
-                downloadLog_->appendPlainText(text);
-                downloadLabel_->setText(text);
-                continue;
-            }
-            if (total > 0) {
-                downloadBar_->setRange(0, total);
-                downloadBar_->setValue(done);
-            }
-            downloadLabel_->setText(stage + "  " + QString::number(done) + "/" + QString::number(total) +
-                                    "  " + o.value("label").toString());
-            if (done % 50 == 0 || !o.value("ok").toBool())
-                downloadLog_->appendPlainText(stage + " " + QString::number(done) + "/" +
-                                              QString::number(total) + " " + o.value("label").toString() +
-                                              (o.value("ok").toBool() ? "" : " 失败: " + o.value("note").toString()));
+            QMetaObject::invokeMethod(qApp, [guard, res, gen, verifyMode] {
+                if (guard) guard->finishDownloadJob(res, verifyMode, gen);
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    void applyDownloadProgress(const core::DownloadProgress& p) {
+        if (p.stage == "summary") {
+            const QString text = QString::fromStdString(p.label);
+            downloadLog_->appendPlainText(text);
+            downloadLabel_->setText(text);
+            return;
         }
+        if (p.stage == "done") {
+            downloadLog_->appendPlainText(p.ok ? "全部完成" : "部分文件失败");
+            return;
+        }
+        if (p.total > 0) {
+            downloadBar_->setRange(0, static_cast<int>(p.total));
+            downloadBar_->setValue(static_cast<int>(p.done));
+        }
+        const QString label = QString::fromStdString(p.label);
+        const QString note = QString::fromStdString(p.note);
+        downloadLabel_->setText(QString::fromStdString(p.stage) + "  " +
+                                QString::number(p.done) + "/" + QString::number(p.total) +
+                                "  " + label);
+        if (p.done % 50 == 0 || !p.ok)
+            downloadLog_->appendPlainText(QString::fromStdString(p.stage) + " " +
+                                          QString::number(p.done) + "/" + QString::number(p.total) +
+                                          " " + label + (p.ok ? "" : " 失败: " + note));
+    }
+
+    void finishDownloadJob(const core::DownloadResult& r, bool verifyMode, quint64 gen) {
+        if (gen != downloadGeneration_) return;
+        downloadRunning_ = false;
+        if (downloadCancel_) downloadCancel_.reset();
+        downloadBtn_->setEnabled(true);
+        cancelBtn_->setEnabled(false);
+        downloadBar_->setRange(0, 1);
+        downloadBar_->setValue(1);
+        if (r.cancelled) {
+            downloadLabel_->setText("已取消");
+            downloadLog_->appendPlainText("任务已取消，未完成的 .part 文件已清理。");
+            return;
+        }
+        if (!r.ok) {
+            downloadLabel_->setText(verifyMode ? "校验结束" : "下载结束");
+            downloadLog_->appendPlainText("失败: " + QString::fromStdString(r.error) +
+                                          "（失败文件 " + QString::number(r.failed) + " 个）");
+            return;
+        }
+        if (verifyMode) {
+            downloadLabel_->setText(r.bad > 0
+                                        ? "校验完成，修复 " + QString::number(r.bad) + " 项"
+                                        : "校验完成，全部正常");
+            downloadLog_->appendPlainText(QString("校验完成：检查 %1 项，异常 %2，补下 %3，缓存 %4")
+                                              .arg(r.checked).arg(r.bad).arg(r.downloaded).arg(r.cached));
+        } else {
+            downloadLabel_->setText("下载完成");
+            downloadLog_->appendPlainText(QString("下载完成：新下载 %1，缓存命中 %2")
+                                              .arg(r.downloaded).arg(r.cached));
+        }
+        refreshLocalVersions();
+        if (!verifyMode) refreshJava();  // 运行时下载完可能就有 Java 25 了，重新过一遍闸门
     }
 
     // 崩溃摘要预览：复制走剪贴板，完整内容留在 note/ 里
@@ -4180,10 +3882,10 @@ private:
     std::filesystem::path dataRoot_;
     core::Config cfg_;
     std::vector<core::JavaInfo> javas_;
-    std::filesystem::path scriptPath_;
     int maxMemoryMb_ = 8192;
-    QString buffer_;
-    QProcess* downloadProc_ = nullptr;
+    bool downloadRunning_ = false;
+    quint64 downloadGeneration_ = 0;
+    std::shared_ptr<std::atomic_bool> downloadCancel_;
     QProcess* launchProc_ = nullptr;
     QTabBar* nav_ = nullptr;
     QPointer<QWidget> fadeOverlay_;
