@@ -216,6 +216,8 @@ struct Config {
     bool fabric = false;
     std::string profile;  // 加载器 profile 名（如 fabric），空 = 原版
     std::string language;  // 游戏语言（en_us / zh_cn…）；空 = 跟随系统
+    // 上次由启动器写进 options.txt 的语言（用来判断设置有没有变；空 = 还没写过）
+    std::string appliedLanguage;
     // 配色来源：auto = 检测到 Noctalia 色板就用它，否则跟随系统；system = 只用系统调色板；
     // noctalia = 强制读 Noctalia 的 Material You 色板（读不到就退回系统）
     std::string themeSource = "auto";
@@ -237,6 +239,7 @@ struct Config {
         j.set("fabric", JValue::booleanV(fabric));
         j.set("profile", JValue::stringV(profile));
         j.set("language", JValue::stringV(language));
+        j.set("appliedLanguage", JValue::stringV(appliedLanguage));
         j.set("themeSource", JValue::stringV(themeSource));
         JValue a = JValue::arrayV();
         for (const auto& s : extraJvmArgs) a.push(JValue::stringV(s));
@@ -259,7 +262,8 @@ struct Config {
         const JValue* mi = j.find("minMemoryMb"); if (mi) c.minMemoryMb = static_cast<int>(mi->number(0));
         const JValue* jobs = j.find("jobs"); if (jobs) c.jobs = static_cast<int>(jobs->number(10));
         const JValue* f = j.find("fabric"); if (f) c.fabric = f->boolean(false);
-        s("profile", c.profile); s("language", c.language); s("themeSource", c.themeSource);
+        s("profile", c.profile); s("language", c.language); s("appliedLanguage", c.appliedLanguage);
+        s("themeSource", c.themeSource);
         if (c.themeSource != "auto" && c.themeSource != "system" && c.themeSource != "noctalia")
             c.themeSource = "auto";
         const JValue* a = j.find("extraJvmArgs");
@@ -1551,6 +1555,41 @@ inline fs::path collectCrashReport(const Layout& l, const std::string& versionTa
         }
     }
     return outPath;
+}
+
+
+// ------------------------------------------------------------ 游戏语言 ----
+inline std::string effectiveGameLanguage(const Config& c) {
+    return c.language.empty() ? detectSystemLanguage() : c.language;
+}
+
+// Minecraft 以 options.txt 里的 lang: 为准，--language 只在没有 options.txt 时起作用。
+// 所以要把启动器选的语言写进当前版本目录的 options.txt；其他行原样保留。
+inline bool applyGameLanguage(const fs::path& isolated, const std::string& lang, std::string& err) {
+    if (lang.empty()) { err = "语言为空"; return false; }
+    if (!fsx::makeDirs(isolated, err)) return false;
+    const fs::path f = isolated / "options.txt";
+    std::vector<std::string> lines;
+    std::error_code ec;
+    if (fs::is_regular_file(f, ec)) {
+        std::ifstream in(f);
+        if (!in) { err = "读不了 " + f.string(); return false; }
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(line);
+        }
+    }
+    bool replaced = false;
+    for (auto& l : lines) {
+        if (l.rfind("lang:", 0) == 0) { l = "lang:" + lang; replaced = true; }
+    }
+    if (!replaced) lines.push_back("lang:" + lang);
+    std::ofstream out(f, std::ios::trunc);
+    if (!out) { err = "写不了 " + f.string(); return false; }
+    for (const auto& l : lines) out << l << '\n';
+    err.clear();
+    return true;
 }
 
 // ------------------------------------------------------ 主题来源（Noctalia）----

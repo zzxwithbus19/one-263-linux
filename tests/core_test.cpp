@@ -474,6 +474,31 @@ broken = "not-a-color"
               "版本目录：两个都没有时返回原名（报错能指到具体文件）");
     }
 
+    // 15) 游戏语言写进 options.txt（Minecraft 以它为准）
+    {
+        std::string e;
+        fs::path gd = root / "langtest";
+        fs::create_directories(gd, ec);
+        { std::ofstream o(gd / "options.txt"); o << "fov:70\nlang:en_us\nfoo:1\n"; }
+        check(applyGameLanguage(gd, "zh_cn", e), "语言：写入 options.txt 成功");
+        std::string text = fsx::readText(gd / "options.txt", e);
+        check(text.find("lang:zh_cn") != std::string::npos, "语言：lang 行被改成 zh_cn");
+        check(text.find("fov:70") != std::string::npos && text.find("foo:1") != std::string::npos,
+              "语言：其他设置行原样保留");
+        check(text.find("lang:en_us") == std::string::npos, "语言：不再有 en_us");
+
+        fs::path fresh = root / "langfresh";
+        check(applyGameLanguage(fresh, "ja_jp", e), "语言：没有 options.txt 时直接创建");
+        text = fsx::readText(fresh / "options.txt", e);
+        check(text.find("lang:ja_jp") != std::string::npos, "语言：新文件里是 ja_jp");
+
+        Config lc;
+        lc.language = "en_us";
+        check(effectiveGameLanguage(lc) == "en_us", "语言：显式设置优先");
+        lc.language.clear();
+        check(effectiveGameLanguage(lc) == detectSystemLanguage(), "语言：空则跟随系统");
+    }
+
     std::cout << "core: " << passed << " 项通过\n";
     return 0;
 }

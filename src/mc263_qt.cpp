@@ -3296,6 +3296,20 @@ private:
         } else {
             for (const auto& j : javas_) if (j.valid) { java = j; break; }
         }
+        // 游戏以 options.txt 的 lang: 为准（--language 只是初始默认），
+        // 所以启动器设置变了就把它写进去；设置没变则不动，尊重游戏里改过的语言。
+        const std::string wantLang = core::effectiveGameLanguage(cfg_);
+        if (wantLang != cfg_.appliedLanguage) {
+            std::string lerr;
+            if (core::applyGameLanguage(core::isolatedGameDir(layout_, cfg_), wantLang, lerr)) {
+                cfg_.appliedLanguage = wantLang;
+                std::string serr;
+                cfg_.save(layout_.configFile, serr);
+                launchLog_->appendPlainText("游戏语言 → " + QString::fromStdString(wantLang));
+            } else {
+                launchLog_->appendPlainText("写 options.txt 语言失败：" + QString::fromStdString(lerr));
+            }
+        }
         if (core::effectiveVersionId(layout_, cfg_) != core::versionDirName(cfg_)) {
             launchLog_->appendPlainText(
                 QString("找不到 %1，本次改用原版 %2 启动")
