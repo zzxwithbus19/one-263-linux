@@ -2633,16 +2633,16 @@ private:
         // 本地 README：蓝色可点，用系统默认程序打开（Wayland 下走 xdg-open / portal）
         const QString readme = findLocalReadme(layout_);
         auto* docRow = new QHBoxLayout();
-        docRow->addWidget(new QLabel("说明文档：", w));
+        docRow->addWidget(new QLabel("README", w));
         if (readme.isEmpty()) {
-            auto* miss = new QLabel("未找到 说明文档", w);
+            auto* miss = new QLabel("未找到 README", w);
             miss->setStyleSheet("color:" + (dark ? QStringLiteral("#9aa4b2")
                                                   : QStringLiteral("#5b6472")) + ";");
             docRow->addWidget(miss, 1);
         } else {
             auto* docLink = new QLabel(w);
             docLink->setTextFormat(Qt::RichText);
-            docLink->setText(QStringLiteral("<a href=\"%1\" style=\"color:%2;\">README.md（本地）</a>")
+            docLink->setText(QStringLiteral("<a href=\"%1\" style=\"color:%2;\">README</a>")
                                  .arg(QUrl::fromLocalFile(readme).toString(), linkColor));
             docLink->setOpenExternalLinks(true);
             docLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
@@ -2662,7 +2662,7 @@ private:
         link->setOpenExternalLinks(true);
         link->setTextInteractionFlags(Qt::TextBrowserInteraction);
         link->setCursor(Qt::PointingHandCursor);
-        link->setToolTip("点击用默认浏览器打开 GitHub 仓库，也可以选中后复制");
+        link->setToolTip("你看什么");
         repoRow->addWidget(new QLabel("仓库：", w));
         repoRow->addWidget(link, 1);
         v->addLayout(repoRow);
@@ -2670,8 +2670,8 @@ private:
         // 实际生效的显示后端（Wayland 原生 / XWayland / offscreen），方便排查
         const QString plat = QGuiApplication::platformName();
         QString platNote = plat;
-        if (plat.startsWith("wayland")) platNote += "原生 Wayland";
-        else if (plat == "xcb") platNote += "X11 / XWayland 转发";
+        if (plat.startsWith("Wayland")) platNote += "";
+        else if (plat == "xcb") platNote += "X11 / XWayland";
         auto* platLabel = new QLabel("显示后端：" + platNote + " * Qt " +
                                          QString::fromLatin1(qVersion()), w);
         platLabel->setStyleSheet("color:" +
@@ -2737,7 +2737,7 @@ private:
         if (autoMode) { memWarn_->hide(); return; }
         const bool dark = palette().color(QPalette::Window).lightness() < 128;
         if (avail && static_cast<uint64_t>(want) > avail) {
-            memWarn_->setText(QString("注意：超出当前可用内存 %1(仅可用 %2),启动后可能被系统 OOM 杀掉")
+            memWarn_->setText(QString("注意：超出当前可用内存 %1(仅可用 %2)")
                                   .arg(fmtMem(static_cast<uint64_t>(want) - avail), fmtMem(avail)));
             memWarn_->setStyleSheet(QString("color:%1;").arg(dark ? "#f87171" : "#b91c1c"));
             memWarn_->show();
@@ -3005,7 +3005,7 @@ private:
                         "拿不到最新预览版:" + QString::fromUtf8(p->readAllStandardError()).trimmed());
                 } else {
                     downloadVersion_->setCurrentText(id);
-                    downloadLog_->appendPlainText("最新预览版: " + id + " ( 点'开始下载'拉到本地 ) ");
+                    downloadLog_->appendPlainText("最新预览版: " + id + " ");
                 }
             }
             p->deleteLater();
@@ -3105,7 +3105,7 @@ private:
         cfg_.save(layout_.configFile, err);
         saveDownloaderScript();
         downloadLog_->clear();
-        downloadLog_->appendPlainText("启动 python3 下载器 (多线程并发 " + QString::number(cfg_.jobs) + ") ......");
+        downloadLog_->appendPlainText("启动下载中 " + QString::number(cfg_.jobs) + ") ......");
         QStringList comps;
         for (const auto& s : cfg_.components) comps << QString::fromStdString(s);
         downloadProc_ = new QProcess(this);
@@ -3155,7 +3155,7 @@ private:
             return;
         }
         downloadLog_->appendPlainText("开始校验 " + QString::fromStdString(ver) +
-                                      "：按 SHA1 核对 jar / libraries / assets，只补缺失与损坏的文件");
+                                      "你在打什么主意");
         downloadProc_ = new QProcess(this);
         downloadProc_->setProcessChannelMode(QProcess::SeparateChannels);
         downloadProc_->setProgram(pythonBin());
