@@ -6,6 +6,7 @@
 #include "fs_util.hpp"
 #include "mini_json.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <set>
@@ -47,6 +48,7 @@ struct Version {
     std::string projectId;   // /version_file 查询时会带回来，更新检查要用
     std::string name;
     std::string number;
+    std::string versionType;  // release / beta / alpha
     std::vector<std::string> gameVersions;
     std::vector<std::string> loaders;
     std::vector<File> files;
@@ -107,6 +109,7 @@ inline Version parseVersionObject(const JValue& v) {
     x.projectId = field(v, "project_id");
     x.name = field(v, "name");
     x.number = field(v, "version_number");
+    x.versionType = field(v, "version_type");
     if (const JValue* gv = v.find("game_versions"); gv && gv->isArray())
         for (const JValue& s : gv->array()) if (s.isString()) x.gameVersions.push_back(s.str());
     if (const JValue* ld = v.find("loaders"); ld && ld->isArray())
@@ -157,9 +160,15 @@ inline const File* primaryFile(const Version& v) {
 
 inline bool search(const std::string& query, const std::string& loader, const std::string& gameVersion,
                    const std::string& sort, const fs::path& cacheDir,
-                   std::vector<Hit>& out, std::string& err) {
-    std::string facets = "[[\"project_type:mod\"]";
-    if (!loader.empty()) facets += ",[\"categories:" + loader + "\"]";
+                   std::vector<Hit>& out, std::string& err,
+                   const std::string& projectType = "mod") {
+    std::string facets = "[[\"project_type:" + projectType + "\"]";
+    // 资源包 / 光影没有加载器分类；只有 Mod 才加 categories 过滤
+    if (projectType == "mod") {
+        // Quilt 强兼容 Fabric：选 Quilt 时把 fabric 类目也带上（内层数组 = OR）
+        if (loader == "quilt") facets += ",[\"categories:quilt\",\"categories:fabric\"]";
+        else if (!loader.empty()) facets += ",[\"categories:" + loader + "\"]";
+    }
     if (!gameVersion.empty()) facets += ",[\"versions:" + gameVersion + "\"]";
     facets += "]";
     const std::string index = sort.empty() ? "downloads" : sort;
@@ -174,7 +183,12 @@ inline bool versions(const std::string& project, const std::string& loader, cons
                      const fs::path& cacheDir, std::vector<Version>& out, std::string& err) {
     std::string url = "https://api.modrinth.com/v2/project/" + urlEncode(project) + "/version";
     std::string sep = "?";
-    if (!loader.empty()) { url += sep + "loaders=" + urlEncode("[\"" + loader + "\"]"); sep = "&"; }
+    if (!loader.empty()) {
+        const std::string arr = loader == "quilt" ? "[\"quilt\",\"fabric\"]"
+                                                  : "[\"" + loader + "\"]";
+        url += sep + "loaders=" + urlEncode(arr);
+        sep = "&";
+    }
     if (!gameVersion.empty()) url += sep + "game_versions=" + urlEncode("[\"" + gameVersion + "\"]");
     std::string text;
     if (!mc263::dl::fetchText(url, "", cacheDir, 25, text, err)) return false;
@@ -289,7 +303,11 @@ inline bool resolveDependencies(const Version& root, const std::string& loader,
                 std::vector<Version> list;
                 std::string lerr;
                 if (versions(d.projectId, loader, gameVersion, cacheDir, list, lerr) && !list.empty()) {
-                    v = list.front();
+                    // 前置优先装正式版（Sodium 一类附加 Mod 对 Beta 的支持不一定齐全）
+                    const auto rel = std::find_if(list.begin(), list.end(), [](const Version& x) {
+                        return x.versionType.empty() || x.versionType == "release";
+                    });
+                    v = rel != list.end() ? *rel : list.front();
                     got = true;
                 } else if (verr.empty()) {
                     verr = lerr;

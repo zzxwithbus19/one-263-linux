@@ -5,6 +5,9 @@
 *.rpm
 *.tmp-*
 
+# 内部资料（交接文档、COPR 流程、对话记录）：只留在本地
+docs/
+
 # 构建产物与运行期数据（工具已全部上移到仓库根，都限制在项目沙箱内）
 build/
 dist/
@@ -16,8 +19,6 @@ runtime-data/
 minecraft/
 __pycache__/
 *.pyc
-# 内部资料（交接文档、COPR 流程、对话记录）：只留在本地
-docs/
 .vscode/
 *.code-workspace
 # 编译数据库：跟编译器版本和本机路径绑定，不进仓库

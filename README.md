@@ -5,11 +5,10 @@
 Wayland 原生运行。
 
 ```
-mc263-qt                 ← 唯一可执行文件（约 530 KB）
+mc263-qt                 ← 唯一可执行文件（约 1.2 MB）
 minecraft/               ← 游戏目录（首次运行自动建，可在设置里改）
 .mc263/
-├── config.json          版本 / 内存 / Java / 镜像 / 组件（改完即存）
-└── mc263_downloader.py  内嵌 python3 下载脚本（运行时释放）
+└── config.json          版本 / 内存 / Java / 镜像 / 组件（改完即存）
 ```
 
 >安装目录放 在`~/.local/share/mc263/`。
@@ -38,12 +37,12 @@ install.sh --tag pre非生产  # 装指定 tag（pre-release 也支持）
 install.sh --uninstall    # 卸载（pacman / deb / rpm / ELF 都会处理）
 ```
 
-### 1.2 免安装 ELF（约1M）
+### 1.2 免安装 ELF（约 1.2 MB）
 
 `mc263-qt-26.3-x86_64` 是单独一个二进制，需要运行时前置
 
 ```zsh
-sudo pacman -S --needed qt6-base qt6-wayland  //for example
+sudo pacman -S --needed qt6-base qt6-wayland curl  //for example
 ./mc263-qt-26.3-x86_64
 ```
 
@@ -66,14 +65,14 @@ mc26-one/
 ├── install.sh                  一键安装（pacman / deb / rpm / ELF 自动选择 + 摘要校验）
 ├── include/
 │   ├── launcher_core.hpp       布局 / 配置 / Java 探测 / 兼容性 / 启动 / meminfo / 版本隔离 / 加载器 / 目录扫描
-│   ├── download.hpp            curl 下载后端 + SHA1 + 并发池（兼容性网络检查用）
+│   ├── download.hpp            curl 下载后端 + SHA1 + 并发池 + 取消/校验探测
 │   ├── modrinth.hpp            Modrinth 搜索 / 版本 / 下载（公开 API，无需 key）
 │   ├── mini_json.hpp           JSON 解析与生成
 │   ├── mini_zip.hpp            ZIP 读取（扫 natives）
 │   ├── safe_path.hpp           路径守卫（黑名单 + 沙箱根 + 符号链接逃逸防护）
 │   └── fs_util.hpp             目录 / 文件 / 环境变量小工具
 ├── src/
-│   └── mc263_qt.cpp            Qt6 主窗口（6 页，内嵌 python3 下载脚本）
+│   └── mc263_qt.cpp            Qt6 主窗口（6 页，进程内 C++ 下载器）
 ├── packaging/
 │   ├── PKGBUILD                Arch 包模板（主线，源码构建）
 │   ├── build-arch.sh           源码包 → PKGBUILD → makepkg → 校验 → 冒烟
@@ -86,8 +85,9 @@ mc26-one/
 │   ├── mc263.desktop           应用菜单项（Exec=mc263-qt）
 │   └── mc263.svg               图标
 └── tests/
-    ├── core_test.cpp           81 项核心单测
-    ├── downloader_test.sh      内嵌下载器 + mock CDN 自测（7 项）
+    ├── core_test.cpp           130 项核心单测
+    ├── downloader_test.cpp     C++ 下载器测试 CLI
+    ├── downloader_test.sh      下载器 + mock CDN 自测（15 项）
     ├── mock_cdn.py             离线模拟 Mojang 下载端点（真实 SHA1）
     └── probe_endpoints.py      真实端点诊断
 ```

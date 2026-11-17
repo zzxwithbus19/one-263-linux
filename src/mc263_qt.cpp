@@ -1,7 +1,7 @@
 // mc263_qt.cpp -- HMCL 式 Qt6 原生启动器（单个 ELF）
 //
-// 形态：[mc263-qt ELF][appDir/minecraft/ 游戏目录][appDir/.mc263/ 配置与内嵌脚本]
-// 下载：内嵌 Python3 脚本（ThreadPoolExecutor 多线程 + SHA1 + JSON 进度），QProcess 异步调用；
+// 形态：[mc263-qt ELF][appDir/minecraft/ 游戏目录][appDir/.mc263/ 配置]
+// 下载：进程内 C++ 下载核心（curl + SHA1 + 并发任务池），后台线程执行；
 // Java 探测与兼容性查验：std::thread 后台执行，QMetaObject::invokeMethod 回主线程刷 UI；
 // 启动：QProcess 异步 exec java，主线程显示日志。全程不阻塞界面。
 //
@@ -16,6 +16,7 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QColor>
 #include <QComboBox>
 #include <QCompleter>
 #include <QDialog>
@@ -34,10 +35,6 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonValue>
 #include <QLabel>
 #include <QLibraryInfo>
 #include <csignal>
@@ -54,6 +51,7 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QProgressBar>
 #include <QVariantAnimation>
 #include <QPushButton>
@@ -62,6 +60,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStandardItemModel>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QStringListModel>
@@ -78,6 +77,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <exception>
+#include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -87,309 +89,6 @@ namespace core = mc263::core;
 
 // 启动器自身崩溃时写的文件。路径在窗口构造里填好，信号处理器只做 open/write。
 static char g_crashLogPath[4096] = {0};
-
-// ---------------------------------------------------------------- 内嵌脚本 ----
-static const char* kDownloaderPy = R"PY(#!/usr/bin/env python3
-"""mc263-qt 内嵌下载器：多线程 + SHA1 校验 + JSON 进度（由 Qt ELF 释放到 .mc263/）"""
-import argparse
-import hashlib
-import json
-import os
-import sys
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
-RUNTIME_ALL = "https://launchermeta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json"
-ASSET_CDN = "https://resources.download.minecraft.net"
-
-MIRRORS = {
-    "https://piston-meta.mojang.com/": "https://bmclapi2.bangbang93.com/",
-    "https://piston-data.mojang.com/": "https://bmclapi2.bangbang93.com/",
-    "https://launchermeta.mojang.com/": "https://bmclapi2.bangbang93.com/",
-    "https://libraries.minecraft.net/": "https://bmclapi2.bangbang93.com/maven/",
-    "https://resources.download.minecraft.net/": "https://bmclapi2.bangbang93.com/assets/",
-}
-
-
-def emit(stage, done, total, label, ok=True, note=""):
-    print(json.dumps({"stage": stage, "done": done, "total": total,
-                      "label": label, "ok": ok, "note": note},
-                     ensure_ascii=False), flush=True)
-
-
-def mirror_url(url, mirror, base):
-    if base:
-        i = url.find("://")
-        p = url.find("/", i + 3) if i >= 0 else -1
-        return base.rstrip("/") + (url[p:] if p >= 0 else "")
-    if mirror == "bmclapi":
-        for a, b in MIRRORS.items():
-            if url.startswith(a):
-                return b + url[len(a):]
-    return url
-
-
-def get(url, timeout=60):
-    req = urllib.request.Request(url, headers={"User-Agent": "mc263-qt/1.0"})
-    # 回环地址（离线自测 / 自建镜像）绕过系统代理，否则代理会返回 502
-    if "127.0.0.1" in url or "localhost" in url:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    else:
-        opener = urllib.request.build_opener()
-    with opener.open(req, timeout=timeout) as r:
-        return r.read()
-
-
-def sha1(data):
-    return hashlib.sha1(data).hexdigest()
-
-
-def fetch_one(task):
-    dest = task["dest"]
-    want = task.get("sha1", "")
-    if want and os.path.isfile(dest):
-        with open(dest, "rb") as f:
-            if sha1(f.read()) == want:
-                return "cached", task
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    data = get(task["url"], 180)
-    if want and sha1(data) != want:
-        raise ValueError("SHA1 校验失败")
-    tmp = dest + ".part"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, dest)
-    os.chmod(dest, task.get("mode", 0o644))
-    return "ok", task
-
-
-def run_stage(stage, tasks, jobs):
-    if not tasks:
-        return 0
-    total = len(tasks)
-    done = failed = 0
-    with ThreadPoolExecutor(max_workers=max(1, min(16, jobs))) as pool:
-        futures = {pool.submit(fetch_one, t): t for t in tasks}
-        for fut in as_completed(futures):
-            done += 1
-            task = futures[fut]
-            try:
-                state, _ = fut.result()
-                emit(stage, done, total, task["label"], True, "cached" if state == "cached" else "")
-            except Exception as exc:
-                failed += 1
-                emit(stage, done, total, task["label"], False, str(exc))
-    return failed
-
-
-def probe_local(task):
-    """只看本地：缺 = missing，SHA1 不符 = bad，其余 ok。"""
-    dest = task["dest"]
-    want = task.get("sha1", "")
-    if not os.path.isfile(dest):
-        return "missing"
-    if want:
-        with open(dest, "rb") as f:
-            if sha1(f.read()) != want:
-                return "bad"
-    return "ok"
-
-
-def verify_stage(stage, tasks, jobs, stats):
-    """先本地比对，只把缺失/损坏的补下来。"""
-    if not tasks:
-        return 0
-    total = len(tasks)
-    broken = []
-    checked = 0
-    with ThreadPoolExecutor(max_workers=max(1, min(16, jobs))) as pool:
-        futures = {pool.submit(probe_local, t): t for t in tasks}
-        for fut in as_completed(futures):
-            checked += 1
-            task = futures[fut]
-            if fut.result() != "ok":
-                broken.append(task)
-            if checked % 200 == 0 or checked == total:
-                emit(stage, checked, total,
-                     "校验 %d/%d，异常 %d" % (checked, total, len(broken)))
-    stats["checked"] += total
-    stats["bad"] += len(broken)
-    if not broken:
-        return 0
-    emit(stage, 0, len(broken), "补下 %d 个文件" % len(broken))
-    return run_stage(stage, broken, jobs)
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mc-dir", required=True)
-    ap.add_argument("--version", default="26.3")
-    ap.add_argument("--mirror", default="official")
-    ap.add_argument("--jobs", type=int, default=10)
-    ap.add_argument("--arch", default="x86_64")
-    ap.add_argument("--components", default="jar,libraries,assets,runtime")
-    ap.add_argument("--base-url", default="")
-    ap.add_argument("--list-versions", action="store_true")
-    ap.add_argument("--snapshots", action="store_true")
-    ap.add_argument("--verify", action="store_true")
-    ap.add_argument("--latest-snapshot", action="store_true")
-    ap.add_argument("--limit", type=int, default=0)
-    args = ap.parse_args()
-    comps = set(x for x in args.components.split(",") if x)
-    if args.base_url:
-        os.environ["no_proxy"] = "127.0.0.1,localhost"
-        os.environ["NO_PROXY"] = "127.0.0.1,localhost"
-
-    try:
-        stats = {"checked": 0, "bad": 0}
-        if args.verify:
-            # 校验只信本地 json：连版本都没下过就没什么可校验的
-            wanted = args.version
-            vdir = os.path.join(args.mc_dir, "versions", wanted)
-            vjson = os.path.join(vdir, wanted + ".json")
-            if not os.path.isfile(vjson):
-                emit("error", 0, 0, "本地没有 " + wanted + " 的版本 json", False,
-                     "先下载这个版本，再校验")
-                return 2
-            failed = 0
-        else:
-            mtext = get(mirror_url(MANIFEST, args.mirror, args.base_url))
-            manifest = json.loads(mtext)
-            if args.latest_snapshot:
-                print(json.dumps({"version": manifest.get("latest", {}).get("snapshot", "")},
-                                 ensure_ascii=False), flush=True)
-                return 0
-            if args.list_versions:
-                types = {"release", "snapshot"} if args.snapshots else {"release"}
-                rel = [v["id"] for v in manifest.get("versions", []) if v.get("type") in types]
-                rel = rel[:(30 if args.snapshots else 20)]
-                print(json.dumps({"versions": rel}, ensure_ascii=False), flush=True)
-                return 0
-            wanted = args.version
-            if wanted in ("latest", "latest-snapshot"):
-                key = "snapshot" if wanted == "latest-snapshot" else "release"
-                wanted = manifest.get("latest", {}).get(key, "26.3")
-            entry = next((v for v in manifest.get("versions", []) if v.get("id") == wanted), None)
-            if not entry:
-                emit("error", 0, 0, "找不到版本 " + wanted, False, "")
-                return 2
-            vdir = os.path.join(args.mc_dir, "versions", wanted)
-            vjson = os.path.join(vdir, wanted + ".json")
-            failed = run_stage("version", [{
-                "url": mirror_url(entry["url"], args.mirror, args.base_url),
-                "dest": vjson, "sha1": entry.get("sha1", ""), "label": wanted + ".json"}], 1)
-        if failed:
-            return 2
-        with open(vjson, "r", encoding="utf-8") as f:
-            vj = json.load(f)
-        aid = vj.get("assetIndex", {})
-        asset_id = aid.get("id", wanted)
-        tasks = []
-        if "jar" in comps and "client" in vj.get("downloads", {}):
-            c = vj["downloads"]["client"]
-            tasks.append({"url": mirror_url(c["url"], args.mirror, args.base_url),
-                          "dest": os.path.join(vdir, wanted + ".jar"),
-                          "sha1": c.get("sha1", ""), "label": wanted + ".jar"})
-        if "libraries" in comps:
-            keys = (["natives-linux-arm64", "natives-linux-aarch64", "natives-linux"]
-                    if args.arch == "aarch64" else ["natives-linux", "natives-linux-x86_64"])
-            for lib in vj.get("libraries", []):
-                rules = lib.get("rules", [])
-                if rules:
-                    allowed = False
-                    for r in rules:
-                        osn = r.get("os", {}).get("name", "")
-                        match = not osn or osn in ("linux", "unix", "unknown")
-                        if "features" in r:
-                            match = False
-                        if match:
-                            allowed = r.get("action", "allow") == "allow"
-                    if not allowed:
-                        continue
-                d = lib.get("downloads", {})
-                arts = []
-                if "artifact" in d:
-                    arts.append(d["artifact"])
-                cls = d.get("classifiers", {})
-                for k in keys:
-                    if k in cls:
-                        arts.append(cls[k])
-                        break
-                for a in arts:
-                    if not a.get("path") or not a.get("url"):
-                        continue
-                    tasks.append({"url": mirror_url(a["url"], args.mirror, args.base_url),
-                                  "dest": os.path.join(args.mc_dir, "libraries", a["path"]),
-                                  "sha1": a.get("sha1", ""), "label": a["path"]})
-        if args.verify:
-            failed += verify_stage("verify", tasks, args.jobs, stats)
-        else:
-            failed += run_stage("libraries", tasks, args.jobs)
-
-        if "assets" in comps and aid.get("url"):
-            ipath = os.path.join(args.mc_dir, "assets", "indexes", asset_id + ".json")
-            failed += run_stage("asset-index", [{
-                "url": mirror_url(aid["url"], args.mirror, args.base_url),
-                "dest": ipath, "sha1": aid.get("sha1", ""), "label": asset_id + ".json"}], 1)
-            with open(ipath, "r", encoding="utf-8") as f:
-                idx = json.load(f)
-            objs = []
-            for name, meta in idx.get("objects", {}).items():
-                h = meta.get("hash", "")
-                if len(h) < 3:
-                    continue
-                objs.append({"url": mirror_url(ASSET_CDN + "/" + h[:2] + "/" + h,
-                                               args.mirror, args.base_url),
-                             "dest": os.path.join(args.mc_dir, "assets", "objects", h[:2], h),
-                             "sha1": h, "label": name})
-            if args.limit:
-                objs = objs[:args.limit]
-            if args.verify:
-                failed += verify_stage("verify", objs, args.jobs, stats)
-            else:
-                failed += run_stage("assets", objs, args.jobs)
-
-        if "runtime" in comps and args.arch != "aarch64" and not args.verify:
-            component = vj.get("javaVersion", {}).get("component", "java-runtime-epsilon")
-            allj = json.loads(get(mirror_url(RUNTIME_ALL, args.mirror, args.base_url)))
-            entries = allj.get("linux", {}).get(component, [])
-            if entries:
-                mf = json.loads(get(mirror_url(entries[0]["manifest"]["url"],
-                                               args.mirror, args.base_url)))
-                rt_root = os.path.join(args.mc_dir, "runtime", component)
-                rtasks = []
-                for rel, meta in mf.get("files", {}).items():
-                    t = meta.get("type", "file")
-                    if t == "directory":
-                        os.makedirs(os.path.join(rt_root, rel), exist_ok=True)
-                        continue
-                    raw = meta.get("downloads", {}).get("raw")
-                    if not raw:
-                        continue
-                    rtasks.append({"url": mirror_url(raw["url"], args.mirror, args.base_url),
-                                   "dest": os.path.join(rt_root, rel),
-                                   "sha1": raw.get("sha1", ""),
-                                   "mode": 0o755 if meta.get("executable") else 0o644,
-                                   "label": rel})
-                if args.limit:
-                    rtasks = rtasks[:args.limit]
-                failed += run_stage("runtime", rtasks, args.jobs)
-
-        if args.verify:
-            emit("summary", 0, 0, "检查 %d 项，异常 %d，补下失败 %d"
-                 % (stats["checked"], stats["bad"], failed))
-        print(json.dumps({"stage": "done", "ok": failed == 0, "failed": failed},
-                         ensure_ascii=False), flush=True)
-        return 0 if failed == 0 else 1
-    except Exception as exc:
-        emit("error", 0, 0, "下载失败", False, str(exc))
-        return 3
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-)PY";
 
 // ------------------------------------------------------------ 显示后端选择 ----
 static const char* kRepoUrl = "https://github.com/zzxwithbus19/one-263-linux";
@@ -876,7 +575,6 @@ public:
         }
         defaultPalette_ = qApp->palette();
         requiredJava_ = core::requiredJavaMajor(layout_, cfg_.version);
-        saveDownloaderScript();
         applyPalette();   // 先定调色板：buildUi 里的内联颜色会跟着它走
         buildUi();
         applyStyleSheet();
@@ -887,6 +585,10 @@ public:
         setupAutoSave();
         refreshLocalVersions();
         refreshJava();
+        // 已装加载器：启动后自动检查一次最新稳定版，避免一直用旧加载器
+        QTimer::singleShot(1200, this, [this] {
+            if (!cfg_.profile.empty() || cfg_.fabric) refreshLoaderVersions();
+        });
         // 上次启动器自己崩过就提一句，别让人以为没事发生
         {
             std::error_code cec;
@@ -994,23 +696,12 @@ protected:
         collectUiToConfig();
         std::string err;
         cfg_.save(layout_.configFile, err);
-        if (downloadProc_ && downloadProc_->state() != QProcess::NotRunning) downloadProc_->terminate();
+        if (downloadCancel_) downloadCancel_->store(true);
         if (launchProc_ && launchProc_->state() != QProcess::NotRunning) launchProc_->terminate();
         QMainWindow::closeEvent(ev);
     }
 
 private:
-    void saveDownloaderScript() {
-        std::string err;
-        scriptPath_ = layout_.configDir / "mc263_downloader.py";
-        mc263::fsx::writeText(scriptPath_, kDownloaderPy, err);
-        ::chmod(scriptPath_.c_str(), 0755);
-    }
-    static QString pythonBin() {
-        QString p = QString::fromLocal8Bit(qgetenv("MC263_PYTHON"));
-        return p.isEmpty() ? QStringLiteral("python3") : p;
-    }
-
     // 圆角窗口：paintEvent 自己画一层圆角背景，QSS 里 QMainWindow 是透明的。
     // 只在没有系统装饰时启用（niri 的 prefer-no-csd / QT_WAYLAND_DISABLE_WINDOWDECORATION=1）：
     // 有 CSD/SSD 时圆角只作用在客户端区域，反而难看，保持系统外观。
@@ -1053,7 +744,7 @@ private:
         nav_->setMovable(false);
         nav_->setFocusPolicy(Qt::NoFocus);
         nav_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-        for (const char* s : {"启动游戏", "下载游戏", "Mod 下载", "版本管理", "游戏目录", "资源", "设置 / 内存"})
+        for (const char* s : {"启动游戏", "下载游戏", "资源下载", "版本管理", "游戏目录", "资源", "支持"})
             nav_->addTab(QString::fromUtf8(s));
         stack_ = new QStackedWidget(this);
         // 每页放进滚动区：窗口缩小/字体变大时滚动，而不是把卡片内容挤到重叠
@@ -1242,6 +933,83 @@ private:
         form->addRow("游戏版本", launchVersion_);
         form->addRow("玩家名", usernameEdit_);
         v->addWidget(box);
+
+        core::MemInfo mi = core::readMemInfo();
+        memTotalMb_ = mi.totalMb >= 2048 ? static_cast<int>(mi.totalMb) : 4096;
+        if (mi.totalMb == 0) mi.totalMb = static_cast<uint64_t>(memTotalMb_);
+        memInfo_ = mi;
+        maxMemoryMb_ = std::max(2048, memTotalMb_ * 3 / 4);
+        auto* mbox = new QGroupBox("内存图形化配置", w);
+        auto* mv = new QVBoxLayout(mbox);
+        setCardTitle(mbox, mv, "内存图形化配置");
+        auto* head = new QHBoxLayout();
+        memSummary_ = new QLabel(w);
+        memSummary_->setTextFormat(Qt::RichText);
+        auto* refreshMem = new QPushButton("刷新", w);
+        refreshMem->setToolTip("重新读取 /proc/meminfo");
+        head->addWidget(memSummary_, 1);
+        head->addWidget(refreshMem);
+        mv->addLayout(head);
+        memBar_ = new MemoryBar(w);
+        mv->addWidget(memBar_);
+        auto* legend = new QHBoxLayout();
+        usedStat_ = new QLabel(w);
+        cacheStat_ = new QLabel(w);
+        gameStat_ = new QLabel(w);
+        availStat_ = new QLabel(w);
+        for (QLabel* l : {usedStat_, cacheStat_, gameStat_, availStat_})
+            l->setTextFormat(Qt::RichText);
+        legend->addWidget(usedStat_);
+        legend->addSpacing(16);
+        legend->addWidget(cacheStat_);
+        legend->addSpacing(16);
+        legend->addWidget(gameStat_);
+        legend->addSpacing(16);
+        legend->addWidget(availStat_);
+        legend->addStretch(1);
+        mv->addLayout(legend);
+        memAuto_ = new QCheckBox("内存交给 JVM ", w);
+        memAuto_->setChecked(cfg_.autoMemory);
+        mv->addWidget(memAuto_);
+        auto* memRow = new QHBoxLayout();
+        memSlider_ = new QSlider(Qt::Horizontal, w);
+        memSlider_->setRange(512, maxMemoryMb_); memSlider_->setSingleStep(256);
+        memSpin_ = new QSpinBox(w); memSpin_->setRange(512, maxMemoryMb_); memSpin_->setSingleStep(256);
+        memSpin_->setSuffix(" MB");
+        memRow->addWidget(new QLabel("分给游戏", w));
+        memRow->addWidget(memSlider_, 1); memRow->addWidget(memSpin_);
+        mv->addLayout(memRow);
+        memPreview_ = new QLabel("-Xmx4096M", w);
+        mv->addWidget(memPreview_);
+        memWarn_ = new QLabel(w);
+        memWarn_->setWordWrap(true);
+        memWarn_->hide();
+        mv->addWidget(memWarn_);
+        xmsCheck_ = new QCheckBox("同时设置初始内存 -Xms", w);
+        xmsSpin_ = new QSpinBox(w); xmsSpin_->setRange(256, maxMemoryMb_); xmsSpin_->setSuffix(" MB");
+        auto* xrow = new QHBoxLayout(); xrow->addWidget(xmsCheck_); xrow->addWidget(xmsSpin_); xrow->addStretch(1);
+        mv->addLayout(xrow);
+        connect(memAuto_, &QCheckBox::toggled, this, [this] {
+            const bool manual = !memAuto_->isChecked();
+            memSlider_->setEnabled(manual);
+            memSpin_->setEnabled(manual);
+            xmsCheck_->setEnabled(manual);
+            xmsSpin_->setEnabled(manual && xmsCheck_->isChecked());
+            updateMemPreview();
+            scheduleAutoSave();
+        });
+        connect(memSlider_, &QSlider::valueChanged, memSpin_, &QSpinBox::setValue);
+        connect(memSpin_, QOverload<int>::of(&QSpinBox::valueChanged), memSlider_, &QSlider::setValue);
+        connect(memSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this] {
+            if (xmsSpin_) xmsSpin_->setMaximum(memSpin_->value());
+            updateMemPreview();
+        });
+        connect(refreshMem, &QPushButton::clicked, this, &LauncherWindow::refreshMemory);
+        auto* memTimer = new QTimer(this);
+        connect(memTimer, &QTimer::timeout, this, &LauncherWindow::refreshMemory);
+        memTimer->start(2000);
+        refreshMemory();
+
         auto* row = new QHBoxLayout();
         launchBtn_ = new QPushButton("启动游戏", w);
         launchBtn_->setObjectName("primary");
@@ -1254,6 +1022,7 @@ private:
         v->addLayout(row);
         launchState_ = new QLabel("就绪", w);
         v->addWidget(launchState_);
+        v->addWidget(mbox);
         launchLog_ = new QPlainTextEdit(w); launchLog_->setReadOnly(true);
         v->addWidget(launchLog_, 1);
         connect(launchBtn_, &QPushButton::clicked, this, &LauncherWindow::startLaunch);
@@ -1365,7 +1134,11 @@ private:
         v->addWidget(downloadLog_, 1);
         connect(downloadBtn_, &QPushButton::clicked, this, &LauncherWindow::startDownload);
         connect(cancelBtn_, &QPushButton::clicked, this, [this] {
-            if (downloadProc_) downloadProc_->terminate();
+            if (downloadCancel_) {
+                downloadCancel_->store(true);
+                downloadLabel_->setText("正在取消...");
+                cancelBtn_->setEnabled(false);
+            }
         });
         connect(clearCacheBtn_, &QPushButton::clicked, this, &LauncherWindow::clearDownloadCache);
         connect(verifyBtn, &QPushButton::clicked, this, &LauncherWindow::verifyInstalled);
@@ -1378,7 +1151,8 @@ private:
     QWidget* pageMods() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        addPageHeader(v, "Mod 下载", "从 Modrinth 搜索，按加载器与游戏版本过滤，直接装进 minecraft/mods/");
+        addPageHeader(v, "资源下载",
+                      "从 Modrinth 搜索 Mod / 资源包 / 光影，按游戏版本过滤，装进当前版本目录");
         const int firstCardIndex = v->count();
 
         auto* sbox = new QGroupBox("搜索", w);
@@ -1398,6 +1172,7 @@ private:
         modSuggestTimer_->setSingleShot(true);
         modSuggestTimer_->setInterval(300);
         connect(modQuery_, &QLineEdit::textEdited, this, [this](const QString& text) {
+            if (modContentType_ && modContentType_->currentData().toString() != "mod") return;
             const int n = text.trimmed().size();
             if (n < 2) {
                 if (modSuggestTimer_) modSuggestTimer_->stop();
@@ -1409,32 +1184,30 @@ private:
             if (modSuggestTimer_) modSuggestTimer_->start();
         });
         connect(modSuggestTimer_, &QTimer::timeout, this, &LauncherWindow::requestModSuggestions);
-        modLoader_ = new QComboBox(sbox);
-        modLoader_->addItem("Fabric", "fabric");
-        modLoader_->addItem("Forge", "forge");
-        modLoader_->addItem("NeoForge", "neoforge");
-        modLoader_->addItem("Quilt", "quilt");
-        modLoader_->addItem("不限", "");
-        modVersionEdit_ = new QLineEdit(sbox);
-        modVersionEdit_->setText(QString::fromStdString(cfg_.version));
+        modContentType_ = new QComboBox(sbox);
+        modContentType_->addItem("Mod", "mod");
+        modContentType_->addItem("资源包", "resourcepack");
+        modContentType_->addItem("光影", "shader");
+        modVersionCombo_ = new QComboBox(sbox);
+        modVersionCombo_->setToolTip(
+            "列出所有已下载版本；显示实际版本目录（如 26.3+fabric），查询 Modrinth 时"
+            "自动取基础游戏版本 26.3，并按目录后缀决定加载器。");
+        refreshModVersionChoices();
         modSort_ = new QComboBox(sbox);
         modSort_->addItem("下载量", "downloads");
         modSort_->addItem("相关度", "relevance");
         modSort_->addItem("关注数", "follows");
         modSort_->addItem("最新发布", "newest");
         modSort_->addItem("最近更新", "updated");
+        form->addRow("下载类型", modContentType_);
         form->addRow("关键词", modQuery_);
-        form->addRow("加载器", modLoader_);
-        form->addRow("游戏版本", modVersionEdit_);
+        form->addRow("游戏版本", modVersionCombo_);
         form->addRow("排序", modSort_);
 
         modSearchBtn_ = new QPushButton("搜索", sbox);
         modSearchBtn_->setObjectName("primary");
         auto* srow = new QHBoxLayout();
         srow->addWidget(modSearchBtn_);
-        auto* hint = new QLabel("按下载量排序，取前 20 个；双击结果可直接安装（会自动补齐 required 前置）", sbox);
-        hint->setObjectName("muted");
-        srow->addWidget(hint);
         srow->addStretch(1);
         form->addRow(QString(), srow);
         v->addWidget(sbox);
@@ -1445,7 +1218,10 @@ private:
         loaderCombo_ = new QComboBox(lbox);
         loaderCombo_->addItem("Fabric", "fabric");
         loaderCombo_->addItem("Quilt", "quilt");
+        if (cfg_.profile == "quilt") loaderCombo_->setCurrentIndex(1);
         loaderVerCombo_ = new QComboBox(lbox);
+        loaderVerCombo_->setEnabled(false);
+        loaderVerCombo_->setToolTip("加载器版本固定为最新稳定版");
         auto* getLv = new QPushButton("获取版本", lbox);
         auto* lrow = new QHBoxLayout();
         lrow->addWidget(loaderVerCombo_, 1);
@@ -1455,7 +1231,8 @@ private:
         loaderState_ = new QLabel("装完后启动会用 versions/<版本>+<加载器>，原版不受影响", lbox);
         loaderState_->setObjectName("muted");
         auto* loaderNote = new QLabel(
-            "说明：安装加载器会自动生成独立版本目录，与原版隔开；启动页需手动把游戏版本切到加载器版本，否则仍按原版启动。",
+            "说明：安装加载器会自动生成独立版本目录，与原版隔开；启动页需手动把游戏版本切到加载器版本，否则仍按原版启动。"
+            "加载器版本固定使用最新稳定版，进入本页会自动检查并更新已装加载器。",
             lbox);
         loaderNote->setObjectName("muted");
         loaderNote->setWordWrap(true);
@@ -1467,7 +1244,10 @@ private:
         lform->addRow(QString(), irow);
         lform->addRow(QString(), loaderState_);
         lform->addRow(QString(), loaderNote);
+        modLoaderBox_ = lbox;
         v->insertWidget(firstCardIndex, lbox);
+        connect(modContentType_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this](int) { applyModContentType(); });
 
 
         modTable_ = new QTableWidget(0, 4, w);
@@ -1488,6 +1268,7 @@ private:
         modInstallBtn_ = new QPushButton("安装选中 Mod", w);
         modInstallBtn_->setObjectName("primary");
         auto* openMods = new QPushButton("打开 mods 目录", w);
+        modOpenDirBtn_ = openMods;
         auto* brow = new QHBoxLayout();
         brow->addWidget(modInstallBtn_);
         brow->addWidget(openMods);
@@ -1501,38 +1282,7 @@ private:
         modLog_->setReadOnly(true);
         modLog_->setMaximumBlockCount(500);
         v->addWidget(modLog_, 1);
-
-        // 已装 Mod：启用/禁用、删除、检查更新（按 Modrinth 的 SHA1 反查项目）
-        auto* ibox = new QGroupBox("已装 Mod（当前版本目录）", w);
-        auto* iv = new QVBoxLayout(ibox);
-        setCardTitle(ibox, iv, "已装 Mod（当前版本目录）");
-        instModTable_ = new QTableWidget(0, 3, ibox);
-        instModTable_->setHorizontalHeaderLabels({"文件", "状态", "大小"});
-        instModTable_->horizontalHeader()->setStretchLastSection(true);
-        instModTable_->verticalHeader()->setVisible(false);
-        instModTable_->setShowGrid(false);
-        instModTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
-        instModTable_->setSelectionMode(QAbstractItemView::ExtendedSelection);
-        instModTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        enlargeTable(instModTable_, 3);
-        iv->addWidget(instModTable_, 1);
-        auto* mrow = new QHBoxLayout();
-        auto* iRefresh = new QPushButton("刷新", ibox);
-        auto* iToggle = new QPushButton("启用 / 禁用", ibox);
-        auto* iDelete = new QPushButton("删除", ibox);
-        auto* iUpdate = new QPushButton("检查更新", ibox);
-        auto* iOpen = new QPushButton("打开目录", ibox);
-        mrow->addWidget(iRefresh);
-        mrow->addWidget(iToggle);
-        mrow->addWidget(iDelete);
-        mrow->addWidget(iUpdate);
-        mrow->addWidget(iOpen);
-        mrow->addStretch(1);
-        iv->addLayout(mrow);
-        instModState_ = new QLabel("切到这一页会自动刷新；更新只认 Modrinth 上有的文件", ibox);
-        instModState_->setObjectName("muted");
-        iv->addWidget(instModState_);
-        v->addWidget(ibox, 1);
+        applyModContentType();
 
         connect(modSearchBtn_, &QPushButton::clicked, this, &LauncherWindow::startModSearch);
         connect(modQuery_, &QLineEdit::returnPressed, this, &LauncherWindow::startModSearch);
@@ -1543,18 +1293,8 @@ private:
         connect(installLoaderBtn_, &QPushButton::clicked, this, &LauncherWindow::installSelectedLoader);
         connect(loaderCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
                 [this](int) { refreshLoaderVersions(); });
-        connect(iRefresh, &QPushButton::clicked, this, &LauncherWindow::refreshInstalledMods);
-        connect(iToggle, &QPushButton::clicked, this, &LauncherWindow::toggleInstalledMod);
-        connect(iDelete, &QPushButton::clicked, this, &LauncherWindow::deleteInstalledMod);
-        connect(iUpdate, &QPushButton::clicked, this, &LauncherWindow::updateInstalledMods);
-        connect(iOpen, &QPushButton::clicked, this, [this] {
-            const auto dir = currentModsDir();
-            std::error_code ec;
-            std::filesystem::create_directories(dir, ec);
-            QProcess::startDetached("xdg-open", {QString::fromStdString(dir.string())});
-        });
         connect(openMods, &QPushButton::clicked, this, [this] {
-            const auto dir = core::isolatedGameDir(layout_, cfg_) / "mods";
+            const auto dir = currentModsDir();
             std::error_code ec;
             std::filesystem::create_directories(dir, ec);
             QProcess::startDetached("xdg-open", {QString::fromStdString(dir.string())});
@@ -1562,12 +1302,89 @@ private:
         return w;
     }
 
+    // 下拉框里是实际版本目录名（26.3+fabric）；给 Modrinth 的 gameVersion 必须用基础版本 26.3
+    QString modSelectedVersion() const {
+        return modVersionCombo_ ? modVersionCombo_->currentData().toString() : QString();
+    }
+
+    QString modGameVersion() const {
+        const QString selected = modSelectedVersion();
+        const int plus = selected.indexOf('+');
+        return plus >= 0 ? selected.left(plus) : selected;
+    }
+
+    QString modContentType() const {
+        return modContentType_ ? modContentType_->currentData().toString() : QStringLiteral("mod");
+    }
+
+    void applyModContentType() {
+        const QString type = modContentType();
+        if (modLoaderBox_) modLoaderBox_->setVisible(type == "mod");
+        if (modOpenDirBtn_) modOpenDirBtn_->setVisible(type == "mod");
+        if (modInstallBtn_)
+            modInstallBtn_->setText(type == "mod" ? "安装选中 Mod" : "下载选中");
+        if (modTable_) {
+            modTable_->setRowCount(0);
+            if (type == "mod")
+                modTable_->setHorizontalHeaderLabels({"Mod", "作者", "下载量", "说明"});
+            else if (type == "shader")
+                modTable_->setHorizontalHeaderLabels({"光影", "作者", "下载量", "说明"});
+            else
+                modTable_->setHorizontalHeaderLabels({"资源包", "作者", "下载量", "说明"});
+        }
+        if (modQuery_) {
+            if (type == "mod")
+                modQuery_->setPlaceholderText("sodium / lithium / jei …");
+            else if (type == "shader")
+                modQuery_->setPlaceholderText("Complementary / BSL / SEUS …");
+            else
+                modQuery_->setPlaceholderText("Stay True / Faithless / 原版风格 …");
+        }
+        if (type != "mod" && modCompleter_) {
+            if (auto* model = qobject_cast<QStringListModel*>(modCompleter_->model()))
+                model->setStringList({});
+            if (auto* popup = modCompleter_->popup()) popup->hide();
+        }
+        if (modState_ && modTable_ && modTable_->rowCount() == 0)
+            modState_->setText(type == "mod" ? "输入关键词后点搜索"
+                                             : "选择资源包 / 光影，输入关键词后点搜索");
+    }
+
+    // 加载器直接从版本目录名推导：26.3+fabric → fabric，26.3 → 原版（不限）
+    QString modSelectedLoader() const {
+        const QString selected = modSelectedVersion();
+        const int plus = selected.lastIndexOf('+');
+        return plus >= 0 ? selected.mid(plus + 1) : QString();
+    }
+
+    void refreshModVersionChoices() {
+        if (!modVersionCombo_) return;
+        const QString keep = modVersionCombo_->currentData().toString();
+        const QString wanted =
+            keep.isEmpty() ? QString::fromStdString(core::versionDirName(cfg_)) : keep;
+        modVersionCombo_->clear();
+        const auto vers = core::availableVersions(layout_);
+        for (const auto& id : vers)
+            modVersionCombo_->addItem(QString::fromStdString(id), QString::fromStdString(id));
+        if (vers.empty()) {
+            modVersionCombo_->addItem("未安装任何版本", "");
+            modVersionCombo_->setEnabled(false);
+            return;
+        }
+        modVersionCombo_->setEnabled(true);
+        int idx = modVersionCombo_->findData(wanted);
+        if (idx < 0) idx = 0;
+        modVersionCombo_->setCurrentIndex(idx);
+    }
+
     void requestModSuggestions() {
         if (!modQuery_ || !modCompleter_) return;
+        if (modContentType() != "mod") return;
         const QString q = modQuery_->text().trimmed();
         if (q.size() < 2) return;
-        const QString loader = modLoader_->currentData().toString();
-        const QString ver = modVersionEdit_->text().trimmed();
+        const QString loader = modSelectedLoader();
+        const QString ver = modGameVersion();
+        if (ver.isEmpty()) return;
         const QString key = q + QChar(0x1f) + loader + QChar(0x1f) + ver;
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
         const auto cached = modSuggestCache_.constFind(key);
@@ -1620,25 +1437,31 @@ private:
     void startModSearch() {
         const QString q = modQuery_->text().trimmed();
         if (q.isEmpty()) { modState_->setText("先输入关键词"); return; }
+        const std::string ver = modGameVersion().toStdString();
+        if (ver.empty()) { modState_->setText("先在下载页安装一个游戏版本"); return; }
         modSearchBtn_->setEnabled(false);
         modState_->setText("搜索中…");
-        const std::string loader = modLoader_->currentData().toString().toStdString();
-        const std::string ver = modVersionEdit_->text().trimmed().toStdString();
+        const QString type = modContentType();
+        const std::string loader =
+            type == "mod" ? modSelectedLoader().toStdString() : std::string();
         const std::string sort = modSort_->currentData().toString().toStdString();
         const auto cache = layout_.configDir / "cache";
         QPointer<LauncherWindow> guard(this);
-        std::thread([guard, q, loader, ver, sort, cache] {
+        std::thread([guard, q, loader, ver, sort, cache, type] {
             std::vector<mc263::modrinth::Hit> hits;
             std::string err;
-            const bool ok = mc263::modrinth::search(q.toStdString(), loader, ver, sort, cache, hits, err);
-            QMetaObject::invokeMethod(qApp, [guard, ok, err, hits] {
-                if (guard) guard->applyModHits(ok, err, hits);
+            const bool ok = mc263::modrinth::search(q.toStdString(), loader, ver, sort, cache, hits,
+                                                    err, type.toStdString());
+            QMetaObject::invokeMethod(qApp, [guard, ok, err, hits, type] {
+                if (guard) guard->applyModHits(ok, err, hits, type);
             }, Qt::QueuedConnection);
         }).detach();
     }
 
-    void applyModHits(bool ok, const std::string& err, const std::vector<mc263::modrinth::Hit>& hits) {
+    void applyModHits(bool ok, const std::string& err,
+                      const std::vector<mc263::modrinth::Hit>& hits, const QString& type) {
         modSearchBtn_->setEnabled(true);
+        if (type != modContentType()) return;
         modTable_->setRowCount(0);
         if (!ok) {
             modState_->setText("搜索失败：" + QString::fromStdString(err));
@@ -1649,6 +1472,7 @@ private:
             modTable_->insertRow(r);
             auto* name = new QTableWidgetItem(QString::fromStdString(h.title));
             name->setData(Qt::UserRole, QString::fromStdString(h.id));
+            name->setData(Qt::UserRole + 1, type);
             name->setToolTip(QString::fromStdString(h.id));
             modTable_->setItem(r, 0, name);
             modTable_->setItem(r, 1, new QTableWidgetItem(QString::fromStdString(h.author)));
@@ -1658,7 +1482,9 @@ private:
             modTable_->setItem(r, 3, new QTableWidgetItem(QString::fromStdString(h.description)));
         }
         modState_->setText(hits.empty() ? "没有结果，换个关键词或放宽版本 / 加载器"
-                                        : QString("找到 %1 个，双击或点「安装选中 Mod」").arg(hits.size()));
+                                        : QString("找到 %1 个，双击或点「%2」")
+                                              .arg(static_cast<int>(hits.size()))
+                                              .arg(type == "mod" ? "安装选中 Mod" : "下载选中"));
     }
 
     // ---- 安装 Mod：先解析 required 前置，确认后一起下载 ----
@@ -1669,47 +1495,497 @@ private:
         auto* nameItem = modTable_->item(row, 0);
         const std::string project = nameItem->data(Qt::UserRole).toString().toStdString();
         const QString title = nameItem->text();
-        const std::string loader = modLoader_->currentData().toString().toStdString();
-        const std::string ver = modVersionEdit_->text().trimmed().toStdString();
+        QString type = nameItem->data(Qt::UserRole + 1).toString();
+        if (type.isEmpty()) type = modContentType();
+        if (type != "mod") {
+            downloadSelectedContent(project, title, type);
+            return;
+        }
+        const std::string loader = modSelectedLoader().toStdString();
+        const std::string ver = modGameVersion().toStdString();
+        if (ver.empty()) { modState_->setText("先在下载页安装一个游戏版本"); return; }
         modInstallBtn_->setEnabled(false);
-        modState_->setText("解析 " + title + " 的前置…");
+        modState_->setText("获取 " + title + " 的版本列表…");
         const auto cache = layout_.configDir / "cache";
-        const auto mods = core::isolatedGameDir(layout_, cfg_) / "mods";  // 版本隔离：mods 跟着版本走
+        const auto mods = currentModsDir();  // 版本隔离：mods 跟着下拉框选的版本走
         QPointer<LauncherWindow> guard(this);
         std::thread([guard, project, loader, ver, cache, mods, title] {
             std::vector<mc263::modrinth::Version> list;
             std::string err;
-            QString msg;
-            bool ok = false;
             if (!mc263::modrinth::versions(project, loader, ver, cache, list, err)) {
-                msg = "查版本失败：" + QString::fromStdString(err);
-            } else if (list.empty()) {
-                msg = "没有适配该版本 / 加载器的文件";
-            } else {
-                ok = true;
-            }
-            mc263::modrinth::DepPlan plan;
-            if (ok && mc263::modrinth::primaryFile(list.front())) {
-                mc263::modrinth::resolveDependencies(list.front(), loader, ver, cache, plan, err);
-            } else if (ok) {
-                ok = false;
-                msg = "NOFILE";
-            }
-            QMetaObject::invokeMethod(qApp, [guard, ok, msg, plan, list, title, mods, project] {
-                if (!guard) return;
-                if (!ok) {
+                const QString msg = "查版本失败：" + QString::fromStdString(err);
+                QMetaObject::invokeMethod(qApp, [guard, msg, title] {
+                    if (!guard) return;
                     guard->modInstallBtn_->setEnabled(true);
                     guard->modState_->setText("失败");
-                    if (msg == "NOFILE") {
-                        guard->promptManualMod(title,
-                            QString::fromStdString("https://modrinth.com/mod/" + project));
-                    } else {
-                        guard->modLog_->appendPlainText(QString("[%1] %2  %3")
-                            .arg(QTime::currentTime().toString("HH:mm:ss"), title, msg));
+                    guard->modLog_->appendPlainText(QString("[%1] %2  %3")
+                        .arg(QTime::currentTime().toString("HH:mm:ss"), title, msg));
+                }, Qt::QueuedConnection);
+                return;
+            }
+            if (list.empty()) {
+                QMetaObject::invokeMethod(qApp, [guard, title] {
+                    if (!guard) return;
+                    guard->modInstallBtn_->setEnabled(true);
+                    guard->modState_->setText("没有适配该版本 / 加载器的文件");
+                }, Qt::QueuedConnection);
+                return;
+            }
+            std::vector<mc263::modrinth::Version> usable;
+            for (const auto& v : list)
+                if (mc263::modrinth::primaryFile(v)) usable.push_back(v);
+            if (usable.empty()) {
+                QMetaObject::invokeMethod(qApp, [guard, title, project] {
+                    if (!guard) return;
+                    guard->modInstallBtn_->setEnabled(true);
+                    guard->promptManualMod(title,
+                        QString::fromStdString("https://modrinth.com/mod/" + project));
+                }, Qt::QueuedConnection);
+                return;
+            }
+            QMetaObject::invokeMethod(qApp, [guard, usable, title, loader, ver, cache, mods] {
+                if (guard) guard->chooseModVersion(usable, title, loader, ver, cache, mods);
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    struct DepChoice {
+        std::string projectId;
+        std::string preferredVersionId;
+        QString title;
+        std::vector<mc263::modrinth::Version> versions;
+    };
+    struct SelectedDep {
+        std::string projectId;
+        QString title;
+        mc263::modrinth::Version version;
+    };
+
+    // 选择要安装的 Mod 版本：R=Release（绿）、B=Beta（橙）、A=Alpha（灰）
+    void chooseModVersion(const std::vector<mc263::modrinth::Version>& versions,
+                          const QString& title, const std::string& loader, const std::string& ver,
+                          const std::filesystem::path& cache,
+                          const std::filesystem::path& mods) {
+        QDialog dlg(this);
+        dlg.setWindowTitle("选择 Mod 版本");
+        auto* v = new QVBoxLayout(&dlg);
+        const QString loaderLabel = loader.empty() ? "不限" : QString::fromStdString(loader);
+        auto* tip = new QLabel(QString("为「%1」选择安装版本（%2 / %3）")
+                                   .arg(title, loaderLabel, QString::fromStdString(ver)), &dlg);
+        tip->setWordWrap(true);
+        v->addWidget(tip);
+
+        bool needsSodium = false;
+        for (const auto& x : versions)
+            for (const auto& dep : x.dependencies)
+                if (dep.type == "required" && dep.projectId == "AANobbMI") needsSodium = true;
+        if (needsSodium) {
+            auto* depHint = new QLabel(
+                "该 Mod 依赖 Sodium。Modrinth 只声明依赖项目、不提供 Sodium 版本范围；"
+                "默认选最新正式版最稳。如果已装 Sodium 是 Beta，附加 Mod 可能需要对应 Beta 版本。",
+                &dlg);
+            depHint->setObjectName("muted");
+            depHint->setWordWrap(true);
+            v->addWidget(depHint);
+        }
+
+        auto* table = new QTableWidget(static_cast<int>(versions.size()), 3, &dlg);
+        table->setHorizontalHeaderLabels({"版本", "类型", "文件"});
+        table->horizontalHeader()->setStretchLastSection(true);
+        table->verticalHeader()->setVisible(false);
+        table->setShowGrid(false);
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setSelectionMode(QAbstractItemView::SingleSelection);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setMinimumHeight(280);
+        for (int i = 0; i < static_cast<int>(versions.size()); ++i) {
+            const auto& x = versions[static_cast<size_t>(i)];
+            const QString type = QString::fromStdString(x.versionType).toLower();
+            auto* num = new QTableWidgetItem(
+                QString::fromStdString(x.number.empty() ? x.name : x.number));
+            if (!x.name.empty()) num->setToolTip(QString::fromStdString(x.name));
+            table->setItem(i, 0, num);
+
+            QString badge = "R";
+            QString label = "Release";
+            QColor bg("#16a34a");
+            if (type == "beta") {
+                badge = "B";
+                label = "Beta";
+                bg = QColor("#f59e0b");
+            } else if (type == "alpha") {
+                badge = "A";
+                label = "Alpha";
+                bg = QColor("#6b7280");
+            } else if (!type.isEmpty() && type != "release") {
+                badge = "?";
+                label = type;
+                bg = QColor("#6b7280");
+            }
+            auto* kind = new QLabel(badge, table);
+            kind->setAlignment(Qt::AlignCenter);
+            kind->setMargin(0);
+            kind->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+            kind->setStyleSheet(QString("background:%1;color:#ffffff;border-radius:4px;"
+                                        "font-weight:600;").arg(bg.name()));
+            kind->setToolTip(label);
+            table->setCellWidget(i, 1, kind);
+
+            const auto* f = mc263::modrinth::primaryFile(x);
+            auto* file = new QTableWidgetItem(f ? QString::fromStdString(f->filename) : QString());
+            if (f) file->setToolTip(QString::fromStdString(f->filename));
+            table->setItem(i, 2, file);
+        }
+        table->resizeColumnToContents(0);
+        table->setColumnWidth(1, 56);
+        int defaultRow = 0;
+        for (int i = 0; i < static_cast<int>(versions.size()); ++i) {
+            const QString type =
+                QString::fromStdString(versions[static_cast<size_t>(i)].versionType).toLower();
+            if (type.isEmpty() || type == "release") { defaultRow = i; break; }
+        }
+        table->selectRow(defaultRow);
+        v->addWidget(table, 1);
+        dlg.resize(760, 460);
+
+        auto* legend = new QLabel(
+            "R = Release 稳定版（绿）    B = Beta 测试版（橙）    A = Alpha 早期版（灰）", &dlg);
+        legend->setObjectName("muted");
+        v->addWidget(legend);
+
+        auto* row = new QHBoxLayout();
+        row->addStretch(1);
+        auto* go = new QPushButton("安装此版本", &dlg);
+        go->setObjectName("primary");
+        auto* cancel = new QPushButton("取消", &dlg);
+        row->addWidget(go);
+        row->addWidget(cancel);
+        v->addLayout(row);
+        connect(go, &QPushButton::clicked, &dlg, &QDialog::accept);
+        connect(cancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+        connect(table, &QTableWidget::cellDoubleClicked, &dlg,
+                [&dlg](int, int) { dlg.accept(); });
+
+        if (dlg.exec() != QDialog::Accepted) {
+            modInstallBtn_->setEnabled(true);
+            modState_->setText("已取消");
+            return;
+        }
+        const int rowIdx = table->currentRow();
+        if (rowIdx < 0 || rowIdx >= static_cast<int>(versions.size())) {
+            modInstallBtn_->setEnabled(true);
+            modState_->setText("已取消");
+            return;
+        }
+        mc263::modrinth::Version root = versions[static_cast<size_t>(rowIdx)];
+        modState_->setText("检查 " + title + " 的前置…");
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, root, loader, ver, cache, mods, title] {
+            std::vector<DepChoice> choices;
+            std::vector<mc263::modrinth::DepItem> manual;
+            std::set<std::string> seen;
+            const auto installed = core::listEntries(mods);
+            QHash<QString, QString> fileProject;
+            auto depInstalled = [&](const std::string& projectId, const std::string& slug) {
+                if (slug.empty()) return false;
+                const QString slugQ = QString::fromStdString(slug);
+                for (const auto& e : installed) {
+                    if (e.isDir || !e.enabled) continue;
+                    const QString name = QString::fromStdString(e.name);
+                    if (!name.endsWith(".jar", Qt::CaseInsensitive)) continue;
+                    if (!name.contains(slugQ, Qt::CaseInsensitive)) continue;
+                    const QString key = QString::fromStdString(e.path.string());
+                    if (!fileProject.contains(key)) {
+                        std::string ierr;
+                        const std::string sha = mc263::dl::Sha1::ofFile(e.path, ierr);
+                        QString pid;
+                        if (ierr.empty()) {
+                            mc263::modrinth::Version iv;
+                            std::string verr;
+                            if (mc263::modrinth::versionByHash(sha, cache, iv, verr))
+                                pid = QString::fromStdString(iv.projectId);
+                        }
+                        fileProject.insert(key, pid);
                     }
+                    if (fileProject.value(key) == QString::fromStdString(projectId)) return true;
+                }
+                return false;
+            };
+            for (const auto& d : root.dependencies) {
+                if (d.type != "required") continue;
+                if (d.projectId.empty()) {
+                    mc263::modrinth::DepItem item;
+                    item.title = d.fileName.empty() ? "未知前置" : d.fileName;
+                    item.reason = "Modrinth 上没有这个前置（作者只留了文件名）";
+                    item.url = "https://modrinth.com/mods?q=" +
+                               mc263::modrinth::urlEncode(d.fileName);
+                    manual.push_back(std::move(item));
+                    continue;
+                }
+                if (!seen.insert(d.projectId).second) continue;
+                mc263::modrinth::Project p;
+                std::string perr;
+                const bool gotProject = mc263::modrinth::project(d.projectId, cache, p, perr);
+                DepChoice ch;
+                ch.projectId = d.projectId;
+                ch.preferredVersionId = d.versionId;
+                ch.title = QString::fromStdString(
+                    gotProject && !p.title.empty() ? p.title : d.projectId);
+                // 已安装在当前版本 mods/ 里的前置不再要求选择/重复下载
+                if (depInstalled(d.projectId, gotProject ? p.slug : std::string())) continue;
+                std::vector<mc263::modrinth::Version> list;
+                std::string lerr;
+                if (!mc263::modrinth::versions(d.projectId, loader, ver, cache, list, lerr)) {
+                    mc263::modrinth::DepItem item;
+                    item.projectId = d.projectId;
+                    item.title = ch.title.toStdString();
+                    item.reason = "查询前置版本失败：" + lerr;
+                    item.url = "https://modrinth.com/mod/" + d.projectId;
+                    manual.push_back(std::move(item));
+                    continue;
+                }
+                for (const auto& v : list)
+                    if (mc263::modrinth::primaryFile(v)) ch.versions.push_back(v);
+                if (ch.versions.empty()) {
+                    mc263::modrinth::DepItem item;
+                    item.projectId = d.projectId;
+                    item.title = ch.title.toStdString();
+                    item.reason = "没有适配该版本 / 加载器的文件";
+                    item.url = "https://modrinth.com/mod/" + d.projectId;
+                    manual.push_back(std::move(item));
+                    continue;
+                }
+                choices.push_back(std::move(ch));
+            }
+            QMetaObject::invokeMethod(qApp, [guard, root, title, loader, ver, cache, mods,
+                                            choices, manual] {
+                if (guard)
+                    guard->showDependencyChoices(root, title, loader, ver, cache, mods,
+                                                 choices, manual);
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    void showDependencyChoices(const mc263::modrinth::Version& root, const QString& title,
+                               const std::string& loader, const std::string& ver,
+                               const std::filesystem::path& cache,
+                               const std::filesystem::path& mods,
+                               const std::vector<DepChoice>& choices,
+                               const std::vector<mc263::modrinth::DepItem>& manual) {
+        if (choices.empty()) {
+            mc263::modrinth::DepPlan plan;
+            plan.manual = manual;
+            askInstallPlan(title, root, plan, mods);
+            return;
+        }
+
+        QDialog dlg(this);
+        dlg.setWindowTitle("选择前置 Mod 版本");
+        auto* v = new QVBoxLayout(&dlg);
+        auto* tip = new QLabel(
+            QString("安装「%1」会一起安装以下前置。请选择每个前置要用的版本：").arg(title), &dlg);
+        tip->setWordWrap(true);
+        v->addWidget(tip);
+
+        auto* table = new QTableWidget(static_cast<int>(choices.size()), 3, &dlg);
+        table->setHorizontalHeaderLabels({"前置 Mod", "版本", "文件"});
+        table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+        table->horizontalHeader()->setStretchLastSection(true);
+        table->verticalHeader()->setVisible(false);
+        table->setShowGrid(false);
+        table->setSelectionMode(QAbstractItemView::NoSelection);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setMinimumHeight(48 + static_cast<int>(choices.size()) * 36);
+        std::vector<QComboBox*> combos;
+        for (int i = 0; i < static_cast<int>(choices.size()); ++i) {
+            const auto& ch = choices[static_cast<size_t>(i)];
+            table->setItem(i, 0, new QTableWidgetItem(ch.title));
+            auto* combo = new QComboBox(table);
+            auto* model = new QStandardItemModel(combo);
+            QStringList files;
+            int defaultIdx = -1;
+            int releaseIdx = -1;
+            for (int j = 0; j < static_cast<int>(ch.versions.size()); ++j) {
+                const auto& x = ch.versions[static_cast<size_t>(j)];
+                const QString type = QString::fromStdString(x.versionType).toLower();
+                QString badge = "R";
+                QColor color("#16a34a");
+                if (type == "beta") {
+                    badge = "B";
+                    color = QColor("#f59e0b");
+                } else if (type == "alpha") {
+                    badge = "A";
+                    color = QColor("#6b7280");
+                } else if (!type.isEmpty() && type != "release") {
+                    badge = "?";
+                    color = QColor("#6b7280");
+                }
+                const QString number = QString::fromStdString(
+                    x.number.empty() ? (x.name.empty() ? x.id : x.name) : x.number);
+                auto* item = new QStandardItem(badge + "  " + number);
+                item->setForeground(color);
+                item->setData(j, Qt::UserRole);
+                model->appendRow(item);
+                const auto* f = mc263::modrinth::primaryFile(x);
+                files << (f ? QString::fromStdString(f->filename) : QString());
+                if ((type.isEmpty() || type == "release") && releaseIdx < 0) releaseIdx = j;
+                if (!ch.preferredVersionId.empty() && x.id == ch.preferredVersionId) defaultIdx = j;
+            }
+            combo->setModel(model);
+            combo->setCurrentIndex(defaultIdx >= 0 ? defaultIdx
+                                                   : (releaseIdx >= 0 ? releaseIdx : 0));
+            table->setCellWidget(i, 1, combo);
+            const int sel = combo->currentIndex();
+            auto* file = new QTableWidgetItem(files.value(sel));
+            table->setItem(i, 2, file);
+            connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dlg,
+                    [file, files](int idx) {
+                        if (idx >= 0 && idx < files.size()) file->setText(files[idx]);
+                    });
+            combos.push_back(combo);
+        }
+        table->setColumnWidth(1, 220);
+        v->addWidget(table, 1);
+        auto* legend = new QLabel(
+            "R = Release 正式版（推荐）    B = Beta    A = Alpha", &dlg);
+        legend->setObjectName("muted");
+        v->addWidget(legend);
+        if (!manual.empty()) {
+            auto* miss = new QLabel(
+                QString("另有 %1 个前置无法自动下载，下一步会给出网页链接。").arg(manual.size()),
+                &dlg);
+            miss->setObjectName("muted");
+            miss->setWordWrap(true);
+            v->addWidget(miss);
+        }
+        dlg.resize(760, 420);
+        auto* row = new QHBoxLayout();
+        row->addStretch(1);
+        auto* go = new QPushButton("一起安装", &dlg);
+        go->setObjectName("primary");
+        auto* cancel = new QPushButton("取消", &dlg);
+        row->addWidget(go);
+        row->addWidget(cancel);
+        v->addLayout(row);
+        connect(go, &QPushButton::clicked, &dlg, &QDialog::accept);
+        connect(cancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+        if (dlg.exec() != QDialog::Accepted) {
+            modInstallBtn_->setEnabled(true);
+            modState_->setText("已取消");
+            return;
+        }
+
+        std::vector<SelectedDep> selected;
+        for (int i = 0; i < static_cast<int>(choices.size()); ++i) {
+            const int idx = combos[i]->currentData().toInt();
+            if (idx < 0 || idx >= static_cast<int>(choices[static_cast<size_t>(i)].versions.size()))
+                continue;
+            selected.push_back(SelectedDep{
+                choices[static_cast<size_t>(i)].projectId,
+                choices[static_cast<size_t>(i)].title,
+                choices[static_cast<size_t>(i)].versions[static_cast<size_t>(idx)]});
+        }
+        modState_->setText("解析前置依赖…");
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, root, title, selected, manual, loader, ver, cache, mods] {
+            mc263::modrinth::DepPlan plan;
+            std::set<std::string> seen;
+            std::set<std::string> manualSeen;
+            auto addManual = [&](const mc263::modrinth::DepItem& x) {
+                const std::string key = x.projectId + "|" + x.fileName + "|" + x.url;
+                if (manualSeen.insert(key).second) plan.manual.push_back(x);
+            };
+            for (const auto& sd : selected) {
+                if (!seen.insert(sd.projectId).second) continue;
+                mc263::modrinth::DepItem item;
+                item.projectId = sd.projectId;
+                item.versionId = sd.version.id;
+                item.versionNumber = sd.version.number;
+                item.title = sd.title.toStdString();
+                const auto* f = mc263::modrinth::primaryFile(sd.version);
+                if (!f) {
+                    item.reason = "没有可下载的主文件";
+                    addManual(item);
+                    continue;
+                }
+                item.file = *f;
+                plan.resolved.push_back(std::move(item));
+            }
+            std::string err;
+            for (const auto& sd : selected) {
+                mc263::modrinth::DepPlan sub;
+                mc263::modrinth::resolveDependencies(sd.version, loader, ver, cache, sub, err);
+                for (auto& x : sub.resolved)
+                    if (seen.insert(x.projectId).second) plan.resolved.push_back(std::move(x));
+                for (const auto& x : sub.manual) addManual(x);
+            }
+            for (const auto& x : manual) addManual(x);
+            QMetaObject::invokeMethod(qApp, [guard, root, plan, mods, title] {
+                if (guard) guard->askInstallPlan(title, root, plan, mods);
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    void downloadSelectedContent(const std::string& project, const QString& title,
+                                 const QString& type) {
+        const std::string ver = modGameVersion().toStdString();
+        if (ver.empty()) { modState_->setText("先在下载页安装一个游戏版本"); return; }
+        modInstallBtn_->setEnabled(false);
+        modState_->setText("获取 " + title + " 的版本…");
+        const auto cache = layout_.configDir / "cache";
+        const QString sel = modSelectedVersion();
+        const auto base = sel.isEmpty()
+                              ? core::isolatedGameDir(layout_, cfg_)
+                              : layout_.versionsDir / sel.toStdString();
+        const auto dest = base / (type == "shader" ? "shaderpacks" : "resourcepacks");
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, project, ver, cache, dest, title] {
+            std::vector<mc263::modrinth::Version> list;
+            std::string err;
+            if (!mc263::modrinth::versions(project, "", ver, cache, list, err)) {
+                QMetaObject::invokeMethod(qApp, [guard, err] {
+                    if (!guard) return;
+                    guard->modInstallBtn_->setEnabled(true);
+                    guard->modState_->setText("获取版本失败：" + QString::fromStdString(err));
+                }, Qt::QueuedConnection);
+                return;
+            }
+            const mc263::modrinth::Version* pick = nullptr;
+            for (const auto& x : list)
+                if (mc263::modrinth::primaryFile(x) &&
+                    (x.versionType.empty() || x.versionType == "release")) { pick = &x; break; }
+            if (!pick)
+                for (const auto& x : list)
+                    if (mc263::modrinth::primaryFile(x)) { pick = &x; break; }
+            if (!pick) {
+                QMetaObject::invokeMethod(qApp, [guard] {
+                    if (!guard) return;
+                    guard->modInstallBtn_->setEnabled(true);
+                    guard->modState_->setText("没有适配该游戏版本的文件");
+                }, Qt::QueuedConnection);
+                return;
+            }
+            const auto* f = mc263::modrinth::primaryFile(*pick);
+            std::error_code ec;
+            std::filesystem::create_directories(dest, ec);
+            mc263::dl::Task task{f->url, dest / f->filename, f->sha1, 0644, f->filename};
+            std::string derr;
+            bool cached = false;
+            const bool ok = mc263::dl::fetchOne(task, "", 180, true, derr, cached);
+            const QString fileName = QString::fromStdString(f->filename);
+            QMetaObject::invokeMethod(qApp, [guard, ok, derr, fileName, cached, title] {
+                if (!guard) return;
+                guard->modInstallBtn_->setEnabled(true);
+                if (!ok) {
+                    guard->modState_->setText("下载失败：" + QString::fromStdString(derr));
                     return;
                 }
-                guard->askInstallPlan(title, list.front(), plan, mods);
+                guard->modState_->setText(
+                    QString("%1 %2：%3").arg(title, cached ? "已存在" : "已下载", fileName));
+                guard->modLog_->appendPlainText(
+                    QString("[%1] %2 %3").arg(QTime::currentTime().toString("HH:mm:ss"),
+                                              title, cached ? "已存在" : "下载完成"));
+                guard->refreshResources();
             }, Qt::QueuedConnection);
         }).detach();
     }
@@ -1815,14 +2091,15 @@ private:
     // 版本管理：左栏列已装版本，右栏是 Java 与兼容性（原「Java 与兼容性」页融进来）
     // ---- 已装 Mod 管理 ----
     std::filesystem::path currentModsDir() const {
+        const QString v = modSelectedVersion();
+        if (!v.isEmpty()) return layout_.versionsDir / v.toStdString() / "mods";
         return core::isolatedGameDir(layout_, cfg_) / "mods";
     }
 
     void refreshInstalledMods() {
         if (!instModTable_) return;
         const auto dir = currentModsDir();
-        // 只读：不要 create_directories —— 否则只是点开这一页就会凭空多出
-        // versions/<版本>+<加载器>/mods 这种目录
+        // 只读：不要 create_directories，否则点开页面就会凭空生成版本目录
         const auto entries = core::listEntries(dir);
         instModTable_->setRowCount(0);
         int enabledCount = 0;
@@ -1832,11 +2109,13 @@ private:
             instModTable_->insertRow(r);
             auto* nameItem = new QTableWidgetItem(QString::fromStdString(e.name));
             nameItem->setData(Qt::UserRole, QString::fromStdString(e.path.string()));
+            nameItem->setToolTip(QString::fromStdString(e.name));
             instModTable_->setItem(r, 0, nameItem);
             instModTable_->setItem(r, 1, new QTableWidgetItem(e.enabled ? "启用" : "已禁用"));
-            instModTable_->setItem(r, 2, new QTableWidgetItem(QString::number(e.size / 1024.0, 'f', 0) + " KB"));
             if (e.enabled) ++enabledCount;
         }
+        instModTable_->resizeRowsToContents();
+        instModTable_->scrollToTop();
         if (instModState_)
             instModState_->setText(QString("共 %1 个，启用 %2 个；目录：%3")
                                        .arg(instModTable_->rowCount())
@@ -1896,8 +2175,9 @@ private:
         const auto dir = currentModsDir();
         auto entries = core::listEntries(dir);
         if (entries.empty()) { instModState_->setText("没有已装的 Mod"); return; }
-        const std::string loader = modLoader_->currentData().toString().toStdString();
-        const std::string ver = modVersionEdit_->text().trimmed().toStdString();
+        const std::string loader = modSelectedLoader().toStdString();
+        const std::string ver = modGameVersion().toStdString();
+        if (ver.empty()) { instModState_->setText("先在下载页安装一个游戏版本"); return; }
         const auto cache = layout_.configDir / "cache";
         instModState_->setText("检查更新中…");
         QPointer<LauncherWindow> guard(this);
@@ -1943,10 +2223,62 @@ private:
         }).detach();
     }
 
+    // 已装 Mod 管理卡片：放进版本管理页顶部，跟随左侧选中的版本
+    QWidget* installedModsCard(QWidget* parent) {
+        auto* ibox = new QGroupBox("已装 Mod（当前版本目录）", parent);
+        auto* iv = new QVBoxLayout(ibox);
+        setCardTitle(ibox, iv, "已装 Mod（当前版本目录）");
+        instModTable_ = new QTableWidget(0, 2, ibox);
+        instModTable_->setHorizontalHeaderLabels({"文件", "状态"});
+        instModTable_->horizontalHeader()->setStretchLastSection(false);
+        instModTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+        instModTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        instModTable_->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        instModTable_->setWordWrap(true);
+        instModTable_->setTextElideMode(Qt::ElideNone);
+        instModTable_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        instModTable_->verticalHeader()->setVisible(false);
+        instModTable_->setShowGrid(false);
+        instModTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        instModTable_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        instModTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        enlargeTable(instModTable_, 3);
+        iv->addWidget(instModTable_, 1);
+        auto* mrow = new QHBoxLayout();
+        auto* iRefresh = new QPushButton("刷新", ibox);
+        auto* iToggle = new QPushButton("启用 / 禁用", ibox);
+        auto* iDelete = new QPushButton("删除", ibox);
+        auto* iUpdate = new QPushButton("检查更新", ibox);
+        auto* iOpen = new QPushButton("打开目录", ibox);
+        mrow->addWidget(iRefresh);
+        mrow->addWidget(iToggle);
+        mrow->addWidget(iDelete);
+        mrow->addWidget(iUpdate);
+        mrow->addWidget(iOpen);
+        mrow->addStretch(1);
+        iv->addLayout(mrow);
+        instModState_ = new QLabel("切到这一页会自动刷新；更新只认 Modrinth 上有的文件", ibox);
+        instModState_->setObjectName("muted");
+        iv->addWidget(instModState_);
+
+        connect(iRefresh, &QPushButton::clicked, this, &LauncherWindow::refreshInstalledMods);
+        connect(iToggle, &QPushButton::clicked, this, &LauncherWindow::toggleInstalledMod);
+        connect(iDelete, &QPushButton::clicked, this, &LauncherWindow::deleteInstalledMod);
+        connect(iUpdate, &QPushButton::clicked, this, &LauncherWindow::updateInstalledMods);
+        connect(iOpen, &QPushButton::clicked, this, [this] {
+            const auto dir = currentModsDir();
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            QProcess::startDetached("xdg-open", {QString::fromStdString(dir.string())});
+        });
+        return ibox;
+    }
+
     QWidget* pageVersionManager() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        addPageHeader(v, "版本管理", "左边是已装的游戏版本，右边是这个版本要的 Java 与兼容性查验");
+        addPageHeader(v, "版本管理",
+                      "左边是已装版本；右侧索引可切换「Mod 管理」「Java 设置」「JVM / 显示」");
 
         auto* row = new QHBoxLayout();
         row->setSpacing(12);
@@ -1978,6 +2310,8 @@ private:
         auto* rv = new QVBoxLayout(right);
         rv->setContentsMargins(0, 0, 0, 0);
         rv->setSpacing(10);
+        auto* modsCard = installedModsCard(right);
+        rv->addWidget(modsCard, 3);
         verSummary_ = new QLabel(right);
         verSummary_->setObjectName("pageSubtitle");
         verSummary_->setWordWrap(true);
@@ -2016,6 +2350,34 @@ private:
         jv->addWidget(javaState_);
         rv->addWidget(jbox, 2);
 
+        auto* vjbox = new QGroupBox("JVM / 显示（当前版本）", right);
+        auto* vjv = new QFormLayout(vjbox);
+        setCardTitle(vjbox, vjv, "JVM / 显示（当前版本）");
+        extraArgsEdit_ = new QLineEdit(vjbox);
+        extraArgsEdit_->setPlaceholderText("例如 滚木！");
+        vjv->addRow("额外 JVM 参数", extraArgsEdit_);
+        langCombo_ = new QComboBox(vjbox);
+        langCombo_->addItem(QString("跟随系统(%1)")
+                                .arg(QString::fromStdString(core::detectSystemLanguage())), QString());
+        for (const char* code : {"en_us", "zh_cn", "zh_tw", "ja_jp", "ko_kr", "de_de",
+                                  "fr_fr", "es_es", "pt_br", "ru_ru"})
+            langCombo_->addItem(QString::fromLatin1(code), QString::fromLatin1(code));
+        vjv->addRow("游戏语言", langCombo_);
+        gameDisplay_ = new QComboBox(vjbox);
+        gameDisplay_->addItem("自动（让游戏自己选）", "auto");
+        gameDisplay_->addItem("Wayland 原生", "wayland");
+        gameDisplay_->addItem("XWayland（强制 x11）", "x11");
+        gameDisplay_->setToolTip(
+            "只影响游戏进程的 SDL 后端。niri 没有 fifo-v1 时 SDL 会自动退回 XWayland；\n"
+            "想强制原生 Wayland 选第二项（SDL_VIDEO_DRIVER=wayland）。");
+        vjv->addRow("游戏显示后端", gameDisplay_);
+        connect(extraArgsEdit_, &QLineEdit::textChanged, this, [this] { saveVersionJvmOptions(); });
+        connect(langCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this](int) { saveVersionJvmOptions(); });
+        connect(gameDisplay_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this](int) { saveVersionJvmOptions(); });
+        rv->addWidget(vjbox, 2);
+
         auto* cbox = new QGroupBox("兼容性查验", right);
         auto* cv = new QVBoxLayout(cbox);
         setCardTitle(cbox, cv, "兼容性查验");
@@ -2044,6 +2406,22 @@ private:
         scroll->setFrameShape(QFrame::NoFrame);
         scroll->setWidget(right);
         row->addWidget(scroll, 1);
+
+        auto* index = new QListWidget(w);
+        index->setFixedWidth(120);
+        index->setFrameShape(QFrame::NoFrame);
+        index->addItem("Mod 管理");
+        index->addItem("Java 设置");
+        index->addItem("JVM / 显示");
+        index->setCurrentRow(0);
+        connect(index, &QListWidget::currentRowChanged, this,
+                [scroll, modsCard, jbox, vjbox](int idx) {
+                    QWidget* target = idx == 2 ? static_cast<QWidget*>(vjbox)
+                                               : (idx == 1 ? static_cast<QWidget*>(jbox)
+                                                           : modsCard);
+                    scroll->ensureWidgetVisible(target);
+                });
+        row->addWidget(index);
         v->addLayout(row, 1);
 
         connect(verList_, &QListWidget::currentRowChanged, this, [this](int r) {
@@ -2099,6 +2477,7 @@ private:
             if (!hits.isEmpty()) idx = verList_->row(hits.first());
         }
         verList_->setCurrentRow(idx);
+        if (verList_->item(idx)) showVersionDetail(verList_->item(idx)->text());
     }
 
     // 右栏头部：所选版本的要求与占用
@@ -2121,6 +2500,49 @@ private:
                         .arg(count(dir / "saves"));
         s += QString("<br>%1").arg(QString::fromStdString(dir.string()));
         verSummary_->setText(s);
+        // 版本管理里选中的版本 = Mod 管理卡片 / JVM 设置的目标版本
+        if (modVersionCombo_) {
+            const int idx = modVersionCombo_->findData(id);
+            if (idx >= 0) modVersionCombo_->setCurrentIndex(idx);
+        }
+        loadVersionJvmSettings(id);
+        if (instModTable_) refreshInstalledMods();
+    }
+
+    void loadVersionJvmSettings(const QString& id) {
+        versionSettingsId_ = id.toStdString();
+        loadingVersionSettings_ = true;
+        const core::VersionOptions opt = cfg_.optionsFor(versionSettingsId_);
+        if (extraArgsEdit_) {
+            QStringList args;
+            for (const auto& a : opt.extraJvmArgs) args << QString::fromStdString(a);
+            extraArgsEdit_->setText(args.join(' '));
+        }
+        if (langCombo_) {
+            const int i = langCombo_->findData(QString::fromStdString(opt.language));
+            langCombo_->setCurrentIndex(i >= 0 ? i : 0);
+        }
+        if (gameDisplay_) {
+            const int i = gameDisplay_->findData(QString::fromStdString(opt.gameDisplay));
+            gameDisplay_->setCurrentIndex(i >= 0 ? i : 0);
+        }
+        loadingVersionSettings_ = false;
+    }
+
+    void saveVersionJvmOptions() {
+        if (loadingVersionSettings_ || versionSettingsId_.empty()) return;
+        core::VersionOptions opt = cfg_.optionsFor(versionSettingsId_);
+        opt.extraJvmArgs.clear();
+        if (extraArgsEdit_) {
+            const QString extra = extraArgsEdit_->text().trimmed();
+            if (!extra.isEmpty())
+                for (const QString& s : extra.split(' ', Qt::SkipEmptyParts))
+                    opt.extraJvmArgs.push_back(s.toStdString());
+        }
+        if (langCombo_) opt.language = langCombo_->currentData().toString().toStdString();
+        if (gameDisplay_) opt.gameDisplay = gameDisplay_->currentData().toString().toStdString();
+        cfg_.versionOptions[versionSettingsId_] = opt;
+        saveConfigQuietly();
     }
 
     QWidget* pageDirs() {
@@ -2273,7 +2695,9 @@ private:
     QWidget* pageResources() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        addPageHeader(v, "资源", "世界 / 资源包 / 光影都在当前版本目录下：可以导入、启用禁用、删除");
+        addPageHeader(v, "资源",
+                      "世界 / 资源包 / 光影都在当前版本目录下：可导入、启用禁用、删除；"
+                      "下载资源包与光影请到「资源下载」页");
 
         resTabs_ = new QTabWidget(w);
         savesTable_ = makeResTable(w, {"世界名", "状态", "大小"});
@@ -2284,9 +2708,12 @@ private:
         resTabs_->addTab(packsTable_, "资源包");
         resTabs_->addTab(shadersTable_, "光影");
         resTabs_->addTab(trashTable_, "回收站");
+
         v->addWidget(resTabs_, 1);
 
-        auto* row = new QHBoxLayout();
+        auto* actions = new QWidget(w);
+        auto* row = new QHBoxLayout(actions);
+        row->setContentsMargins(0, 0, 0, 0);
         auto* refresh = new QPushButton("刷新", w);
         auto* toggle = new QPushButton("启用 / 禁用", w);
         auto* del = new QPushButton("删除", w);
@@ -2304,7 +2731,7 @@ private:
         row->addWidget(openBtn);
         row->addStretch(1);
         row->addWidget(emptyBtn);
-        v->addLayout(row);
+        v->addWidget(actions);
         resState_ = new QLabel("", w);
         resState_->setObjectName("muted");
         v->addWidget(resState_);
@@ -2458,92 +2885,7 @@ private:
     QWidget* pageSettings() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        addPageHeader(v, "设置 / 内存", "改动即时保存；内存默认交给 JVM 管理，需要精细控制时再关掉自动");
-        core::MemInfo mi = core::readMemInfo();
-        memTotalMb_ = mi.totalMb >= 2048 ? static_cast<int>(mi.totalMb) : 4096;
-        if (mi.totalMb == 0) mi.totalMb = static_cast<uint64_t>(memTotalMb_);
-        memInfo_ = mi;
-        maxMemoryMb_ = std::max(2048, memTotalMb_ * 3 / 4);
-        auto* mbox = new QGroupBox("内存图形化配置", w);
-        auto* mv = new QVBoxLayout(mbox);
-        setCardTitle(mbox, mv, "内存图形化配置");
-
-        // 顶部：系统内存实况（其他程序占用 / 缓存 / 仅可用），每 2 秒刷新
-        auto* head = new QHBoxLayout();
-        memSummary_ = new QLabel(w);
-        memSummary_->setTextFormat(Qt::RichText);
-        auto* refreshMem = new QPushButton("刷新", w);
-        refreshMem->setToolTip("重新读取 /proc/meminfo");
-        head->addWidget(memSummary_, 1);
-        head->addWidget(refreshMem);
-        mv->addLayout(head);
-
-        memBar_ = new MemoryBar(w);
-        mv->addWidget(memBar_);
-
-        auto* legend = new QHBoxLayout();
-        usedStat_ = new QLabel(w);
-        cacheStat_ = new QLabel(w);
-        gameStat_ = new QLabel(w);
-        availStat_ = new QLabel(w);
-        for (QLabel* l : {usedStat_, cacheStat_, gameStat_, availStat_})
-            l->setTextFormat(Qt::RichText);
-        legend->addWidget(usedStat_);
-        legend->addSpacing(16);
-        legend->addWidget(cacheStat_);
-        legend->addSpacing(16);
-        legend->addWidget(gameStat_);
-        legend->addSpacing(16);
-        legend->addWidget(availStat_);
-        legend->addStretch(1);
-        mv->addLayout(legend);
-
-        memAuto_ = new QCheckBox("内存交给 JVM ", w);
-        memAuto_->setChecked(cfg_.autoMemory);
-        mv->addWidget(memAuto_);
-
-        auto* srow = new QHBoxLayout();
-        memSlider_ = new QSlider(Qt::Horizontal, w);
-        memSlider_->setRange(512, maxMemoryMb_); memSlider_->setSingleStep(256);
-        memSpin_ = new QSpinBox(w); memSpin_->setRange(512, maxMemoryMb_); memSpin_->setSingleStep(256);
-        memSpin_->setSuffix(" MB");
-        srow->addWidget(new QLabel("分给游戏", w));
-        srow->addWidget(memSlider_, 1); srow->addWidget(memSpin_);
-        mv->addLayout(srow);
-        memPreview_ = new QLabel("-Xmx4096M", w);
-        mv->addWidget(memPreview_);
-        memWarn_ = new QLabel(w);
-        memWarn_->setWordWrap(true);
-        memWarn_->hide();
-        mv->addWidget(memWarn_);
-        xmsCheck_ = new QCheckBox("同时设置初始内存 -Xms", w);
-        xmsSpin_ = new QSpinBox(w); xmsSpin_->setRange(256, maxMemoryMb_); xmsSpin_->setSuffix(" MB");
-        auto* xrow = new QHBoxLayout(); xrow->addWidget(xmsCheck_); xrow->addWidget(xmsSpin_); xrow->addStretch(1);
-        mv->addLayout(xrow);
-        v->addWidget(mbox);
-        auto* gbox = new QGroupBox("其他", w);
-        auto* form = new QFormLayout(gbox);
-        setCardTitle(gbox, form, "其他");
-        extraArgsEdit_ = new QLineEdit(w);
-        extraArgsEdit_->setPlaceholderText("例如 滚木！");
-        form->addRow("额外 JVM 参数", extraArgsEdit_);
-        langCombo_ = new QComboBox(w);
-        langCombo_->addItem(QString("跟随系统(%1)")
-                                .arg(QString::fromStdString(core::detectSystemLanguage())), QString());
-        for (const char* code : {"en_us", "zh_cn", "zh_tw", "ja_jp", "ko_kr", "de_de",
-                                  "fr_fr", "es_es", "pt_br", "ru_ru"})
-            langCombo_->addItem(QString::fromLatin1(code), QString::fromLatin1(code));
-        form->addRow("游戏语言", langCombo_);
-        gameDisplay_ = new QComboBox(w);
-        gameDisplay_->addItem("自动（让游戏自己选）", "auto");
-        gameDisplay_->addItem("Wayland 原生", "wayland");
-        gameDisplay_->addItem("XWayland（强制 x11）", "x11");
-        gameDisplay_->setToolTip(
-            "只影响游戏进程的 SDL 后端。niri 没有 fifo-v1 时 SDL 会自动退回 XWayland；\n"
-            "想强制原生 Wayland 选第二项（SDL_VIDEO_DRIVER=wayland）。");
-        form->addRow("游戏显示后端", gameDisplay_);
-        v->addWidget(gbox);
-
+        addPageHeader(v, "支持", "外观与关于 / 许可信息");
         auto* abox = new QGroupBox("外观", w);
         auto* aform = new QFormLayout(abox);
         setCardTitle(abox, aform, "外观");
@@ -2559,27 +2901,6 @@ private:
         v->addWidget(abox);
         v->addWidget(aboutSection());
         v->addStretch(1);
-        connect(memAuto_, &QCheckBox::toggled, this, [this] {
-            const bool manual = !memAuto_->isChecked();
-            memSlider_->setEnabled(manual);
-            memSpin_->setEnabled(manual);
-            xmsCheck_->setEnabled(manual);
-            xmsSpin_->setEnabled(manual && xmsCheck_->isChecked());
-            updateMemPreview();
-            scheduleAutoSave();
-        });
-        connect(memSlider_, &QSlider::valueChanged, memSpin_, &QSpinBox::setValue);
-        connect(memSpin_, QOverload<int>::of(&QSpinBox::valueChanged), memSlider_, &QSlider::setValue);
-        connect(memSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this] {
-            if (xmsSpin_) xmsSpin_->setMaximum(memSpin_->value());
-            updateMemPreview();
-        });
-        connect(refreshMem, &QPushButton::clicked, this, &LauncherWindow::refreshMemory);
-        // 定时器只读 /proc/meminfo（几 KB，微秒级），不占后台线程
-        auto* memTimer = new QTimer(this);
-        connect(memTimer, &QTimer::timeout, this, &LauncherWindow::refreshMemory);
-        memTimer->start(2000);
-        refreshMemory();
         return w;
     }
 
@@ -2592,53 +2913,105 @@ private:
             std::vector<core::LoaderVersion> list;
             std::string err;
             const bool ok = core::loaderVersions(loader, cache, list, err);
-            QMetaObject::invokeMethod(qApp, [guard, ok, err, list] {
-                if (guard) guard->applyLoaderVersions(ok, err, list);
+            QMetaObject::invokeMethod(qApp, [guard, ok, err, list, loader] {
+                if (guard) guard->applyLoaderVersions(ok, err, list, loader);
             }, Qt::QueuedConnection);
         }).detach();
     }
 
     void applyLoaderVersions(bool ok, const std::string& err,
-                             const std::vector<core::LoaderVersion>& list) {
+                             const std::vector<core::LoaderVersion>& list,
+                             const std::string& loader) {
         loaderVerCombo_->clear();
-        if (!ok) {
+        loaderVerCombo_->setEnabled(false);
+        if (!ok || list.empty()) {
             loaderState_->setText("获取失败：" + QString::fromStdString(err));
             return;
         }
-        for (const auto& v : list)
-            loaderVerCombo_->addItem(QString::fromStdString(v.version) + (v.stable ? "（稳定）" : ""),
-                                     QString::fromStdString(v.version));
-        loaderState_->setText(QString("共 %1 个版本，选一个再点安装").arg(list.size()));
+        int latestIdx = -1;
+        for (int i = 0; i < static_cast<int>(list.size()); ++i)
+            if (list[static_cast<size_t>(i)].stable) { latestIdx = i; break; }
+        if (latestIdx < 0) latestIdx = 0;
+        const auto& latest = list[static_cast<size_t>(latestIdx)];
+        loaderVerCombo_->addItem(
+            QString::fromStdString(latest.version) + (latest.stable ? "（稳定）" : ""),
+            QString::fromStdString(latest.version));
+        loaderVerCombo_->setCurrentIndex(0);
+        loaderState_->setText(QString("已固定最新%1版 %2")
+                                  .arg(latest.stable ? "稳定" : "预览",
+                                       QString::fromStdString(latest.version)));
+        if (loaderAutoUpdating_) {
+            loaderState_->setText("正在自动更新加载器…");
+            return;
+        }
+        const std::string activeLoader =
+            !cfg_.profile.empty() ? cfg_.profile : (cfg_.fabric ? "fabric" : "");
+        if (activeLoader != loader) return;
+
+        const std::string installed =
+            core::installedLoaderVersion(layout_, cfg_.version, loader);
+        int installedIdx = -1;
+        for (int i = 0; i < static_cast<int>(list.size()); ++i)
+            if (list[static_cast<size_t>(i)].version == installed) { installedIdx = i; break; }
+        if (!installed.empty() && installedIdx == latestIdx) {
+            loaderState_->setText(QString("已是最新%1版 %2")
+                                      .arg(latest.stable ? "稳定" : "预览",
+                                           QString::fromStdString(latest.version)));
+            return;
+        }
+        // API 按新→旧排列：已装的比最新稳定版还新（例如手动装过 beta）就不降级
+        if (!installed.empty() && installedIdx >= 0 && installedIdx < latestIdx) return;
+        startLoaderInstall(loader, latest.version, true);
     }
 
     void installSelectedLoader() {
         if (loaderVerCombo_->count() == 0) { loaderState_->setText("先点「获取版本」"); return; }
         const std::string loader = loaderCombo_->currentData().toString().toStdString();
         const std::string lv = loaderVerCombo_->currentData().toString().toStdString();
+        startLoaderInstall(loader, lv, false);
+    }
+
+    void startLoaderInstall(const std::string& loader, const std::string& lv, bool autoUpdate) {
         core::Config c = cfg_;
         core::Layout l = layout_;
+        loaderAutoUpdating_ = autoUpdate;
         installLoaderBtn_->setEnabled(false);
-        loaderState_->setText("安装中…（会下载加载器依赖）");
+        loaderCombo_->setEnabled(false);
+        loaderVerCombo_->setEnabled(false);
+        loaderState_->setText(autoUpdate
+                                  ? QString("发现新版本，自动更新到 %1…").arg(QString::fromStdString(lv))
+                                  : "安装中…（会下载加载器依赖）");
         QPointer<LauncherWindow> guard(this);
-        std::thread([guard, l, c, loader, lv]() mutable {
+        std::thread([guard, l, c, loader, lv, autoUpdate]() mutable {
             std::string err;
             const bool ok = core::installLoader(l, c, loader, lv, nullptr, err);
-            QMetaObject::invokeMethod(qApp, [guard, ok, err, c, loader, lv] {
+            QMetaObject::invokeMethod(qApp, [guard, ok, err, c, loader, lv, autoUpdate] {
                 if (!guard) return;
+                guard->loaderAutoUpdating_ = false;
                 guard->installLoaderBtn_->setEnabled(true);
+                guard->loaderCombo_->setEnabled(true);
+                guard->loaderVerCombo_->setEnabled(false);
                 if (!ok) {
-                    guard->loaderState_->setText("失败：" + QString::fromStdString(err));
+                    guard->loaderState_->setText(
+                        (autoUpdate ? "自动更新失败：" : "失败：") + QString::fromStdString(err));
                     return;
                 }
                 guard->cfg_ = c;
                 std::string serr;
                 guard->cfg_.save(guard->layout_.configFile, serr);
-                guard->loaderState_->setText(QString("已装 %1 %2 → %3")
-                                                 .arg(QString::fromStdString(loader), QString::fromStdString(lv),
-                                                      QString::fromStdString(core::versionDirName(c))));
-                guard->modLog_->appendPlainText(QString("[%1] 加载器 %2 %3 安装完成")
-                                                    .arg(QTime::currentTime().toString("HH:mm:ss"),
-                                                         QString::fromStdString(loader), QString::fromStdString(lv)));
+                if (guard->launchVersion_)
+                    guard->launchVersion_->setCurrentText(
+                        QString::fromStdString(core::versionDirName(c)));
+                guard->loaderState_->setText(
+                    (autoUpdate ? QString("已自动更新加载器 %1 %2 → %3")
+                                  : QString("已装 %1 %2 → %3"))
+                        .arg(QString::fromStdString(loader), QString::fromStdString(lv),
+                             QString::fromStdString(core::versionDirName(c))));
+                guard->modLog_->appendPlainText(
+                    QString("[%1] 加载器 %2 %3 %4")
+                        .arg(QTime::currentTime().toString("HH:mm:ss"),
+                             QString::fromStdString(loader), QString::fromStdString(lv),
+                             autoUpdate ? "已自动更新" : "安装完成"));
             }, Qt::QueuedConnection);
         }).detach();
     }
@@ -2855,8 +3228,14 @@ private:
         switching_ = true;
         const QPixmap old = stack_->grab();
         stack_->setCurrentIndex(idx);
-        if (idx == 2) refreshInstalledMods();     // Mod 页：刷新已装列表
-        else if (idx == 3) refreshVersionList();
+        if (idx == 2) {                            // Mod 页：刷新版本下拉与加载器
+            refreshModVersionChoices();
+            refreshLoaderVersions();
+        }
+        else if (idx == 3) {                       // 版本管理：版本列表 + 已装 Mod
+            refreshVersionList();
+            refreshInstalledMods();
+        }
         else if (idx == 5) refreshResources();    // 资源页
         if (old.isNull()) return;
         auto* ov = new FadeOverlay(stack_, old);
@@ -2943,7 +3322,7 @@ private:
 
     void loadConfigToUi() {
         usernameEdit_->setText(QString::fromStdString(cfg_.username));
-        launchVersion_->setCurrentText(QString::fromStdString(cfg_.version));
+        launchVersion_->setCurrentText(QString::fromStdString(core::versionDirName(cfg_)));
         downloadVersion_->setCurrentText(QString::fromStdString(cfg_.version));
         int mi = mirrorCombo_->findData(QString::fromStdString(cfg_.mirror));
         if (mi >= 0) mirrorCombo_->setCurrentIndex(mi);
@@ -2957,21 +3336,9 @@ private:
             runtimeCheck_->setChecked(std::find(cfg_.components.begin(), cfg_.components.end(),
                                                "runtime") != cfg_.components.end());
         gameDirEdit_->setText(QString::fromStdString(layout_.gameDir.string()));
-        for (const auto& a : cfg_.extraJvmArgs) {
-            if (!extraArgsEdit_->text().isEmpty()) extraArgsEdit_->setText(extraArgsEdit_->text() + " ");
-            extraArgsEdit_->setText(extraArgsEdit_->text() + QString::fromStdString(a));
-        }
         if (themeCombo_) {
             const int ti = themeCombo_->findData(QString::fromStdString(cfg_.themeSource));
             themeCombo_->setCurrentIndex(ti >= 0 ? ti : 0);
-        }
-        if (gameDisplay_) {
-            const int gi = gameDisplay_->findData(QString::fromStdString(cfg_.gameDisplay));
-            gameDisplay_->setCurrentIndex(gi >= 0 ? gi : 0);
-        }
-        if (langCombo_) {
-            const int li = langCombo_->findData(QString::fromStdString(cfg_.language));
-            langCombo_->setCurrentIndex(li >= 0 ? li : 0);
         }
         memAuto_->setChecked(cfg_.autoMemory);
         memSlider_->setEnabled(!cfg_.autoMemory);
@@ -2985,18 +3352,19 @@ private:
         updateMemPreview();
     }
     void collectUiToConfig() {
-        cfg_.version = launchVersion_->currentText().toStdString();
-        if (cfg_.version.empty()) cfg_.version = "26.3";
-        // 下拉框里列的是 versions/ 下的真实目录名，可能是 "26.3+fabric"：
-        // 拆成 base + profile，避免再拼一次变成 "26.3+fabric+quilt"。
-        if (const auto plus = cfg_.version.rfind('+'); plus != std::string::npos) {
-            cfg_.profile = cfg_.version.substr(plus + 1);
-            cfg_.version = cfg_.version.substr(0, plus);
+        std::string selected = launchVersion_->currentText().toStdString();
+        if (selected.empty()) selected = "26.3";
+        // 下拉框里可能直接是加载器目录（26.3+fabric）：拆成 base + profile，
+        // 避免 versionDirName 再拼一次变成 26.3+fabric+fabric
+        if (const auto plus = selected.rfind('+'); plus != std::string::npos) {
+            cfg_.profile = selected.substr(plus + 1);
+            selected.resize(plus);
             cfg_.fabric = (cfg_.profile == "fabric");
         } else {
             cfg_.profile.clear();
             cfg_.fabric = false;
         }
+        cfg_.version = selected;
         cfg_.username = usernameEdit_->text().toStdString();
         cfg_.mirror = mirrorCombo_->currentData().toString().toStdString();
         cfg_.jobs = jobsSpin_->value();
@@ -3008,13 +3376,7 @@ private:
         for (auto* cb : compChecks_) if (cb->isChecked()) cfg_.components.push_back(cb->property("comp").toString().toStdString());
         if (runtimeCheck_ && runtimeCheck_->isVisible() && runtimeCheck_->isChecked())
             cfg_.components.push_back("runtime");
-        if (langCombo_) cfg_.language = langCombo_->currentData().toString().toStdString();
         if (themeCombo_) cfg_.themeSource = themeCombo_->currentData().toString().toStdString();
-        if (gameDisplay_) cfg_.gameDisplay = gameDisplay_->currentData().toString().toStdString();
-        cfg_.extraJvmArgs.clear();
-        QString extra = extraArgsEdit_->text().trimmed();
-        if (!extra.isEmpty()) for (const QString& s : extra.split(' ', Qt::SkipEmptyParts))
-            cfg_.extraJvmArgs.push_back(s.toStdString());
         // 注意：这里必须用 dataRoot_ 当沙箱根。装到 /usr/bin 时 exe 目录不可写、
         // 数据在 ~/.local/share/mc263，用 Layout::detect(exe, dir) 会把沙箱根设成
         // /usr/bin，于是 XDG 下的目录被守卫当成 /home 敏感路径拒掉（启动直接报
@@ -3041,7 +3403,6 @@ private:
         connect(autosaveTimer_, &QTimer::timeout, this, &LauncherWindow::saveConfigQuietly);
 
         connect(usernameEdit_, &QLineEdit::textChanged, this, &LauncherWindow::scheduleAutoSave);
-        connect(extraArgsEdit_, &QLineEdit::textChanged, this, &LauncherWindow::scheduleAutoSave);
         connect(launchVersion_, &QComboBox::currentTextChanged, this, &LauncherWindow::scheduleAutoSave);
         connect(mirrorCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &LauncherWindow::scheduleAutoSave);
@@ -3050,10 +3411,6 @@ private:
         connect(memSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &LauncherWindow::scheduleAutoSave);
         connect(xmsSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
-                this, &LauncherWindow::scheduleAutoSave);
-        connect(langCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                this, &LauncherWindow::scheduleAutoSave);
-        connect(gameDisplay_, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &LauncherWindow::scheduleAutoSave);
         connect(themeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
             if (loadingConfig_) return;
@@ -3092,56 +3449,48 @@ private:
         QString cur = launchVersion_->currentText();
         launchVersion_->clear();
         for (const auto& v : vers) launchVersion_->addItem(QString::fromStdString(v));
-        if (cur.isEmpty() && !cfg_.version.empty()) launchVersion_->addItem(QString::fromStdString(cfg_.version));
+        const QString active = QString::fromStdString(core::versionDirName(cfg_));
+        if (cur.isEmpty() && !cfg_.version.empty()) launchVersion_->addItem(active);
         if (!cur.isEmpty()) launchVersion_->setCurrentText(cur);
-        else launchVersion_->setCurrentText(QString::fromStdString(cfg_.version));
+        else launchVersion_->setCurrentText(active);
         launchState_->setText("本地版本 " + QString::number(vers.size()) + " 个");
         refreshVersionList();
     }
     // 取 Mojang 的 latest.snapshot（预览版），填进版本框，让用户自己点开始下载
     void fetchLatestSnapshot() {
-        auto* p = new QProcess(this);
-        p->setProgram(pythonBin());
-        p->setArguments({QString::fromStdString(scriptPath_.string()), "--latest-snapshot",
-                         "--mc-dir", QString::fromStdString(layout_.gameDir.string())});
+        collectUiToConfig();
+        const core::Layout l = layout_;
+        const std::string mirror = cfg_.mirror;
         QPointer<LauncherWindow> guard(this);
-        connect(p, &QProcess::finished, this, [this, guard, p](int, QProcess::ExitStatus) {
-            const QJsonDocument doc = QJsonDocument::fromJson(p->readAllStandardOutput());
-            const QString id = doc.isObject() ? doc.object().value("version").toString() : QString();
-            if (guard) {
-                if (id.isEmpty()) {
-                    downloadLog_->appendPlainText(
-                        "拿不到最新预览版:" + QString::fromUtf8(p->readAllStandardError()).trimmed());
+        std::thread([guard, l, mirror] {
+            std::string err;
+            const std::string id = core::latestSnapshot(mirror, l.configDir / "cache", err);
+            QMetaObject::invokeMethod(qApp, [guard, id, err] {
+                if (!guard) return;
+                if (id.empty()) {
+                    guard->downloadLog_->appendPlainText(
+                        "拿不到最新预览版: " + QString::fromStdString(err));
                 } else {
-                    downloadVersion_->setCurrentText(id);
-                    downloadLog_->appendPlainText("最新预览版: " + id + " ");
+                    guard->downloadVersion_->setCurrentText(QString::fromStdString(id));
+                    guard->downloadLog_->appendPlainText("最新预览版: " + QString::fromStdString(id));
                 }
-            }
-            p->deleteLater();
-        });
-        p->start();
+            }, Qt::QueuedConnection);
+        }).detach();
     }
 
     void refreshOnlineVersions() {
-        auto* p = new QProcess(this);
-        p->setProgram(pythonBin());
-        QStringList listArgs{QString::fromStdString(scriptPath_.string()), "--list-versions",
-                             "--mc-dir", QString::fromStdString(layout_.gameDir.string())};
-        if (snapCheck_ && snapCheck_->isChecked()) listArgs << "--snapshots";
-        p->setArguments(listArgs);
+        collectUiToConfig();
+        const core::Layout l = layout_;
+        const std::string mirror = cfg_.mirror;
+        const bool snapshots = snapCheck_ && snapCheck_->isChecked();
         QPointer<LauncherWindow> guard(this);
-        connect(p, &QProcess::finished, this, [this, guard, p](int, QProcess::ExitStatus) {
-            QByteArray out = p->readAllStandardOutput();
-            std::vector<std::string> vers;
-            QJsonDocument doc = QJsonDocument::fromJson(out);
-            if (doc.isObject()) {
-                QJsonArray arr = doc.object().value("versions").toArray();
-                for (const auto& v : arr) vers.push_back(v.toString().toStdString());
-            }
-            if (guard) applyOnlineVersions(vers, vers.empty() ? QString::fromUtf8(p->readAllStandardError()) : QString());
-            p->deleteLater();
-        });
-        p->start();
+        std::thread([guard, l, mirror, snapshots] {
+            std::string err;
+            auto vers = core::onlineVersions(mirror, l.configDir / "cache", snapshots, 0, err);
+            QMetaObject::invokeMethod(qApp, [guard, vers, err] {
+                if (guard) guard->applyOnlineVersions(vers, QString::fromStdString(err));
+            }, Qt::QueuedConnection);
+        }).detach();
     }
 
     void refreshJava() {
@@ -3205,126 +3554,150 @@ private:
     }
 
     void startDownload() {
-        if (downloadProc_ && downloadProc_->state() != QProcess::NotRunning) {
+        if (downloadRunning_) {
             QMessageBox::information(this, "正在下载", "下载任务已经在运行");
             return;
         }
         collectUiToConfig();
         std::string err;
         cfg_.save(layout_.configFile, err);
-        saveDownloaderScript();
+        core::Config job = cfg_;
+        job.version = downloadVersion_->currentText().toStdString();
         downloadLog_->clear();
-        downloadLog_->appendPlainText("启动下载中 " + QString::number(cfg_.jobs) + ") ......");
-        QStringList comps;
-        for (const auto& s : cfg_.components) comps << QString::fromStdString(s);
-        downloadProc_ = new QProcess(this);
-        downloadProc_->setProcessChannelMode(QProcess::SeparateChannels);
-        downloadProc_->setProgram(pythonBin());
-        downloadProc_->setArguments({QString::fromStdString(scriptPath_.string()),
-                                     "--mc-dir", QString::fromStdString(layout_.gameDir.string()),
-                                     "--version", downloadVersion_->currentText(),
-                                     "--mirror", QString::fromStdString(cfg_.mirror),
-                                     "--jobs", QString::number(cfg_.jobs),
-                                     "--arch", QString::fromStdString(cfg_.arch),
-                                     "--components", comps.join(',')});
-        connect(downloadProc_, &QProcess::readyReadStandardOutput, this, &LauncherWindow::onDownloadOutput);
-        connect(downloadProc_, &QProcess::readyReadStandardError, this, [this] {
-            downloadLog_->appendPlainText(QString::fromUtf8(downloadProc_->readAllStandardError()).trimmed());
-        });
-        connect(downloadProc_, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
-            downloadBtn_->setEnabled(true);
-            cancelBtn_->setEnabled(false);
-            downloadLabel_->setText(code == 0 ? "下载完成" : "下载结束(退出码 " + QString::number(code) + ")");
-            if (code == 0) {
-                refreshLocalVersions();
-                refreshJava();  // 运行时下载完可能就有 Java 25 了，重新过一遍闸门
-            }
-        });
-        downloadBtn_->setEnabled(false);
-        cancelBtn_->setEnabled(true);
-        downloadProc_->start();
+        downloadLog_->appendPlainText("启动下载中（" + QString::number(job.jobs) + " 线程）......");
+        startDownloadJob(job, {}, false);
     }
 
     // 校验已装文件：只信本地 <版本>.json，缺/坏的文件由下载器补回，不重新拉清单
     void verifyInstalled() {
-        if (downloadProc_ && downloadProc_->state() != QProcess::NotRunning) {
+        if (downloadRunning_) {
             QMessageBox::information(this, "正在运行", "下载或校验任务已经在运行");
             return;
         }
         collectUiToConfig();
         std::string err;
         cfg_.save(layout_.configFile, err);
-        saveDownloaderScript();
-        const std::string ver = downloadVersion_->currentText().toStdString();
-        downloadLog_->clear();
+        const std::string ver = core::baseGameVersion(downloadVersion_->currentText().toStdString());
         if (!mc263::fsx::isFile(layout_.versionJson(ver))) {
+            downloadLog_->clear();
             downloadLog_->appendPlainText("本地没有 " + QString::fromStdString(ver) +
                                           " 的版本 json，先下载这个版本再校验。");
             downloadLabel_->setText("这个版本还没下载过");
             return;
         }
-        downloadLog_->appendPlainText("开始校验 " + QString::fromStdString(ver) +
-                                      "你在打什么主意");
-        downloadProc_ = new QProcess(this);
-        downloadProc_->setProcessChannelMode(QProcess::SeparateChannels);
-        downloadProc_->setProgram(pythonBin());
-        downloadProc_->setArguments({QString::fromStdString(scriptPath_.string()),
-                                     "--mc-dir", QString::fromStdString(layout_.gameDir.string()),
-                                     "--version", QString::fromStdString(ver),
-                                     "--mirror", QString::fromStdString(cfg_.mirror),
-                                     "--jobs", QString::number(cfg_.jobs),
-                                     "--arch", QString::fromStdString(cfg_.arch),
-                                     "--components", "jar,libraries,assets",
-                                     "--verify"});
-        connect(downloadProc_, &QProcess::readyReadStandardOutput, this, &LauncherWindow::onDownloadOutput);
-        connect(downloadProc_, &QProcess::readyReadStandardError, this, [this] {
-            downloadLog_->appendPlainText(QString::fromUtf8(downloadProc_->readAllStandardError()).trimmed());
-        });
-        connect(downloadProc_, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
-            downloadBtn_->setEnabled(true);
-            cancelBtn_->setEnabled(false);
-            downloadLabel_->setText(code == 0 ? "校验完成"
-                                              : "校验结束(退出码 " + QString::number(code) + ")");
-            if (code == 0) refreshLocalVersions();
-        });
-        downloadBtn_->setEnabled(false);
-        cancelBtn_->setEnabled(true);
-        downloadProc_->start();
+        core::Config job = cfg_;
+        job.version = ver;
+        job.components = {"jar", "libraries", "assets"};
+        core::DownloadOptions opt;
+        opt.mode = core::DownloadMode::Verify;
+        downloadLog_->clear();
+        downloadLog_->appendPlainText("开始校验 " + QString::fromStdString(ver) + " ...");
+        startDownloadJob(job, opt, true);
     }
 
-    void onDownloadOutput() {
-        buffer_ += QString::fromUtf8(downloadProc_->readAllStandardOutput());
-        int idx;
-        while ((idx = buffer_.indexOf('\n')) >= 0) {
-            QString line = buffer_.left(idx).trimmed();
-            buffer_.remove(0, idx + 1);
-            if (line.isEmpty()) continue;
-            QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8());
-            if (!doc.isObject()) { downloadLog_->appendPlainText(line); continue; }
-            QJsonObject o = doc.object();
-            QString stage = o.value("stage").toString();
-            int done = o.value("done").toInt(), total = o.value("total").toInt();
-            if (stage == "done") {
-                downloadLog_->appendPlainText(o.value("ok").toBool() ? "全部完成" : "部分文件失败");
-                continue;
+    // worker 线程只通过 queued 回调碰 UI；generation 用来丢弃取消后迟到的旧任务事件。
+    void startDownloadJob(core::Config job, core::DownloadOptions opt, bool verifyMode) {
+        const quint64 gen = ++downloadGeneration_;
+        auto token = std::make_shared<std::atomic_bool>(false);
+        downloadCancel_ = token;
+        downloadRunning_ = true;
+        downloadBtn_->setEnabled(false);
+        cancelBtn_->setEnabled(true);
+        downloadBar_->setRange(0, 0);
+        downloadLabel_->setText(verifyMode ? "校验中..." : "下载中...");
+        const core::Layout l = layout_;
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, l, job, opt, token, gen, verifyMode] {
+            struct Throttle {
+                std::chrono::steady_clock::time_point last{};
+                std::string stage;
+            };
+            auto throttle = std::make_shared<Throttle>();
+            auto progress = [guard, gen, throttle](const core::DownloadProgress& p) {
+                const auto now = std::chrono::steady_clock::now();
+                const bool force = !p.ok || p.done == p.total || p.stage == "summary" ||
+                                   p.stage == "done" || p.stage != throttle->stage;
+                if (!force && now - throttle->last < std::chrono::milliseconds(100)) return;
+                throttle->last = now;
+                throttle->stage = p.stage;
+                QMetaObject::invokeMethod(qApp, [guard, gen, p] {
+                    if (guard && guard->downloadGeneration_ == gen)
+                        guard->applyDownloadProgress(p);
+                }, Qt::QueuedConnection);
+            };
+            core::DownloadResult res;
+            try {
+                res = core::downloadAll(l, job, progress, opt,
+                    [token] { return token->load(); });
+            } catch (const std::exception& ex) {
+                res.error = std::string("下载线程异常: ") + ex.what();
+            } catch (...) {
+                res.error = "下载线程未知异常";
             }
-            if (stage == "summary") {
-                const QString text = o.value("label").toString();
-                downloadLog_->appendPlainText(text);
-                downloadLabel_->setText(text);
-                continue;
-            }
-            if (total > 0) {
-                downloadBar_->setRange(0, total);
-                downloadBar_->setValue(done);
-            }
-            downloadLabel_->setText(stage + "  " + QString::number(done) + "/" + QString::number(total) +
-                                    "  " + o.value("label").toString());
-            if (done % 50 == 0 || !o.value("ok").toBool())
-                downloadLog_->appendPlainText(stage + " " + QString::number(done) + "/" +
-                                              QString::number(total) + " " + o.value("label").toString() +
-                                              (o.value("ok").toBool() ? "" : " 失败: " + o.value("note").toString()));
+            QMetaObject::invokeMethod(qApp, [guard, res, gen, verifyMode] {
+                if (guard) guard->finishDownloadJob(res, verifyMode, gen);
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    void applyDownloadProgress(const core::DownloadProgress& p) {
+        if (p.stage == "summary") {
+            const QString text = QString::fromStdString(p.label);
+            downloadLog_->appendPlainText(text);
+            downloadLabel_->setText(text);
+            return;
         }
+        if (p.stage == "done") {
+            downloadLog_->appendPlainText(p.ok ? "全部完成" : "部分文件失败");
+            return;
+        }
+        if (p.total > 0) {
+            downloadBar_->setRange(0, static_cast<int>(p.total));
+            downloadBar_->setValue(static_cast<int>(p.done));
+        }
+        const QString label = QString::fromStdString(p.label);
+        const QString note = QString::fromStdString(p.note);
+        downloadLabel_->setText(QString::fromStdString(p.stage) + "  " +
+                                QString::number(p.done) + "/" + QString::number(p.total) +
+                                "  " + label);
+        if (p.done % 50 == 0 || !p.ok)
+            downloadLog_->appendPlainText(QString::fromStdString(p.stage) + " " +
+                                          QString::number(p.done) + "/" + QString::number(p.total) +
+                                          " " + label + (p.ok ? "" : " 失败: " + note));
+    }
+
+    void finishDownloadJob(const core::DownloadResult& r, bool verifyMode, quint64 gen) {
+        if (gen != downloadGeneration_) return;
+        downloadRunning_ = false;
+        if (downloadCancel_) downloadCancel_.reset();
+        downloadBtn_->setEnabled(true);
+        cancelBtn_->setEnabled(false);
+        downloadBar_->setRange(0, 1);
+        downloadBar_->setValue(1);
+        if (r.cancelled) {
+            downloadLabel_->setText("已取消");
+            downloadLog_->appendPlainText("任务已取消，未完成的 .part 文件已清理。");
+            return;
+        }
+        if (!r.ok) {
+            downloadLabel_->setText(verifyMode ? "校验结束" : "下载结束");
+            downloadLog_->appendPlainText("失败: " + QString::fromStdString(r.error) +
+                                          "（失败文件 " + QString::number(r.failed) + " 个）");
+            return;
+        }
+        if (verifyMode) {
+            downloadLabel_->setText(r.bad > 0
+                                        ? "校验完成，修复 " + QString::number(r.bad) + " 项"
+                                        : "校验完成，全部正常");
+            downloadLog_->appendPlainText(QString("校验完成：检查 %1 项，异常 %2，补下 %3，缓存 %4")
+                                              .arg(r.checked).arg(r.bad).arg(r.downloaded).arg(r.cached));
+        } else {
+            downloadLabel_->setText("下载完成");
+            downloadLog_->appendPlainText(QString("下载完成：新下载 %1，缓存命中 %2")
+                                              .arg(r.downloaded).arg(r.cached));
+        }
+        refreshLocalVersions();
+        if (!verifyMode) refreshJava();  // 运行时下载完可能就有 Java 25 了，重新过一遍闸门
     }
 
     // 崩溃摘要预览：复制走剪贴板，完整内容留在 note/ 里
@@ -3398,32 +3771,45 @@ private:
         } else {
             for (const auto& j : javas_) if (j.valid) { java = j; break; }
         }
+        // 当前版本的 JVM / 语言 / 显示后端：按版本目录隔离，没设置过则回退全局默认
+        const std::string optId = core::versionDirName(cfg_);
+        core::VersionOptions vopt = cfg_.optionsFor(optId);
+        core::Config run = cfg_;
+        run.extraJvmArgs = vopt.extraJvmArgs;
+        run.language = vopt.language;
+        run.gameDisplay = vopt.gameDisplay;
+        run.appliedLanguage = vopt.appliedLanguage;
         // 游戏以 options.txt 的 lang: 为准（--language 只是初始默认），
         // 所以启动器设置变了就把它写进去；设置没变则不动，尊重游戏里改过的语言。
-        const std::string wantLang = core::effectiveGameLanguage(cfg_);
-        if (wantLang != cfg_.appliedLanguage) {
+        QString langNotice;
+        const std::string wantLang = core::effectiveGameLanguage(run);
+        if (wantLang != run.appliedLanguage) {
             std::string lerr;
-            if (core::applyGameLanguage(core::isolatedGameDir(layout_, cfg_), wantLang, lerr)) {
-                cfg_.appliedLanguage = wantLang;
+            if (core::applyGameLanguage(
+                    layout_.versionsDir / core::effectiveVersionId(layout_, cfg_), wantLang, lerr)) {
+                vopt.appliedLanguage = wantLang;
+                cfg_.versionOptions[optId] = vopt;
                 std::string serr;
                 cfg_.save(layout_.configFile, serr);
-                launchLog_->appendPlainText("游戏语言 → " + QString::fromStdString(wantLang));
+                langNotice = "游戏语言 → " + QString::fromStdString(wantLang);
             } else {
-                launchLog_->appendPlainText("写 options.txt 语言失败：" + QString::fromStdString(lerr));
+                langNotice = "写 options.txt 语言失败：" + QString::fromStdString(lerr);
             }
         }
-        if (core::effectiveVersionId(layout_, cfg_) != core::versionDirName(cfg_)) {
-            launchLog_->appendPlainText(
-                QString("找不到 %1，本次改用原版 %2 启动")
-                    .arg(QString::fromStdString(core::versionDirName(cfg_)),
-                         QString::fromStdString(core::effectiveVersionId(layout_, cfg_))));
+        QString fallbackNotice;
+        if (core::effectiveVersionId(layout_, run) != core::versionDirName(run)) {
+            fallbackNotice = QString("找不到 %1，本次改用原版 %2 启动")
+                                 .arg(QString::fromStdString(core::versionDirName(run)),
+                                      QString::fromStdString(core::effectiveVersionId(layout_, run)));
         }
-        core::LaunchPlan plan = core::buildLaunchPlan(layout_, cfg_, java);
+        core::LaunchPlan plan = core::buildLaunchPlan(layout_, run, java);
         if (!plan.ok()) {
             QMessageBox::warning(this, "无法启动", QString::fromStdString(plan.error));
             return;
         }
         launchLog_->clear();
+        if (!langNotice.isEmpty()) launchLog_->appendPlainText(langNotice);
+        if (!fallbackNotice.isEmpty()) launchLog_->appendPlainText(fallbackNotice);
         launchLog_->appendPlainText("Java: " + QString::fromStdString(java.path.string()));
         launchLog_->appendPlainText("主类: " + QString::fromStdString(plan.mainClass));
         launchLog_->appendPlainText("classpath " + QString::number(plan.argv.size()) + " 个参数");
@@ -3450,15 +3836,15 @@ private:
         }
         launchProc_ = new QProcess(this);
         launchProc_->setProcessChannelMode(QProcess::MergedChannels);
-        // 游戏窗口后端：Minecraft 26.x 用 SDL3，SDL_VIDEO_DRIVER 可以强制 wayland / x11
+        // 游戏窗口后端：Minecraft 26.x 用 SDL3，SDL_VIDEO_DRIVER 可强制 wayland / x11
         {
             QProcessEnvironment penv = QProcessEnvironment::systemEnvironment();
-            if (cfg_.gameDisplay == "wayland") penv.insert("SDL_VIDEO_DRIVER", "wayland");
-            else if (cfg_.gameDisplay == "x11") penv.insert("SDL_VIDEO_DRIVER", "x11");
+            if (run.gameDisplay == "wayland") penv.insert("SDL_VIDEO_DRIVER", "wayland");
+            else if (run.gameDisplay == "x11") penv.insert("SDL_VIDEO_DRIVER", "x11");
             launchProc_->setProcessEnvironment(penv);
-            if (cfg_.gameDisplay != "auto")
+            if (run.gameDisplay != "auto")
                 launchLog_->appendPlainText("游戏显示后端：SDL_VIDEO_DRIVER=" +
-                                            QString::fromStdString(cfg_.gameDisplay));
+                                            QString::fromStdString(run.gameDisplay));
         }
         launchProc_->setWorkingDirectory(QString::fromStdString(plan.workDir.string()));
         QStringList args;
@@ -3496,10 +3882,10 @@ private:
     std::filesystem::path dataRoot_;
     core::Config cfg_;
     std::vector<core::JavaInfo> javas_;
-    std::filesystem::path scriptPath_;
     int maxMemoryMb_ = 8192;
-    QString buffer_;
-    QProcess* downloadProc_ = nullptr;
+    bool downloadRunning_ = false;
+    quint64 downloadGeneration_ = 0;
+    std::shared_ptr<std::atomic_bool> downloadCancel_;
     QProcess* launchProc_ = nullptr;
     QTabBar* nav_ = nullptr;
     QPointer<QWidget> fadeOverlay_;
@@ -3536,16 +3922,19 @@ private:
     QTimer* modSuggestTimer_ = nullptr;
     QHash<QString, QStringList> modSuggestCache_;
     QHash<QString, qint64> modSuggestCacheAt_;
-    QComboBox* modLoader_ = nullptr;
+    QComboBox* modContentType_ = nullptr;
+    QGroupBox* modLoaderBox_ = nullptr;
     QComboBox* modSort_ = nullptr;
     QComboBox* loaderCombo_ = nullptr;
     QComboBox* loaderVerCombo_ = nullptr;
     QPushButton* installLoaderBtn_ = nullptr;
     QLabel* loaderState_ = nullptr;
-    QLineEdit* modVersionEdit_ = nullptr;
+    bool loaderAutoUpdating_ = false;
+    QComboBox* modVersionCombo_ = nullptr;
     QTableWidget* modTable_ = nullptr;
     QPushButton* modSearchBtn_ = nullptr;
     QPushButton* modInstallBtn_ = nullptr;
+    QPushButton* modOpenDirBtn_ = nullptr;
     QLabel* modState_ = nullptr;
     QPlainTextEdit* modLog_ = nullptr;
     QPushButton* cancelBtn_ = nullptr;
@@ -3581,6 +3970,8 @@ private:
     QComboBox* langCombo_ = nullptr;
     QComboBox* themeCombo_ = nullptr;
     QComboBox* gameDisplay_ = nullptr;
+    std::string versionSettingsId_;
+    bool loadingVersionSettings_ = false;
     QFile launchLogFile_;
     std::filesystem::path launchLogPath_;
     QLabel* instModState_ = nullptr;
@@ -3591,6 +3982,7 @@ private:
     QTableWidget* shadersTable_ = nullptr;
     QTableWidget* trashTable_ = nullptr;
     QLabel* resState_ = nullptr;
+
     QCheckBox* snapCheck_ = nullptr;
     QListWidget* verList_ = nullptr;
     QLabel* verSummary_ = nullptr;

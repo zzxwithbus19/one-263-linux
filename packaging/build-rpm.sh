@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 把预编译好的 Qt6 启动器打成 rpm（装包时不需要编译器/Qt 开发包）
-#   bash packaging/build-rpm.sh                 输出 dist/mc263-<ver>-1.<arch>.rpm
+#   bash packaging/build-rpm.sh                 输出 dist/mc263-<ver>-7.<arch>.rpm
 #   bash packaging/build-rpm.sh --out ~/rpms    换输出目录
 #   bash packaging/build-rpm.sh --version 26.4  换版本号
 #
@@ -9,7 +9,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="26.3"
-RELEASE="1"
+RELEASE="7"
 OUT="$ROOT/dist"
 TOP="$ROOT/build/rpmbuild"
 ARCH="$(uname -m)"
@@ -21,7 +21,7 @@ usage() {
 
   --out DIR        rpm 输出目录（默认 dist/）
   --version VER    包版本号（默认 26.3）
-  --release N      包 release 号（默认 1；同版本改了内容要 +1，否则 dnf 视为已装）
+  --release N      包 release 号（默认 7；同版本又改了内容要再 +1，否则 dnf 视为已装）
   --arch ARCH      目标架构（默认 uname -m）
   --topdir DIR     rpmbuild 工作目录（默认 build/rpmbuild）
   --sign KEYID     用 GPG 密钥给 rpm 签名。RPM 6 内置 OpenPGP 签名（%_openpgp_sign gpg），
@@ -57,6 +57,7 @@ rm -rf "$TOP"
 mkdir -p "$TOP"/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
 cp "$ROOT/build/mc263-qt"          "$TOP/SOURCES/mc263-qt"
 cp "$ROOT/packaging/mc263.desktop" "$TOP/SOURCES/mc263.desktop"
+cp "$ROOT/packaging/mc263.metainfo.xml" "$TOP/SOURCES/mc263.metainfo.xml"
 cp "$ROOT/packaging/mc263.svg"     "$TOP/SOURCES/mc263.svg"
 cp "$ROOT/LICENSE"                 "$TOP/SOURCES/LICENSE"
 
@@ -104,6 +105,6 @@ echo "==> 产物"
 ls -lh "$OUT"/*.rpm "$BIN_ASSET"
 echo
 echo "本机安装: sudo dnf install $STABLE      # 或 sudo zypper install $STABLE"
-echo "独立 ELF: $BIN_ASSET   # 拷走 chmod +x 就能跑（需 qt6-qtbase + python3）"
+echo "独立 ELF: $BIN_ASSET   # 拷走 chmod +x 就能跑（需 qt6-qtbase + curl）"
 echo "校验完整性: cd $OUT && sha256sum -c SHA256SUMS"
 echo "发布到 Releases: 带发行版后缀的 rpm + 独立 ELF + SHA256SUMS（+ 可选公钥）。"

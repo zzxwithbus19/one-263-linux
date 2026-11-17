@@ -65,6 +65,14 @@ int main() {
     check(Config{}.jobs == 10, "并发线程默认 10");
     check(c2.components.size() == 2 && c2.extraJvmArgs.size() == 1, "数组字段一致");
     check(c2.xmxString() == "-Xmx6144M" && c2.xmsString() == "-Xms1024M", "Xmx/Xms 生成正确");
+    {
+        Config dc;
+        dc.version = "26.3";
+        dc.profile = "fabric";
+        check(versionDirName(dc) == "26.3+fabric", "版本目录名自动追加加载器");
+        dc.version = "26.3+fabric";
+        check(versionDirName(dc) == "26.3+fabric", "完整目录名不再重复追加加载器");
+    }
 
     // 3) 假版本 json
     fs::path vdir = l.versionDir("26.3");
@@ -157,16 +165,25 @@ int main() {
           "Modrinth 搜索响应解析");
 
     const std::string verJson = R"([{"id":"ver1","name":"Sodium 0.6","version_number":"0.6.0",
-        "game_versions":["26.3"],"loaders":["fabric"],
+        "version_type":"release","game_versions":["26.3"],"loaders":["fabric"],
         "files":[{"url":"https://cdn/x.jar","filename":"sodium-0.6.jar","size":2048,
                   "primary":true,"hashes":{"sha1":"abc123"}}]}])";
     std::vector<mc263::modrinth::Version> mvers;
     check(mc263::modrinth::parseVersions(verJson, mvers, merr) && mvers.size() == 1 &&
               mvers[0].gameVersions.size() == 1 && mvers[0].loaders[0] == "fabric" &&
+              mvers[0].versionType == "release" &&
               mc263::modrinth::primaryFile(mvers[0]) != nullptr &&
               mc263::modrinth::primaryFile(mvers[0])->sha1 == "abc123",
           "Modrinth 版本响应解析");
     check(mc263::modrinth::urlEncode("a b/c") == "a%20b%2Fc", "Modrinth 查询参数转义");
+    {
+        fs::create_directories(l.versionDir("26.3+fabric"), ec);
+        std::ofstream o(l.versionJson("26.3+fabric"));
+        o << R"({"libraries":[{"name":"net.fabricmc:fabric-loader:0.16.9"}]})";
+        o.close();
+        check(installedLoaderVersion(l, "26.3", "fabric") == "0.16.9",
+              "已装加载器版本可从版本 json 读取");
+    }
     // 装到 /usr/bin 时改用 XDG 数据目录：at() 必须把 root 当作应用目录
     Layout installed = Layout::at(fs::path("/tmp/xdg-mc263-test"));
     check(installed.appDir == "/tmp/xdg-mc263-test" &&
@@ -448,7 +465,33 @@ broken = "not-a-color"
               "崩溃摘要：只留最后 N 行");
     }
 
-    // 14) 加载器版本目录被删/未装时退回原版（玩家会手动删 versions/ 里的目录）
+    // 游戏显示后端配置往返
+    {
+        Config dc;
+        dc.gameDisplay = "wayland";
+        Config back = Config::fromJson(dc.toJson());
+        check(back.gameDisplay == "wayland", "配置：gameDisplay 可往返");
+        check(Config{}.gameDisplay == "auto", "配置：gameDisplay 默认 auto");
+    }
+
+    // 按版本隔离的 JVM / 显示设置
+    {
+        Config vc;
+        VersionOptions opt;
+        opt.extraJvmArgs = {"-Dfoo=1", "-XX:+UseG1GC"};
+        opt.language = "zh_cn";
+        opt.gameDisplay = "wayland";
+        opt.appliedLanguage = "zh_cn";
+        vc.versionOptions["26.3+fabric"] = opt;
+        Config back = Config::fromJson(vc.toJson());
+        const auto it = back.versionOptions.find("26.3+fabric");
+        check(it != back.versionOptions.end() && it->second.extraJvmArgs.size() == 2 &&
+                  it->second.language == "zh_cn" && it->second.gameDisplay == "wayland" &&
+                  it->second.appliedLanguage == "zh_cn",
+              "配置：按版本的 JVM/显示设置可往返");
+    }
+
+    // 加载器目录被删/未装时退回原版
     {
         Layout ll = Layout::at(root / "launcher");
         std::string e;
@@ -474,14 +517,14 @@ broken = "not-a-color"
               "版本目录：两个都没有时返回原名（报错能指到具体文件）");
     }
 
-    // 15) 游戏语言写进 options.txt（Minecraft 以它为准）
+    // 游戏语言写进 options.txt
     {
         std::string e;
         fs::path gd = root / "langtest";
         fs::create_directories(gd, ec);
         { std::ofstream o(gd / "options.txt"); o << "fov:70\nlang:en_us\nfoo:1\n"; }
         check(applyGameLanguage(gd, "zh_cn", e), "语言：写入 options.txt 成功");
-        std::string text = fsx::readText(gd / "options.txt", e);
+        const std::string text = fsx::readText(gd / "options.txt", e);
         check(text.find("lang:zh_cn") != std::string::npos, "语言：lang 行被改成 zh_cn");
         check(text.find("fov:70") != std::string::npos && text.find("foo:1") != std::string::npos,
               "语言：其他设置行原样保留");
@@ -489,23 +532,14 @@ broken = "not-a-color"
 
         fs::path fresh = root / "langfresh";
         check(applyGameLanguage(fresh, "ja_jp", e), "语言：没有 options.txt 时直接创建");
-        text = fsx::readText(fresh / "options.txt", e);
-        check(text.find("lang:ja_jp") != std::string::npos, "语言：新文件里是 ja_jp");
+        check(fsx::readText(fresh / "options.txt", e).find("lang:ja_jp") != std::string::npos,
+              "语言：新文件里是 ja_jp");
 
         Config lc;
         lc.language = "en_us";
         check(effectiveGameLanguage(lc) == "en_us", "语言：显式设置优先");
         lc.language.clear();
         check(effectiveGameLanguage(lc) == detectSystemLanguage(), "语言：空则跟随系统");
-    }
-
-    // 16) 游戏显示后端配置往返
-    {
-        Config dc;
-        dc.gameDisplay = "wayland";
-        Config back = Config::fromJson(dc.toJson());
-        check(back.gameDisplay == "wayland", "配置：gameDisplay 可往返");
-        check(Config{}.gameDisplay == "auto", "配置：gameDisplay 默认 auto");
     }
 
     std::cout << "core: " << passed << " 项通过\n";

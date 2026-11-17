@@ -202,6 +202,13 @@ struct Layout {
 };
 
 // ------------------------------------------------------------------ 配置 ----
+struct VersionOptions {
+    std::vector<std::string> extraJvmArgs;
+    std::string language;
+    std::string gameDisplay = "auto";
+    std::string appliedLanguage;
+};
+
 struct Config {
     std::string version = "26.3";
     std::string username;
@@ -218,14 +225,27 @@ struct Config {
     std::string language;  // 游戏语言（en_us / zh_cn…）；空 = 跟随系统
     // 上次由启动器写进 options.txt 的语言（用来判断设置有没有变；空 = 还没写过）
     std::string appliedLanguage;
-    // 游戏窗口后端：auto = 让游戏（SDL）自己选；wayland = 强制 SDL_VIDEO_DRIVER=wayland；
-    // x11 = 强制 x11（走 XWayland）。只影响游戏进程，不影响启动器自己的 Qt 后端。
+    // 游戏窗口后端：auto = 让游戏（SDL）自己选；wayland = SDL_VIDEO_DRIVER=wayland；
+    // x11 = SDL_VIDEO_DRIVER=x11（走 XWayland）。只影响游戏进程。
     std::string gameDisplay = "auto";
     // 配色来源：auto = 检测到 Noctalia 色板就用它，否则跟随系统；system = 只用系统调色板；
     // noctalia = 强制读 Noctalia 的 Material You 色板（读不到就退回系统）
     std::string themeSource = "auto";
     std::vector<std::string> extraJvmArgs;
     std::vector<std::string> components = {"jar", "libraries", "assets", "runtime"};
+    // 按版本目录名隔离的 JVM / 显示设置；没有条目时回退到上面的全局值
+    std::map<std::string, VersionOptions> versionOptions;
+
+    VersionOptions optionsFor(const std::string& id) const {
+        const auto it = versionOptions.find(id);
+        if (it != versionOptions.end()) return it->second;
+        VersionOptions o;
+        o.extraJvmArgs = extraJvmArgs;
+        o.language = language;
+        o.gameDisplay = gameDisplay;
+        o.appliedLanguage = appliedLanguage;
+        return o;
+    }
 
     JValue toJson() const {
         JValue j = JValue::objectV();
@@ -251,6 +271,18 @@ struct Config {
         JValue c = JValue::arrayV();
         for (const auto& s : components) c.push(JValue::stringV(s));
         j.set("components", c);
+        JValue vo = JValue::objectV();
+        for (const auto& [id, opt] : versionOptions) {
+            JValue x = JValue::objectV();
+            JValue args = JValue::arrayV();
+            for (const auto& a : opt.extraJvmArgs) args.push(JValue::stringV(a));
+            x.set("extraJvmArgs", args);
+            x.set("language", JValue::stringV(opt.language));
+            x.set("gameDisplay", JValue::stringV(opt.gameDisplay));
+            x.set("appliedLanguage", JValue::stringV(opt.appliedLanguage));
+            vo.set(id, x);
+        }
+        j.set("versionOptions", vo);
         return j;
     }
     static Config fromJson(const JValue& j) {
@@ -266,15 +298,35 @@ struct Config {
         const JValue* mi = j.find("minMemoryMb"); if (mi) c.minMemoryMb = static_cast<int>(mi->number(0));
         const JValue* jobs = j.find("jobs"); if (jobs) c.jobs = static_cast<int>(jobs->number(10));
         const JValue* f = j.find("fabric"); if (f) c.fabric = f->boolean(false);
-        s("profile", c.profile); s("language", c.language); s("appliedLanguage", c.appliedLanguage);
-        s("gameDisplay", c.gameDisplay);
+        s("profile", c.profile); s("language", c.language);
+        s("appliedLanguage", c.appliedLanguage); s("gameDisplay", c.gameDisplay);
         s("themeSource", c.themeSource);
         if (c.themeSource != "auto" && c.themeSource != "system" && c.themeSource != "noctalia")
             c.themeSource = "auto";
+        if (c.gameDisplay != "auto" && c.gameDisplay != "wayland" && c.gameDisplay != "x11")
+            c.gameDisplay = "auto";
         const JValue* a = j.find("extraJvmArgs");
         if (a && a->isArray()) { c.extraJvmArgs.clear(); for (const auto& v : a->array()) if (v.isString()) c.extraJvmArgs.push_back(v.str()); }
         const JValue* cc = j.find("components");
         if (cc && cc->isArray()) { c.components.clear(); for (const auto& v : cc->array()) if (v.isString()) c.components.push_back(v.str()); }
+        const JValue* vo = j.find("versionOptions");
+        if (vo && vo->isObject()) {
+            for (const auto& [id, x] : vo->object()) {
+                VersionOptions opt;
+                if (const JValue* args = x.find("extraJvmArgs"); args && args->isArray())
+                    for (const auto& v : args->array())
+                        if (v.isString()) opt.extraJvmArgs.push_back(v.str());
+                if (const JValue* lv = x.find("language"); lv && lv->isString()) opt.language = lv->str();
+                if (const JValue* gv = x.find("gameDisplay"); gv && gv->isString())
+                    opt.gameDisplay = gv->str();
+                if (const JValue* av = x.find("appliedLanguage"); av && av->isString())
+                    opt.appliedLanguage = av->str();
+                if (opt.gameDisplay != "auto" && opt.gameDisplay != "wayland" &&
+                    opt.gameDisplay != "x11")
+                    opt.gameDisplay = "auto";
+                c.versionOptions[id] = std::move(opt);
+            }
+        }
         if (c.version.empty()) c.version = "26.3";
         if (c.arch.empty()) c.arch = detectArch();
         if (c.memoryMb < 256) c.memoryMb = 256;
@@ -298,20 +350,22 @@ struct Config {
 
 // 版本目录名：装了加载器就是 <版本>+<profile>
 inline std::string versionDirName(const Config& c) {
+    // 下拉框可能直接给出完整目录名（26.3+fabric）；这种情况不要再拼一次后缀
+    if (c.version.find('+') != std::string::npos) return c.version;
     if (!c.profile.empty()) return c.version + "+" + c.profile;
     return c.fabric ? c.version + "+fabric" : c.version;
 }
 
 // 实际该用的版本目录名：配置里可能还留着 profile（quilt/fabric），
 // 但那个加载器版本已经被删/还没装 —— 这时退回原版版本，而不是报
-// "缺少版本 json: …+quilt/…+quilt.json"（玩家删 versions/ 里的目录很正常）。
+// “缺少版本 json: …+quilt/…+quilt.json”（玩家删 versions/ 里的目录很正常）。
 inline std::string effectiveVersionId(const Layout& l, const Config& c) {
     const std::string composed = versionDirName(c);
     if (composed == c.version) return composed;
     std::error_code ec;
-    if (fs::is_regular_file(l.versionJson(composed), ec)) return composed;  // 加载器版本在
-    if (fs::is_regular_file(l.versionJson(c.version), ec)) return c.version;  // 退回原版
-    return composed;  // 两个都没有：保留原名，让报错指出去找的是哪个
+    if (fs::is_regular_file(l.versionJson(composed), ec)) return composed;
+    if (fs::is_regular_file(l.versionJson(c.version), ec)) return c.version;
+    return composed;
 }
 
 // 版本隔离后的 gameDir：每个版本一个目录，存档 / mods / 资源包互不干扰
@@ -487,14 +541,18 @@ inline std::string mavenPath(const std::string& coord) {
 inline bool installLoader(const Layout& l, Config& c, const std::string& loader,
                           const std::string& loaderVer,
                           const std::function<void(const std::string&)>& note, std::string& err) {
-    const fs::path vanilla = l.versionJson(c.version);
+    // 下拉框可能把 26.3+fabric 整个目录名当成版本；安装时只取前面的原版号
+    std::string baseVersion = c.version;
+    if (const auto plus = baseVersion.find('+'); plus != std::string::npos)
+        baseVersion.resize(plus);
+    const fs::path vanilla = l.versionJson(baseVersion);
     if (!fsx::isFile(vanilla)) {
-        err = "先下载原版 " + c.version + "（要用它的 json 作基底）";
+        err = "先下载原版 " + baseVersion + "（要用它的 json 作基底）";
         return false;
     }
     const std::string base = loaderBase(loader);
     std::string profText;
-    if (!mc263::dl::fetchText(base + "/versions/loader/" + c.version + "/" + loaderVer + "/profile/json",
+    if (!mc263::dl::fetchText(base + "/versions/loader/" + baseVersion + "/" + loaderVer + "/profile/json",
                               "", l.configDir / "cache", 30, profText, err))
         return false;
     std::string jerr;
@@ -506,7 +564,7 @@ inline bool installLoader(const Layout& l, Config& c, const std::string& loader,
     JValue json = mc263::jsonParse(baseText, jerr);
     if (!jerr.empty()) { err = "原版 json 解析失败: " + jerr; return false; }
 
-    const std::string dirName = c.version + "+" + loader;
+    const std::string dirName = baseVersion + "+" + loader;
     if (const JValue* mc = prof.find("mainClass"); mc && mc->isString())
         json.set("mainClass", *mc);
     json.set("id", JValue::stringV(dirName));
@@ -555,10 +613,38 @@ inline bool installLoader(const Layout& l, Config& c, const std::string& loader,
         return false;
     }
 
+    c.version = baseVersion;
     c.profile = loader;
     c.fabric = (loader == "fabric");
     err.clear();
     return true;
+}
+
+// 从已安装的 <游戏版本>+<加载器>/<id>.json 里读出加载器版本（找不到就返回空）
+inline std::string installedLoaderVersion(const Layout& l, const std::string& gameVersion,
+                                          const std::string& loader) {
+    std::string dirName = gameVersion;
+    if (dirName.find('+') == std::string::npos) dirName += "+" + loader;
+    std::string rerr;
+    const std::string text = fsx::readText(l.versionJson(dirName), rerr);
+    if (!rerr.empty() || text.empty()) return {};
+    std::string jerr;
+    const JValue j = mc263::jsonParse(text, jerr);
+    if (!jerr.empty()) return {};
+    const std::string prefix =
+        loader == "quilt" ? "org.quiltmc:quilt-loader:" : "net.fabricmc:fabric-loader:";
+    const JValue* libs = j.find("libraries");
+    if (!libs || !libs->isArray()) return {};
+    for (const JValue& lib : libs->array()) {
+        const JValue* nm = lib.find("name");
+        if (!nm || !nm->isString()) continue;
+        const std::string name = nm->str();
+        if (!name.starts_with(prefix)) continue;
+        const std::string rest = name.substr(prefix.size());
+        const auto colon = rest.find(':');
+        return colon == std::string::npos ? rest : rest.substr(0, colon);
+    }
+    return {};
 }
 
 // ------------------------------------------------------------------ Java ----
@@ -997,21 +1083,36 @@ inline std::vector<std::string> availableVersions(const Layout& l) {
 }
 
 // -------------------------------------------------------------- 在线下载 ----
-// Qt 应用内嵌下载能力：只依赖系统 curl CLI，不再依赖外部 mc263-fetch 二进制。
+// Qt 应用内嵌下载能力：只依赖系统 curl CLI，不再依赖 Python / 外部下载器。
 struct DownloadProgress {
     std::string stage, label, note;
     size_t done = 0, total = 0;
     bool ok = true;
 };
 using ProgressFn = std::function<void(const DownloadProgress&)>;
+
+enum class DownloadMode { Install, Verify };
+
+struct DownloadOptions {
+    DownloadMode mode = DownloadMode::Install;
+    size_t limit = 0;  // 0 = 不限制；仅测试使用（assets / runtime）
+};
+
 struct DownloadResult {
     bool ok = false;
-    size_t downloaded = 0, cached = 0, failed = 0;
+    bool cancelled = false;
+    size_t checked = 0;   // verify 检查过的文件数
+    size_t bad = 0;       // verify 发现的缺失/损坏数
+    size_t downloaded = 0;
+    size_t cached = 0;
+    size_t failed = 0;
     std::string error;
 };
 
 inline std::vector<std::string> onlineVersions(const std::string& mirror,
-                                               const fs::path& cacheDir, std::string& err) {
+                                               const fs::path& cacheDir,
+                                               bool snapshots, size_t limit,
+                                               std::string& err) {
     std::string text;
     if (!mc263::dl::fetchText("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
                               mirror, cacheDir, 30, text, err)) return {};
@@ -1020,52 +1121,220 @@ inline std::vector<std::string> onlineVersions(const std::string& mirror,
     std::vector<std::string> out;
     const JValue* vs = j.find("versions");
     if (vs && vs->isArray()) {
+        const size_t cap = limit == 0 ? (snapshots ? 30 : 20) : limit;
         for (const JValue& v : vs->array()) {
             const JValue* t = v.find("type");
             const JValue* id = v.find("id");
-            if (t && t->str() == "release" && id) {
-                out.push_back(id->str());
-                if (out.size() >= 20) break;
-            }
+            if (!t || !id) continue;
+            const std::string type = t->str();
+            if (type != "release" && !(snapshots && type == "snapshot")) continue;
+            out.push_back(id->str());
+            if (out.size() >= cap) break;
         }
     }
     return out;
 }
 
-inline DownloadResult downloadAll(const Layout& l, const Config& c, const ProgressFn& onProgress) {
+inline std::string latestSnapshot(const std::string& mirror, const fs::path& cacheDir,
+                                  std::string& err) {
+    std::string text;
+    if (!mc263::dl::fetchText("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+                              mirror, cacheDir, 30, text, err)) return {};
+    JValue j = mc263::jsonParse(text, err);
+    if (!err.empty()) return {};
+    const JValue* latest = j.find("latest");
+    const JValue* snap = latest ? latest->find("snapshot") : nullptr;
+    return snap ? snap->str() : std::string{};
+}
+
+// 版本/资源清单只下载一次，失败时返回 false 并保留可读错误。
+inline bool fetchManifest(const std::string& mirror, const fs::path& cache, JValue& out,
+                          std::string& err, const mc263::dl::CancelFn& cancelled = {}) {
+    std::string text;
+    if (!mc263::dl::fetchText("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+                              mirror, cache, 60, text, err, cancelled))
+        return false;
+    out = mc263::jsonParse(text, err);
+    return err.empty();
+}
+
+inline std::string baseGameVersion(std::string v) {
+    if (const auto plus = v.find('+'); plus != std::string::npos) v.resize(plus);
+    return v;
+}
+
+inline DownloadResult downloadAll(const Layout& l, const Config& c,
+                                  const ProgressFn& onProgress,
+                                  const DownloadOptions& opt = {},
+                                  const mc263::dl::CancelFn& cancelled = {}) {
     DownloadResult result;
     std::string err;
     if (!l.ensure(err)) { result.error = err; return result; }
-    fs::path cache = l.configDir / "download-cache";
+    fs::path cache = l.configDir / "cache";
     if (!fsx::makeDirs(cache, err)) { result.error = err; return result; }
-    std::set<std::string> comps(c.components.begin(), c.components.end());
+    const std::set<std::string> comps(c.components.begin(), c.components.end());
     auto want = [&](const char* k) { return comps.contains(k); };
     std::atomic<size_t> downloaded{0}, cached{0}, failed{0};
-    size_t jobs = std::max(1, std::min(16, c.jobs));
+    bool cancelHit = false;
+    const size_t jobs = std::max(1, std::min(16, c.jobs));
 
-    auto run = [&](const char* stage, std::vector<mc263::dl::Task>& tasks) {
-        if (tasks.empty()) return;
+    auto isCancelled = [&] { return cancelHit || (cancelled && cancelled()); };
+    auto emit = [&](const char* stage, const std::string& label, bool ok, const std::string& note) {
+        if (onProgress) onProgress({stage, label, note, 1, 1, ok});
+    };
+    auto finish = [&]() {
+        result.downloaded = downloaded.load();
+        result.cached = cached.load();
+        result.failed = failed.load();
+        result.cancelled = cancelHit;
+        result.ok = !result.cancelled && result.failed == 0 && result.error.empty();
+        if (!result.ok && result.error.empty())
+            result.error = result.cancelled ? "已取消" : std::to_string(result.failed) + " 个文件下载失败";
+        return result;
+    };
+    auto run = [&](const char* stage, std::vector<mc263::dl::Task>& tasks,
+                   bool onlyMissing) -> size_t {
+        if (tasks.empty()) return 0;
         std::vector<std::string> failures;
-        auto cb = [&](size_t d, size_t t, const std::string& label, bool ok, const std::string& note) {
+        bool stageCancelled = false;
+        auto cb = [&](size_t d, size_t t, const std::string& label, bool ok,
+                      const std::string& note) {
             if (note == "cached") cached.fetch_add(1);
             else if (ok) downloaded.fetch_add(1);
             if (onProgress) onProgress({stage, label, note, d, t, ok});
         };
-        failed.fetch_add(mc263::dl::runTasks(tasks, c.mirror, jobs, 300, true, cb, failures));
-    };
-    auto emit = [&](const char* stage, const std::string& label, bool ok, const std::string& note) {
-        if (onProgress) onProgress({stage, label, note, 1, 1, ok});
+        const size_t f = mc263::dl::runTasks(tasks, c.mirror, jobs, 300, onlyMissing,
+                                             cb, failures, cancelled, &stageCancelled);
+        if (stageCancelled || isCancelled()) cancelHit = true;
+        failed.fetch_add(f);
+        return f;
     };
 
-    // 1) 版本清单与版本 json
-    std::string manifestText;
-    if (!mc263::dl::fetchText("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
-                              c.mirror, cache, 60, manifestText, err)) {
-        result.error = "版本清单下载失败: " + err; return result;
+    // 任务构造：install 与 verify 共用，避免两套路径规则漂移。
+    auto addJar = [&](std::vector<mc263::dl::Task>& tasks, const JValue& vj,
+                      const std::string& wanted, bool include) {
+        if (!include) return;
+        const JValue* dls = vj.find("downloads");
+        const JValue* client = dls ? dls->find("client") : nullptr;
+        if (!client) return;
+        const JValue* u = client->find("url");
+        const JValue* s = client->find("sha1");
+        if (u) tasks.push_back({u->str(), l.versionJar(wanted), s ? s->str() : "",
+                                0644, wanted + ".jar"});
+    };
+    auto addLibraries = [&](std::vector<mc263::dl::Task>& tasks, const JValue& vj,
+                            bool include) {
+        if (!include) return;
+        const std::vector<std::string> keys = c.arch == "aarch64"
+            ? std::vector<std::string>{"natives-linux-arm64", "natives-linux-aarch64", "natives-linux"}
+            : std::vector<std::string>{"natives-linux", "natives-linux-x86_64"};
+        const JValue* libs = vj.find("libraries");
+        if (!libs || !libs->isArray()) return;
+        for (const JValue& lib : libs->array()) {
+            if (!libAllowed(lib, c.arch)) continue;
+            const JValue* d = lib.find("downloads");
+            if (!d || !d->isObject()) continue;
+            auto add = [&](const JValue* art) {
+                if (!art || !art->isObject()) return;
+                const JValue* path = art->find("path");
+                const JValue* url = art->find("url");
+                const JValue* sha = art->find("sha1");
+                if (path && url && !path->str().empty())
+                    tasks.push_back({url->str(), l.librariesDir / path->str(),
+                                     sha ? sha->str() : "", 0644, path->str()});
+            };
+            add(d->find("artifact"));
+            const JValue* cls = d->find("classifiers");
+            if (cls && cls->isObject()) {
+                for (const auto& k : keys) {
+                    const JValue* cv = cls->find(k);
+                    if (cv) { add(cv); break; }
+                }
+            }
+        }
+    };
+    auto addAssets = [&](std::vector<mc263::dl::Task>& tasks, const JValue& idx,
+                         size_t limit) {
+        const JValue* objs = idx.find("objects");
+        if (!objs || !objs->isObject()) return;
+        for (const auto& kv : objs->object()) {
+            const JValue* h = kv.second.find("hash");
+            if (!h || h->str().size() < 3) continue;
+            const std::string hash = h->str();
+            tasks.push_back({"https://resources.download.minecraft.net/" + hash.substr(0, 2) + "/" + hash,
+                             l.assetsDir / "objects" / hash.substr(0, 2) / hash,
+                             hash, 0644, kv.first});
+            if (limit && tasks.size() >= limit) break;
+        }
+    };
+
+    // ------------------------------------------------------------ verify ----
+    if (opt.mode == DownloadMode::Verify) {
+        const std::string wanted = baseGameVersion(c.version);
+        std::string vtext = fsx::readText(l.versionJson(wanted), err);
+        if (!err.empty() || vtext.empty()) {
+            result.error = "本地没有 " + wanted + " 的版本 json，先下载这个版本再校验";
+            return finish();
+        }
+        JValue vj = mc263::jsonParse(vtext, err);
+        if (!err.empty()) { result.error = "版本 json 解析失败: " + err; return finish(); }
+        const JValue* aid = vj.find("assetIndex");
+        const std::string assetId = aid && aid->find("id") ? aid->find("id")->str() : wanted;
+        const fs::path idxPath = l.assetsDir / "indexes" / (assetId + ".json");
+
+        std::vector<mc263::dl::Task> baseTasks;
+        addJar(baseTasks, vj, wanted, want("jar"));
+        addLibraries(baseTasks, vj, want("libraries"));
+        if (want("assets") && aid) {
+            const JValue* u = aid->find("url");
+            const JValue* s = aid->find("sha1");
+            if (u) baseTasks.push_back({u->str(), idxPath, s ? s->str() : "",
+                                        0644, assetId + ".json"});
+        }
+        auto verifyPhase = [&](const char* stage, std::vector<mc263::dl::Task>& tasks) {
+            if (tasks.empty()) return;
+            auto pr = mc263::dl::probeTasks(tasks, jobs, cancelled,
+                [&](size_t checked, size_t total, size_t bad) {
+                    emit(stage, "校验 " + std::to_string(checked) + "/" + std::to_string(total) +
+                                    "，异常 " + std::to_string(bad), true, "");
+                });
+            if (pr.cancelled || isCancelled()) cancelHit = true;
+            result.checked += pr.checked;
+            result.bad += pr.bad;
+            emit(stage, "校验 " + std::to_string(pr.checked) + "/" + std::to_string(tasks.size()) +
+                            "，异常 " + std::to_string(pr.bad), true, "");
+            if (!pr.broken.empty() && !cancelHit) run(stage, pr.broken, false);
+        };
+        verifyPhase("verify", baseTasks);
+        if (cancelHit) return finish();
+
+        if (want("assets") && aid && fsx::isFile(idxPath)) {
+            std::string idxText = fsx::readText(idxPath, err);
+            JValue idx = mc263::jsonParse(idxText, err);
+            if (!err.empty()) { result.error = "asset index 解析失败: " + err; return finish(); }
+            std::vector<mc263::dl::Task> objects;
+            addAssets(objects, idx, opt.limit);
+            verifyPhase("assets", objects);
+        } else if (want("assets") && aid) {
+            result.error = "asset index 缺失，无法校验资源";
+        }
+        if (!result.error.empty()) return finish();
+        if (cancelHit) return finish();
+        emit("summary", "检查 " + std::to_string(result.checked) + " 项，异常 " +
+                            std::to_string(result.bad) + "，补下失败 " +
+                            std::to_string(result.failed), true, "");
+        return finish();
     }
-    JValue manifest = mc263::jsonParse(manifestText, err);
-    if (!err.empty()) { result.error = "版本清单解析失败: " + err; return result; }
-    std::string wanted = c.version;
+
+    // ----------------------------------------------------------- install ----
+    // 1) 版本清单与版本 json
+    JValue manifest;
+    if (!fetchManifest(c.mirror, cache, manifest, err, cancelled)) {
+        if (cancelled && cancelled()) cancelHit = true;
+        result.error = "版本清单下载失败: " + err;
+        return finish();
+    }
+    std::string wanted = baseGameVersion(c.version);
     if (wanted == "latest" || wanted == "latest-snapshot") {
         const JValue* latest = manifest.find("latest");
         const JValue* rel =
@@ -1080,64 +1349,31 @@ inline DownloadResult downloadAll(const Layout& l, const Config& c, const Progre
             if (id && id->str() == wanted) { entry = &v; break; }
         }
     }
-    if (!entry) { result.error = "版本清单中找不到 " + wanted; return result; }
+    if (!entry) { result.error = "版本清单中找不到 " + wanted; return finish(); }
     const JValue* vurl = entry->find("url");
     const JValue* vsha = entry->find("sha1");
+    if (!vurl) { result.error = "版本清单缺少 " + wanted + " 的下载地址"; return finish(); }
     std::vector<mc263::dl::Task> metaTasks;
-    fs::path vdir = l.versionDir(wanted);
-    metaTasks.push_back({vurl->str(), l.versionJson(wanted), vsha ? vsha->str() : "", 0644, wanted + ".json"});
-    run("version", metaTasks);
-    if (failed.load() > 0) { result.error = "版本 json 下载失败"; return result; }
+    metaTasks.push_back({vurl->str(), l.versionJson(wanted), vsha ? vsha->str() : "",
+                         0644, wanted + ".json"});
+    if (run("version", metaTasks, true) > 0 || cancelHit) {
+        if (!cancelHit) result.error = "版本 json 下载失败";
+        return finish();
+    }
 
     std::string vtext = fsx::readText(l.versionJson(wanted), err);
     JValue vj = mc263::jsonParse(vtext, err);
-    if (!err.empty()) { result.error = "版本 json 解析失败: " + err; return result; }
+    if (!err.empty()) { result.error = "版本 json 解析失败: " + err; return finish(); }
     const JValue* aid = vj.find("assetIndex");
-    std::string assetId = aid && aid->find("id") ? aid->find("id")->str() : wanted;
+    const std::string assetId = aid && aid->find("id") ? aid->find("id")->str() : wanted;
     emit("version", "已解析版本 " + wanted + " / assetIndex " + assetId, true, "");
 
     // 2) 客户端 jar + libraries（含 natives-linux）
-    if (want("jar") || want("libraries")) {
-        std::vector<mc263::dl::Task> tasks;
-        const JValue* dls = vj.find("downloads");
-        const JValue* client = dls ? dls->find("client") : nullptr;
-        if (want("jar") && client) {
-            const JValue* u = client->find("url");
-            const JValue* s = client->find("sha1");
-            if (u) tasks.push_back({u->str(), l.versionJar(wanted), s ? s->str() : "", 0644, wanted + ".jar"});
-        }
-        if (want("libraries")) {
-            std::vector<std::string> keys = c.arch == "aarch64"
-                ? std::vector<std::string>{"natives-linux-arm64", "natives-linux-aarch64", "natives-linux"}
-                : std::vector<std::string>{"natives-linux", "natives-linux-x86_64"};
-            const JValue* libs = vj.find("libraries");
-            if (libs && libs->isArray()) {
-                for (const JValue& lib : libs->array()) {
-                    if (!libAllowed(lib, c.arch)) continue;
-                    const JValue* d = lib.find("downloads");
-                    if (!d || !d->isObject()) continue;
-                    auto add = [&](const JValue* art) {
-                        if (!art || !art->isObject()) return;
-                        const JValue* path = art->find("path");
-                        const JValue* url = art->find("url");
-                        const JValue* sha = art->find("sha1");
-                        if (path && url && !path->str().empty())
-                            tasks.push_back({url->str(), l.librariesDir / path->str(),
-                                             sha ? sha->str() : "", 0644, path->str()});
-                    };
-                    add(d->find("artifact"));
-                    const JValue* cls = d->find("classifiers");
-                    if (cls && cls->isObject()) {
-                        for (const auto& k : keys) {
-                            const JValue* cv = cls->find(k);
-                            if (cv) { add(cv); break; }
-                        }
-                    }
-                }
-            }
-        }
-        run("libraries", tasks);
-    }
+    std::vector<mc263::dl::Task> libTasks;
+    addJar(libTasks, vj, wanted, want("jar"));
+    addLibraries(libTasks, vj, want("libraries"));
+    run("libraries", libTasks, true);
+    if (cancelHit) return finish();
 
     // 3) asset index + 资源对象
     if (want("assets") && aid) {
@@ -1145,23 +1381,19 @@ inline DownloadResult downloadAll(const Layout& l, const Config& c, const Progre
         const JValue* ish = aid->find("sha1");
         fs::path idxPath = l.assetsDir / "indexes" / (assetId + ".json");
         std::vector<mc263::dl::Task> idxTasks;
-        if (iu) idxTasks.push_back({iu->str(), idxPath, ish ? ish->str() : "", 0644, assetId + ".json"});
-        run("asset-index", idxTasks);
+        if (iu) idxTasks.push_back({iu->str(), idxPath, ish ? ish->str() : "",
+                                    0644, assetId + ".json"});
+        if (run("asset-index", idxTasks, true) > 0 || cancelHit) {
+            if (!cancelHit) result.error = "asset index 下载失败";
+            return finish();
+        }
         std::string idxText = fsx::readText(idxPath, err);
         JValue idx = mc263::jsonParse(idxText, err);
-        const JValue* objs = idx.find("objects");
+        if (!err.empty()) { result.error = "asset index 解析失败: " + err; return finish(); }
         std::vector<mc263::dl::Task> tasks;
-        if (objs && objs->isObject()) {
-            for (const auto& kv : objs->object()) {
-                const JValue* h = kv.second.find("hash");
-                if (!h || h->str().size() < 3) continue;
-                std::string hash = h->str();
-                tasks.push_back({"https://resources.download.minecraft.net/" + hash.substr(0, 2) + "/" + hash,
-                                 l.assetsDir / "objects" / hash.substr(0, 2) / hash,
-                                 hash, 0644, kv.first});
-            }
-        }
-        run("assets", tasks);
+        addAssets(tasks, idx, opt.limit);
+        run("assets", tasks, true);
+        if (cancelHit) return finish();
     }
 
     // 4) Mojang 官方 Java 运行时
@@ -1169,54 +1401,56 @@ inline DownloadResult downloadAll(const Layout& l, const Config& c, const Progre
         std::string rtText;
         if (!mc263::dl::fetchText("https://launchermeta.mojang.com/v1/products/java-runtime/"
                                   "2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json",
-                                  c.mirror, cache, 60, rtText, err)) {
-            emit("runtime", "JRE 清单下载失败，可稍后使用系统 Java", false, err);
-        } else {
-            JValue rt = mc263::jsonParse(rtText, err);
-            const JValue* jv = vj.find("javaVersion");
-            const JValue* cmpName = jv ? jv->find("component") : nullptr;
-            std::string component = cmpName ? cmpName->str() : "java-runtime-epsilon";
-            const JValue* plat = rt.find("linux");
-            const JValue* cmp = plat ? plat->find(component) : nullptr;
-            const JValue* first = (cmp && cmp->isArray() && !cmp->array().empty()) ? &cmp->array()[0] : nullptr;
-            const JValue* mf = first ? first->find("manifest") : nullptr;
-            const JValue* murl = mf ? mf->find("url") : nullptr;
-            if (murl) {
-                std::string mfText;
-                if (mc263::dl::fetchText(murl->str(), c.mirror, cache, 60, mfText, err)) {
-                    JValue files = mc263::jsonParse(mfText, err);
-                    const JValue* fobj = files.find("files");
-                    fs::path rtRoot = l.runtimeDir / component;
-                    std::vector<mc263::dl::Task> tasks;
-                    if (fobj && fobj->isObject()) {
-                        for (const auto& kv : fobj->object()) {
-                            const JValue* type = kv.second.find("type");
-                            std::string t = type ? type->str() : "file";
-                            if (t == "directory") { fsx::makeDirs(rtRoot / kv.first, err); continue; }
-                            const JValue* downloads = kv.second.find("downloads");
-                            const JValue* raw = downloads ? downloads->find("raw") : nullptr;
-                            const JValue* u = raw ? raw->find("url") : nullptr;
-                            const JValue* s = raw ? raw->find("sha1") : nullptr;
-                            if (!u) continue;
-                            const JValue* exe = kv.second.find("executable");
-                            tasks.push_back({u->str(), rtRoot / kv.first, s ? s->str() : "",
-                                             exe && exe->boolean() ? 0755u : 0644u, kv.first});
-                        }
-                    }
-                    run("runtime", tasks);
-                    fs::path java = rtRoot / "bin" / "java";
-                    if (fsx::isFile(java)) ::chmod(java.c_str(), 0755);
-                }
+                                  c.mirror, cache, 60, rtText, err, cancelled)) {
+            if (cancelled && cancelled()) cancelHit = true;
+            result.error = "JRE 清单下载失败: " + err;
+            return finish();
+        }
+        JValue rt = mc263::jsonParse(rtText, err);
+        if (!err.empty()) { result.error = "JRE 清单解析失败: " + err; return finish(); }
+        const JValue* jv = vj.find("javaVersion");
+        const JValue* cmpName = jv ? jv->find("component") : nullptr;
+        const std::string component = cmpName ? cmpName->str() : "java-runtime-epsilon";
+        const JValue* plat = rt.find("linux");
+        const JValue* cmp = plat ? plat->find(component) : nullptr;
+        const JValue* first = (cmp && cmp->isArray() && !cmp->array().empty())
+            ? &cmp->array()[0] : nullptr;
+        const JValue* mf = first ? first->find("manifest") : nullptr;
+        const JValue* murl = mf ? mf->find("url") : nullptr;
+        if (!murl) { result.error = "找不到 " + component + " 的运行时清单"; return finish(); }
+        std::string mfText;
+        if (!mc263::dl::fetchText(murl->str(), c.mirror, cache, 60, mfText, err, cancelled)) {
+            if (cancelled && cancelled()) cancelHit = true;
+            result.error = "运行时文件清单下载失败: " + err;
+            return finish();
+        }
+        JValue files = mc263::jsonParse(mfText, err);
+        if (!err.empty()) { result.error = "运行时文件清单解析失败: " + err; return finish(); }
+        const JValue* fobj = files.find("files");
+        fs::path rtRoot = l.runtimeDir / component;
+        std::vector<mc263::dl::Task> tasks;
+        if (fobj && fobj->isObject()) {
+            for (const auto& kv : fobj->object()) {
+                const JValue* type = kv.second.find("type");
+                const std::string t = type ? type->str() : "file";
+                if (t == "directory") { fsx::makeDirs(rtRoot / kv.first, err); continue; }
+                const JValue* downloads = kv.second.find("downloads");
+                const JValue* raw = downloads ? downloads->find("raw") : nullptr;
+                const JValue* u = raw ? raw->find("url") : nullptr;
+                const JValue* s = raw ? raw->find("sha1") : nullptr;
+                if (!u) continue;
+                const JValue* exe = kv.second.find("executable");
+                tasks.push_back({u->str(), rtRoot / kv.first, s ? s->str() : "",
+                                 exe && exe->boolean() ? 0755u : 0644u, kv.first});
+                if (opt.limit && tasks.size() >= opt.limit) break;
             }
         }
+        run("runtime", tasks, true);
+        fs::path java = rtRoot / "bin" / "java";
+        if (fsx::isFile(java)) ::chmod(java.c_str(), 0755);
     }
 
-    result.downloaded = downloaded.load();
-    result.cached = cached.load();
-    result.failed = failed.load();
-    result.ok = result.failed == 0;
-    if (!result.ok) result.error = std::to_string(result.failed) + " 个文件下载失败";
-    return result;
+    return finish();
 }
 
 
@@ -1561,7 +1795,6 @@ inline fs::path collectCrashReport(const Layout& l, const std::string& versionTa
     }
     return outPath;
 }
-
 
 // ------------------------------------------------------------ 游戏语言 ----
 inline std::string effectiveGameLanguage(const Config& c) {
