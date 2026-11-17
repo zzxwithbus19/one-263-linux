@@ -229,7 +229,7 @@ resolve_via_api() {
         fetch "$API/releases?per_page=1" "$TMP/rel.json" 2>/dev/null || return 1
     fi
     out="$(python3 - "$TMP/rel.json" "$MODE" "$VER" "$ARCH" "$PKGREL" "$DEBREV" "$DEB_ARCH" <<'PY'
-import json, sys
+import json, re, sys
 path, mode, ver, arch, pkgrel, debrev, debarch = sys.argv[1:8]
 try:
     data = json.load(open(path))
@@ -239,37 +239,50 @@ rel = data[0] if isinstance(data, list) else data
 assets = rel.get("assets", [])
 
 def pick():
+    """按「同一版本里修订号最大」挑资产，不依赖写死的 pkgrel/deb rev。
+
+    例：release 里有 mc263-26.3-10 和 mc263-26.3-11 两个 pacman 包时选 11；
+    deb 同理选 26.3-2 而不是 26.3-1。这样 PKGBUILD 的 pkgrel 或 deb 的
+    修订号涨了，install.sh 不用跟着改。
+    """
+    def name(a):
+        return a.get("name", "")
+
+    def by_rev(pattern):
+        best = None
+        for a in assets:
+            m = re.match(pattern, name(a))
+            if m:
+                r = int(m.group("rev"))
+                if best is None or r > best[0]:
+                    best = (r, a)
+        return best[1] if best else None
+
     if mode == "rpm":
-        exact = f"mc263-{ver}-1.{arch}.rpm"
-        hit = next((a for a in assets if a.get("name") == exact), None)
+        hit = by_rev(rf"^mc263-{re.escape(ver)}-(?P<rev>\d+)(?:\.[^.]+)*\.{re.escape(arch)}\.rpm$")
         if hit:
             return hit
         return next((a for a in assets
-                     if a.get("name", "").startswith("mc263-")
-                     and a.get("name", "").endswith(".rpm")), None)
+                     if name(a).startswith("mc263-") and name(a).endswith(".rpm")), None)
     if mode == "pacman":
-        exact = f"mc263-{ver}-{pkgrel}-{arch}.pkg.tar.zst"
-        hit = next((a for a in assets if a.get("name") == exact), None)
+        hit = by_rev(rf"^mc263-{re.escape(ver)}-(?P<rev>\d+)-{re.escape(arch)}\.pkg\.tar\.(?:zst|xz)$")
         if hit:
             return hit
         return next((a for a in assets
-                     if a.get("name", "").startswith("mc263-")
-                     and a.get("name", "").endswith(".pkg.tar.zst")), None)
+                     if name(a).startswith("mc263-") and name(a).endswith((".pkg.tar.zst", ".pkg.tar.xz"))), None)
     if mode == "deb":
-        exact = f"mc263_{ver}-{debrev}_{debarch}.deb"
-        hit = next((a for a in assets if a.get("name") == exact), None)
+        hit = by_rev(rf"^mc263_{re.escape(ver)}-(?P<rev>\d+)_{re.escape(debarch)}\.deb$")
         if hit:
             return hit
         return next((a for a in assets
-                     if a.get("name", "").startswith("mc263_")
-                     and a.get("name", "").endswith(".deb")), None)
+                     if name(a).startswith("mc263_") and name(a).endswith(".deb")), None)
     exact = f"mc263-qt-{ver}-{arch}"
     hit = next((a for a in assets if a.get("name") == exact), None)
     if hit:
         return hit
     return next((a for a in assets
-                 if a.get("name", "").startswith("mc263-qt")
-                 and not a.get("name", "").endswith((".asc", ".sha256", ".txt"))), None)
+                 if name(a).startswith("mc263-qt")
+                 and not name(a).endswith((".asc", ".sha256", ".txt"))), None)
 
 a = pick()
 if not a:
