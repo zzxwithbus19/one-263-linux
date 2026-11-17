@@ -16,7 +16,7 @@ set -eu
 
 REPO="${MC263_REPO:-zzxwithbus19/one-263-linux}"
 VER="${MC263_VER:-26.3}"
-PKGREL="${MC263_PKGREL:-11}"   # 与 packaging/PKGBUILD 的 pkgrel 保持一致
+PKGREL="${MC263_PKGREL:-12}"   # 与 packaging/PKGBUILD 的 pkgrel 保持一致
 DEBREV="${MC263_DEB_REV:-1}"   # 与 packaging/build-deb.sh 的修订号保持一致
 TAG="${MC263_TAG:-}"
 ARCH="$(uname -m)"
