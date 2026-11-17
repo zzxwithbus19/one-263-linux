@@ -65,6 +65,14 @@ int main() {
     check(Config{}.jobs == 10, "并发线程默认 10");
     check(c2.components.size() == 2 && c2.extraJvmArgs.size() == 1, "数组字段一致");
     check(c2.xmxString() == "-Xmx6144M" && c2.xmsString() == "-Xms1024M", "Xmx/Xms 生成正确");
+    {
+        Config dc;
+        dc.version = "26.3";
+        dc.profile = "fabric";
+        check(versionDirName(dc) == "26.3+fabric", "版本目录名自动追加加载器");
+        dc.version = "26.3+fabric";
+        check(versionDirName(dc) == "26.3+fabric", "完整目录名不再重复追加加载器");
+    }
 
     // 3) 假版本 json
     fs::path vdir = l.versionDir("26.3");
@@ -168,6 +176,14 @@ int main() {
               mc263::modrinth::primaryFile(mvers[0])->sha1 == "abc123",
           "Modrinth 版本响应解析");
     check(mc263::modrinth::urlEncode("a b/c") == "a%20b%2Fc", "Modrinth 查询参数转义");
+    {
+        fs::create_directories(l.versionDir("26.3+fabric"), ec);
+        std::ofstream o(l.versionJson("26.3+fabric"));
+        o << R"({"libraries":[{"name":"net.fabricmc:fabric-loader:0.16.9"}]})";
+        o.close();
+        check(installedLoaderVersion(l, "26.3", "fabric") == "0.16.9",
+              "已装加载器版本可从版本 json 读取");
+    }
     // 装到 /usr/bin 时改用 XDG 数据目录：at() 必须把 root 当作应用目录
     Layout installed = Layout::at(fs::path("/tmp/xdg-mc263-test"));
     check(installed.appDir == "/tmp/xdg-mc263-test" &&

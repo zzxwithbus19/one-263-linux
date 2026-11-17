@@ -289,6 +289,8 @@ struct Config {
 
 // 版本目录名：装了加载器就是 <版本>+<profile>
 inline std::string versionDirName(const Config& c) {
+    // 下拉框可能直接给出完整目录名（26.3+fabric）；这种情况不要再拼一次后缀
+    if (c.version.find('+') != std::string::npos) return c.version;
     if (!c.profile.empty()) return c.version + "+" + c.profile;
     return c.fabric ? c.version + "+fabric" : c.version;
 }
@@ -466,14 +468,18 @@ inline std::string mavenPath(const std::string& coord) {
 inline bool installLoader(const Layout& l, Config& c, const std::string& loader,
                           const std::string& loaderVer,
                           const std::function<void(const std::string&)>& note, std::string& err) {
-    const fs::path vanilla = l.versionJson(c.version);
+    // 下拉框可能把 26.3+fabric 整个目录名当成版本；安装时只取前面的原版号
+    std::string baseVersion = c.version;
+    if (const auto plus = baseVersion.find('+'); plus != std::string::npos)
+        baseVersion.resize(plus);
+    const fs::path vanilla = l.versionJson(baseVersion);
     if (!fsx::isFile(vanilla)) {
-        err = "先下载原版 " + c.version + "（要用它的 json 作基底）";
+        err = "先下载原版 " + baseVersion + "（要用它的 json 作基底）";
         return false;
     }
     const std::string base = loaderBase(loader);
     std::string profText;
-    if (!mc263::dl::fetchText(base + "/versions/loader/" + c.version + "/" + loaderVer + "/profile/json",
+    if (!mc263::dl::fetchText(base + "/versions/loader/" + baseVersion + "/" + loaderVer + "/profile/json",
                               "", l.configDir / "cache", 30, profText, err))
         return false;
     std::string jerr;
@@ -485,7 +491,7 @@ inline bool installLoader(const Layout& l, Config& c, const std::string& loader,
     JValue json = mc263::jsonParse(baseText, jerr);
     if (!jerr.empty()) { err = "原版 json 解析失败: " + jerr; return false; }
 
-    const std::string dirName = c.version + "+" + loader;
+    const std::string dirName = baseVersion + "+" + loader;
     if (const JValue* mc = prof.find("mainClass"); mc && mc->isString())
         json.set("mainClass", *mc);
     json.set("id", JValue::stringV(dirName));
@@ -534,10 +540,38 @@ inline bool installLoader(const Layout& l, Config& c, const std::string& loader,
         return false;
     }
 
+    c.version = baseVersion;
     c.profile = loader;
     c.fabric = (loader == "fabric");
     err.clear();
     return true;
+}
+
+// 从已安装的 <游戏版本>+<加载器>/<id>.json 里读出加载器版本（找不到就返回空）
+inline std::string installedLoaderVersion(const Layout& l, const std::string& gameVersion,
+                                          const std::string& loader) {
+    std::string dirName = gameVersion;
+    if (dirName.find('+') == std::string::npos) dirName += "+" + loader;
+    std::string rerr;
+    const std::string text = fsx::readText(l.versionJson(dirName), rerr);
+    if (!rerr.empty() || text.empty()) return {};
+    std::string jerr;
+    const JValue j = mc263::jsonParse(text, jerr);
+    if (!jerr.empty()) return {};
+    const std::string prefix =
+        loader == "quilt" ? "org.quiltmc:quilt-loader:" : "net.fabricmc:fabric-loader:";
+    const JValue* libs = j.find("libraries");
+    if (!libs || !libs->isArray()) return {};
+    for (const JValue& lib : libs->array()) {
+        const JValue* nm = lib.find("name");
+        if (!nm || !nm->isString()) continue;
+        const std::string name = nm->str();
+        if (!name.starts_with(prefix)) continue;
+        const std::string rest = name.substr(prefix.size());
+        const auto colon = rest.find(':');
+        return colon == std::string::npos ? rest : rest.substr(0, colon);
+    }
+    return {};
 }
 
 // ------------------------------------------------------------------ Java ----

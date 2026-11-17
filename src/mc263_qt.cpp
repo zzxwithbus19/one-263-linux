@@ -888,6 +888,10 @@ public:
         setupAutoSave();
         refreshLocalVersions();
         refreshJava();
+        // 已装加载器：启动后自动检查一次最新稳定版，避免一直用旧加载器
+        QTimer::singleShot(1200, this, [this] {
+            if (!cfg_.profile.empty() || cfg_.fabric) refreshLoaderVersions();
+        });
         // 上次启动器自己崩过就提一句，别让人以为没事发生
         {
             std::error_code cec;
@@ -1447,7 +1451,10 @@ private:
         loaderCombo_ = new QComboBox(lbox);
         loaderCombo_->addItem("Fabric", "fabric");
         loaderCombo_->addItem("Quilt", "quilt");
+        if (cfg_.profile == "quilt") loaderCombo_->setCurrentIndex(1);
         loaderVerCombo_ = new QComboBox(lbox);
+        loaderVerCombo_->setEnabled(false);
+        loaderVerCombo_->setToolTip("加载器版本固定为最新稳定版");
         auto* getLv = new QPushButton("获取版本", lbox);
         auto* lrow = new QHBoxLayout();
         lrow->addWidget(loaderVerCombo_, 1);
@@ -1457,7 +1464,8 @@ private:
         loaderState_ = new QLabel("装完后启动会用 versions/<版本>+<加载器>，原版不受影响", lbox);
         loaderState_->setObjectName("muted");
         auto* loaderNote = new QLabel(
-            "说明：安装加载器会自动生成独立版本目录，与原版隔开；启动页需手动把游戏版本切到加载器版本，否则仍按原版启动。",
+            "说明：安装加载器会自动生成独立版本目录，与原版隔开；启动页需手动把游戏版本切到加载器版本，否则仍按原版启动。"
+            "加载器版本固定使用最新稳定版，进入本页会自动检查并更新已装加载器。",
             lbox);
         loaderNote->setObjectName("muted");
         loaderNote->setWordWrap(true);
@@ -1571,7 +1579,8 @@ private:
     void refreshModVersionChoices() {
         if (!modVersionCombo_) return;
         const QString keep = modVersionCombo_->currentData().toString();
-        const QString wanted = keep.isEmpty() ? QString::fromStdString(cfg_.version) : keep;
+        const QString wanted =
+            keep.isEmpty() ? QString::fromStdString(core::versionDirName(cfg_)) : keep;
         modVersionCombo_->clear();
         const auto vers = core::availableVersions(layout_);
         for (const auto& id : vers)
@@ -2735,53 +2744,105 @@ private:
             std::vector<core::LoaderVersion> list;
             std::string err;
             const bool ok = core::loaderVersions(loader, cache, list, err);
-            QMetaObject::invokeMethod(qApp, [guard, ok, err, list] {
-                if (guard) guard->applyLoaderVersions(ok, err, list);
+            QMetaObject::invokeMethod(qApp, [guard, ok, err, list, loader] {
+                if (guard) guard->applyLoaderVersions(ok, err, list, loader);
             }, Qt::QueuedConnection);
         }).detach();
     }
 
     void applyLoaderVersions(bool ok, const std::string& err,
-                             const std::vector<core::LoaderVersion>& list) {
+                             const std::vector<core::LoaderVersion>& list,
+                             const std::string& loader) {
         loaderVerCombo_->clear();
-        if (!ok) {
+        loaderVerCombo_->setEnabled(false);
+        if (!ok || list.empty()) {
             loaderState_->setText("获取失败：" + QString::fromStdString(err));
             return;
         }
-        for (const auto& v : list)
-            loaderVerCombo_->addItem(QString::fromStdString(v.version) + (v.stable ? "（稳定）" : ""),
-                                     QString::fromStdString(v.version));
-        loaderState_->setText(QString("共 %1 个版本，选一个再点安装").arg(list.size()));
+        int latestIdx = -1;
+        for (int i = 0; i < static_cast<int>(list.size()); ++i)
+            if (list[static_cast<size_t>(i)].stable) { latestIdx = i; break; }
+        if (latestIdx < 0) latestIdx = 0;
+        const auto& latest = list[static_cast<size_t>(latestIdx)];
+        loaderVerCombo_->addItem(
+            QString::fromStdString(latest.version) + (latest.stable ? "（稳定）" : ""),
+            QString::fromStdString(latest.version));
+        loaderVerCombo_->setCurrentIndex(0);
+        loaderState_->setText(QString("已固定最新%1版 %2")
+                                  .arg(latest.stable ? "稳定" : "预览",
+                                       QString::fromStdString(latest.version)));
+        if (loaderAutoUpdating_) {
+            loaderState_->setText("正在自动更新加载器…");
+            return;
+        }
+        const std::string activeLoader =
+            !cfg_.profile.empty() ? cfg_.profile : (cfg_.fabric ? "fabric" : "");
+        if (activeLoader != loader) return;
+
+        const std::string installed =
+            core::installedLoaderVersion(layout_, cfg_.version, loader);
+        int installedIdx = -1;
+        for (int i = 0; i < static_cast<int>(list.size()); ++i)
+            if (list[static_cast<size_t>(i)].version == installed) { installedIdx = i; break; }
+        if (!installed.empty() && installedIdx == latestIdx) {
+            loaderState_->setText(QString("已是最新%1版 %2")
+                                      .arg(latest.stable ? "稳定" : "预览",
+                                           QString::fromStdString(latest.version)));
+            return;
+        }
+        // API 按新→旧排列：已装的比最新稳定版还新（例如手动装过 beta）就不降级
+        if (!installed.empty() && installedIdx >= 0 && installedIdx < latestIdx) return;
+        startLoaderInstall(loader, latest.version, true);
     }
 
     void installSelectedLoader() {
         if (loaderVerCombo_->count() == 0) { loaderState_->setText("先点「获取版本」"); return; }
         const std::string loader = loaderCombo_->currentData().toString().toStdString();
         const std::string lv = loaderVerCombo_->currentData().toString().toStdString();
+        startLoaderInstall(loader, lv, false);
+    }
+
+    void startLoaderInstall(const std::string& loader, const std::string& lv, bool autoUpdate) {
         core::Config c = cfg_;
         core::Layout l = layout_;
+        loaderAutoUpdating_ = autoUpdate;
         installLoaderBtn_->setEnabled(false);
-        loaderState_->setText("安装中…（会下载加载器依赖）");
+        loaderCombo_->setEnabled(false);
+        loaderVerCombo_->setEnabled(false);
+        loaderState_->setText(autoUpdate
+                                  ? QString("发现新版本，自动更新到 %1…").arg(QString::fromStdString(lv))
+                                  : "安装中…（会下载加载器依赖）");
         QPointer<LauncherWindow> guard(this);
-        std::thread([guard, l, c, loader, lv]() mutable {
+        std::thread([guard, l, c, loader, lv, autoUpdate]() mutable {
             std::string err;
             const bool ok = core::installLoader(l, c, loader, lv, nullptr, err);
-            QMetaObject::invokeMethod(qApp, [guard, ok, err, c, loader, lv] {
+            QMetaObject::invokeMethod(qApp, [guard, ok, err, c, loader, lv, autoUpdate] {
                 if (!guard) return;
+                guard->loaderAutoUpdating_ = false;
                 guard->installLoaderBtn_->setEnabled(true);
+                guard->loaderCombo_->setEnabled(true);
+                guard->loaderVerCombo_->setEnabled(false);
                 if (!ok) {
-                    guard->loaderState_->setText("失败：" + QString::fromStdString(err));
+                    guard->loaderState_->setText(
+                        (autoUpdate ? "自动更新失败：" : "失败：") + QString::fromStdString(err));
                     return;
                 }
                 guard->cfg_ = c;
                 std::string serr;
                 guard->cfg_.save(guard->layout_.configFile, serr);
-                guard->loaderState_->setText(QString("已装 %1 %2 → %3")
-                                                 .arg(QString::fromStdString(loader), QString::fromStdString(lv),
-                                                      QString::fromStdString(core::versionDirName(c))));
-                guard->modLog_->appendPlainText(QString("[%1] 加载器 %2 %3 安装完成")
-                                                    .arg(QTime::currentTime().toString("HH:mm:ss"),
-                                                         QString::fromStdString(loader), QString::fromStdString(lv)));
+                if (guard->launchVersion_)
+                    guard->launchVersion_->setCurrentText(
+                        QString::fromStdString(core::versionDirName(c)));
+                guard->loaderState_->setText(
+                    (autoUpdate ? QString("已自动更新加载器 %1 %2 → %3")
+                                  : QString("已装 %1 %2 → %3"))
+                        .arg(QString::fromStdString(loader), QString::fromStdString(lv),
+                             QString::fromStdString(core::versionDirName(c))));
+                guard->modLog_->appendPlainText(
+                    QString("[%1] 加载器 %2 %3 %4")
+                        .arg(QTime::currentTime().toString("HH:mm:ss"),
+                             QString::fromStdString(loader), QString::fromStdString(lv),
+                             autoUpdate ? "已自动更新" : "安装完成"));
             }, Qt::QueuedConnection);
         }).detach();
     }
@@ -2998,9 +3059,10 @@ private:
         switching_ = true;
         const QPixmap old = stack_->grab();
         stack_->setCurrentIndex(idx);
-        if (idx == 2) {                            // Mod 页：刷新已装列表与版本下拉
+        if (idx == 2) {                            // Mod 页：刷新已装列表、版本下拉与加载器
             refreshModVersionChoices();
             refreshInstalledMods();
+            refreshLoaderVersions();
         }
         else if (idx == 3) refreshVersionList();
         else if (idx == 5) refreshResources();    // 资源页
@@ -3089,7 +3151,7 @@ private:
 
     void loadConfigToUi() {
         usernameEdit_->setText(QString::fromStdString(cfg_.username));
-        launchVersion_->setCurrentText(QString::fromStdString(cfg_.version));
+        launchVersion_->setCurrentText(QString::fromStdString(core::versionDirName(cfg_)));
         downloadVersion_->setCurrentText(QString::fromStdString(cfg_.version));
         int mi = mirrorCombo_->findData(QString::fromStdString(cfg_.mirror));
         if (mi >= 0) mirrorCombo_->setCurrentIndex(mi);
@@ -3127,8 +3189,26 @@ private:
         updateMemPreview();
     }
     void collectUiToConfig() {
-        cfg_.version = launchVersion_->currentText().toStdString();
-        if (cfg_.version.empty()) cfg_.version = "26.3";
+        std::string selected = launchVersion_->currentText().toStdString();
+        if (selected.empty()) selected = "26.3";
+        // 下拉框里可能直接是加载器目录（26.3+fabric）：拆成基础版本 + profile，
+        // 避免 versionDirName 再拼一次后缀变成 26.3+fabric+fabric
+        std::string profile;
+        if (selected.ends_with("+fabric")) {
+            profile = "fabric";
+            selected.resize(selected.size() - 7);
+        } else if (selected.ends_with("+quilt")) {
+            profile = "quilt";
+            selected.resize(selected.size() - 6);
+        }
+        cfg_.version = selected;
+        if (!profile.empty()) {
+            cfg_.profile = profile;
+            cfg_.fabric = (profile == "fabric");
+        } else {
+            cfg_.profile.clear();
+            cfg_.fabric = false;
+        }
         cfg_.username = usernameEdit_->text().toStdString();
         cfg_.mirror = mirrorCombo_->currentData().toString().toStdString();
         cfg_.jobs = jobsSpin_->value();
@@ -3221,9 +3301,10 @@ private:
         QString cur = launchVersion_->currentText();
         launchVersion_->clear();
         for (const auto& v : vers) launchVersion_->addItem(QString::fromStdString(v));
-        if (cur.isEmpty() && !cfg_.version.empty()) launchVersion_->addItem(QString::fromStdString(cfg_.version));
+        const QString active = QString::fromStdString(core::versionDirName(cfg_));
+        if (cur.isEmpty() && !cfg_.version.empty()) launchVersion_->addItem(active);
         if (!cur.isEmpty()) launchVersion_->setCurrentText(cur);
-        else launchVersion_->setCurrentText(QString::fromStdString(cfg_.version));
+        else launchVersion_->setCurrentText(active);
         launchState_->setText("本地版本 " + QString::number(vers.size()) + " 个");
         refreshVersionList();
     }
@@ -3641,6 +3722,7 @@ private:
     QComboBox* loaderVerCombo_ = nullptr;
     QPushButton* installLoaderBtn_ = nullptr;
     QLabel* loaderState_ = nullptr;
+    bool loaderAutoUpdating_ = false;
     QComboBox* modVersionCombo_ = nullptr;
     QTableWidget* modTable_ = nullptr;
     QPushButton* modSearchBtn_ = nullptr;
