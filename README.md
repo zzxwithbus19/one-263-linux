@@ -1,9 +1,7 @@
-# mc263 — Minecraft 26.3 Linux 启动器（Qt6 / C++23）
+# Minecraft 26.3 Linux 启动器
 
 > 许可：AGPL-3.0-or-later（ [LICENSE](LICENSE)）
 
-包形态**一个 ELF + 旁边的 `minecraft/` 与 `.mc263/`**。
-Qt6 Widgets 原生界面（无 Electron、无内嵌浏览器、无 moc），启动时自动选择
 Wayland 原生运行。
 
 ```
@@ -14,117 +12,52 @@ minecraft/               ← 游戏目录（首次运行自动建，可在设置
 └── mc263_downloader.py  内嵌 python3 下载脚本（运行时释放）
 ```
 
->目录放 `~/.local/share/mc263/`。
+>安装目录放 在`~/.local/share/mc263/`。
 
 ---
 
 ## 1. 安装
 
-主线是 **Arch Linux、Debian/Ubuntu 和 Fedora**。AUR 上没有（我没账户啊啊啊），copr倒是有
+支持**Arch Linux、Debian/Ubuntu 和 Fedora**。
+AUR 上没有，Copr倒是有一个仓库
 
-### 1.1 
+### 1.1 快捷安装
 
-```sh
+```zsh
 curl -fsSL https://raw.githubusercontent.com/zzxwithbus19/one-263-linux/main/install.sh | sh
 ```
 
-强制走某条路 / 指定 tag（含 pre-release）/ 卸载：
+或
 
-```sh
-sh install.sh --pacman       # 只装 Arch 的 .pkg.tar.zst（sudo pacman -U）
-sh install.sh --rpm          # 只装 rpm
-sh install.sh --deb          # 只装 Debian/Ubuntu 的 .deb（sudo apt install ./x.deb）
-sh install.sh --elf          # 只装独立 ELF，不碰包管理器
-sh install.sh --tag pre非生产  # 装指定 tag（pre-release 也支持）
-sh install.sh --uninstall    # 卸载（pacman / deb / rpm / ELF 都会处理）
+```zsh
+install.sh --pacman       # 只装 Arch 的 .pkg.tar.zst（sudo pacman -U）
+install.sh --rpm          # 只装 rpm
+install.sh --deb          # 只装 Debian/Ubuntu 的 .deb（sudo apt install ./x.deb）
+install.sh --elf          # 只装独立 ELF，不碰包管理器
+install.sh --tag pre非生产  # 装指定 tag（pre-release 也支持）
+install.sh --uninstall    # 卸载（pacman / deb / rpm / ELF 都会处理）
 ```
 
-### 1.2 免安装 ELF
+### 1.2 免安装 ELF（约1M）
 
-`mc263-qt-26.3-x86_64` 是单独一个二进制，没有菜单项和图标，运行时自己备：
+`mc263-qt-26.3-x86_64` 是单独一个二进制，需要运行时前置
 
-```sh
-sudo pacman -S --needed qt6-base qt6-wayland  
-chmod +x mc263-qt-26.3-x86_64
+```zsh
+sudo pacman -S --needed qt6-base qt6-wayland  //for example
 ./mc263-qt-26.3-x86_64
 ```
 
-> 自备了 Qt6 运行时的其它发行版也能这么跑；Debian 系有 .deb（见 1.3），Fedora / openSUSE 请用 rpm（详见copr）。
+> 有Qt6的其它发行版也能这么跑；为了包管理方便，请使用对应发行版的完整打包哦
 
-### 1.3 Debian / Ubuntu（Ubuntu 26.04+ / Debian 13+）
+ ---
 
-需要 Qt 6.6+ 的 `QPalette::Accent`，所以不支持 Ubuntu 24.04（Qt 6.4）。
+## 2.特别说明
 
-```sh
-sudo apt install build-essential qt6-base-dev qt6-wayland python3 curl
-bash packaging/build-deb.sh                   # → dist/deb/mc263_26.3-1_amd64.deb
-sudo apt install ./dist/deb/mc263_26.3-1_amd64.deb   # 注意 ./，否则 apt 当成包名
-mc263-qt
-```
-
-依赖映射、t64 包名、Wayland 插件包名的细节记在本地交接文档里，不随仓库发布。
+***版本隔离（始终开启，没有关闭开关）***
 
 ---
 
-## 2. 从源码构建
-
-不支持在README.md里提供！不推荐二次分发该仓库
-
----
-
-## 3. 界面与功能
-
-| 页面 | 能力 |
-|------|------|
-| 启动游戏 | 本地版本下拉、玩家名、一键启动；`QProcess` 异步 exec java，日志实时刷新 |
-| 下载游戏 | 在线版本列表、组件勾选、official / bmclapi 镜像、并发线程（默认 10）；JSON 进度条与日志；**清除下载缓存**按钮（只删元数据缓存，已下载的 jar / 库 / 资源不受影响） |
-| Mod 下载 | 搜 Modrinth：关键词 + 加载器 + 游戏版本过滤，**排序可选下载量 / 相关度 / 关注数 / 最新发布 / 最近更新**；双击即装，SHA1 校验、已存在则跳过 |
-| 加载器 | Fabric / Quilt 版本列表拉取 + 一键安装：抓 profile json、与原版 json 合并、下载依赖到 `libraries/`，生成 `versions/<版本>+<加载器>/` |
-| Java 与兼容性 | 后台线程扫描配置 / Mojang JRE / `JAVA_HOME` / `PATH` / `/usr/lib/jvm`；11 项查验（架构、Java 版本、依赖库、natives、图形音频库、内存、磁盘、路径守卫，可选网络连通性） |
-| 游戏目录 | 独立一页：自动扫描 ELF 旁 / XDG 数据目录 / `~/.minecraft`（**只列真实存在的目录**），列出各自的版本数与 mods 数，选中即切换，避免两套装各用一份 |
-| 设置 / 内存 | **内存默认交给 JVM 管理**（不传 `-Xmx`/`-Xms`）；关掉自动后可手动拖 `-Xmx`/`-Xms`。四段式内存条：程序占用 → 缓存 → 游戏堆 → 余下可用，2 秒刷新、超可用内存红字提示；额外 JVM 参数；**游戏语言默认跟随系统 locale**（识别不到就 `en_us`）；页底是许可与说明（README 链接、仓库链接、显示后端） |
-
-**版本隔离（始终开启，没有关闭开关）**：启动时 `--gameDir` 指向 `versions/<版本>/`，
-`mods`、`saves`、`resourcepacks`、`shaderpacks`、`logs` 都在该目录下自动建好 ——
-不同版本（含 `26.3` 与 `26.3+fabric`）互不影响，存档和 Mod 不会串。
-Mod 下载也装进对应版本的目录，而不是全局 `minecraft/mods/`。
-
----
-
-## 4. 启动前的 Java 检查
-
-启动时先扫 Java，达标才放行。
-
-| 版本 | 需要的 Java |
-|------|-------------|
-| 26.x（主线） | **25+** |
-| 1.20 ~ 1.21 | 21 |
-| 1.17 ~ 1.19 | 17 |
-| 1.16 及更早 |  1.8|
-
-阈值优先读已下载的 `<版本>.json` 里的 `javaVersion.majorVersion`，没下载时按版本号推断
-（`core::requiredJavaMajor`，有单测）。
-
-- 找到达标 Java → 直接进主界面
-- 只有 Java 8 / 11 → 「当前 Java 11 已不再被 Minecraft 26.3 所支持」
-- 只有 17 / 21 → 「当前 Java 21 低于 Minecraft 26.3 要求的 Java 25」
-- 一个都没有 → 提示去下载页，那里「Java 运行时」**蓝色高亮并默认勾选**
-
-卡片按钮：下载 Java 运行时 / 重新检测 / 手动指定 java… / 退出。
-下载完成或手动指定后自动重扫，达标即放行；点「启动游戏」时按当前版本再算一次。
-
----
-
-## 5. Wayland 原生
-「关于」页会显示当前后端与 Qt 版本，可直接确认。
-
----
-
-## 6. Fedora 45 / RPM 6.1 的签名要求
-
-我有COPR
-
-## 7. 目录结构
+## 3. 仓库结构
 
 ```
 mc26-one/
@@ -161,7 +94,7 @@ mc26-one/
 
 ---
 
-## 8. 常见问题
+## 4. 常见问题
 
 
 **Q：没有 Java 能先下游戏吗？**
@@ -174,10 +107,9 @@ A：**暂时不能**。启动参数是离线模式（`--accessToken 0 --userType
 
 ---
 
-## 9. 许可与法律声明
+## 5. 许可与法律声明
 
-本项目源码采用 **AGPL-3.0-or-later**。上游 `zhanbalao/mc26-one` 未声明许可证，
-且其唯一的 `build_262.py` 已从本仓库移除；当前代码为全新 C++23 实现，不含上游代码。
+本项目源码采用 **AGPL-3.0-or-later**。
 
 AGPLv3 在 GPLv3 之外多一条网络条款：修改本项目后若通过网络提供服务，需向访问者
 提供修改后的源码；单纯运行游戏或调用第三方 API 不触发这条。
