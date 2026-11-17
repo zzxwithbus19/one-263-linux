@@ -13,7 +13,7 @@
 
 Name:           mc263
 Version:        %{mc263_version}
-Release:        5%{?dist}
+Release:        6%{?dist}
 Summary:        Minecraft 26.3 launcher (Qt6 native, Wayland-ready)
 License:        AGPL-3.0-or-later
 URL:            https://github.com/zzxwithbus19/one-263-linux
@@ -83,5 +83,8 @@ make check
 %{_datadir}/metainfo/mc263.metainfo.xml
 
 %changelog
+* Tue Nov 17 2026 mc263 <mc263@users.noreply.github.com> - %{mc263_version}-6
+- 同步 main：加载器区域置顶、版本隔离提示、Mod 关键词自动补全
+
 * Sat Nov 07 2026 mc263 <mc263@users.noreply.github.com> - %{mc263_version}-1
 - Qt6 native launcher (Wayland-first), built from source

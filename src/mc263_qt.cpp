@@ -17,7 +17,9 @@
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QCompleter>
 #include <QDialog>
+#include <QHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -62,6 +64,7 @@
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QStringListModel>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTabBar>
@@ -1376,6 +1379,7 @@ private:
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
         addPageHeader(v, "Mod 下载", "从 Modrinth 搜索，按加载器与游戏版本过滤，直接装进 minecraft/mods/");
+        const int firstCardIndex = v->count();
 
         auto* sbox = new QGroupBox("搜索", w);
         auto* form = new QFormLayout(sbox);
@@ -1383,6 +1387,28 @@ private:
         modQuery_ = new QLineEdit(sbox);
         modQuery_->setPlaceholderText("sodium / lithium / jei …");
         modQuery_->setClearButtonEnabled(true);
+        modCompleter_ = new QCompleter(this);
+        modCompleter_->setCaseSensitivity(Qt::CaseInsensitive);
+        modCompleter_->setFilterMode(Qt::MatchContains);
+        modCompleter_->setCompletionMode(QCompleter::PopupCompletion);
+        modCompleter_->setMaxVisibleItems(8);
+        modCompleter_->setModel(new QStringListModel(this));
+        modQuery_->setCompleter(modCompleter_);
+        modSuggestTimer_ = new QTimer(this);
+        modSuggestTimer_->setSingleShot(true);
+        modSuggestTimer_->setInterval(300);
+        connect(modQuery_, &QLineEdit::textEdited, this, [this](const QString& text) {
+            const int n = text.trimmed().size();
+            if (n < 2) {
+                if (modSuggestTimer_) modSuggestTimer_->stop();
+                if (auto* model = qobject_cast<QStringListModel*>(modCompleter_->model()))
+                    model->setStringList({});
+                if (auto* popup = modCompleter_->popup()) popup->hide();
+                return;
+            }
+            if (modSuggestTimer_) modSuggestTimer_->start();
+        });
+        connect(modSuggestTimer_, &QTimer::timeout, this, &LauncherWindow::requestModSuggestions);
         modLoader_ = new QComboBox(sbox);
         modLoader_->addItem("Fabric", "fabric");
         modLoader_->addItem("Forge", "forge");
@@ -1428,6 +1454,11 @@ private:
         installLoaderBtn_->setObjectName("primary");
         loaderState_ = new QLabel("装完后启动会用 versions/<版本>+<加载器>，原版不受影响", lbox);
         loaderState_->setObjectName("muted");
+        auto* loaderNote = new QLabel(
+            "说明：安装加载器会自动生成独立版本目录，与原版隔开；启动页需手动把游戏版本切到加载器版本，否则仍按原版启动。",
+            lbox);
+        loaderNote->setObjectName("muted");
+        loaderNote->setWordWrap(true);
         lform->addRow("加载器", loaderCombo_);
         lform->addRow("版本", lrow);
         auto* irow = new QHBoxLayout();
@@ -1435,7 +1466,8 @@ private:
         irow->addStretch(1);
         lform->addRow(QString(), irow);
         lform->addRow(QString(), loaderState_);
-        v->addWidget(lbox);
+        lform->addRow(QString(), loaderNote);
+        v->insertWidget(firstCardIndex, lbox);
 
 
         modTable_ = new QTableWidget(0, 4, w);
@@ -1528,6 +1560,61 @@ private:
             QProcess::startDetached("xdg-open", {QString::fromStdString(dir.string())});
         });
         return w;
+    }
+
+    void requestModSuggestions() {
+        if (!modQuery_ || !modCompleter_) return;
+        const QString q = modQuery_->text().trimmed();
+        if (q.size() < 2) return;
+        const QString loader = modLoader_->currentData().toString();
+        const QString ver = modVersionEdit_->text().trimmed();
+        const QString key = q + QChar(0x1f) + loader + QChar(0x1f) + ver;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const auto cached = modSuggestCache_.constFind(key);
+        const auto cachedAt = modSuggestCacheAt_.constFind(key);
+        if (cached != modSuggestCache_.constEnd() && cachedAt != modSuggestCacheAt_.constEnd() &&
+            now - cachedAt.value() < 5 * 60 * 1000) {
+            applyModSuggestions(q, cached.value());
+            return;
+        }
+        const auto cache = layout_.configDir / "cache";
+        QPointer<LauncherWindow> guard(this);
+        std::thread([guard, q, key, loader, ver, cache] {
+            std::vector<mc263::modrinth::Hit> hits;
+            std::string err;
+            const bool ok = mc263::modrinth::search(q.toStdString(), loader.toStdString(),
+                                                    ver.toStdString(), "downloads", cache, hits, err);
+            QStringList items;
+            if (ok) {
+                for (const auto& h : hits) {
+                    const QString title = QString::fromStdString(h.title).trimmed();
+                    if (!title.isEmpty() && !items.contains(title)) items << title;
+                    if (items.size() >= 8) break;
+                }
+            }
+            QMetaObject::invokeMethod(qApp, [guard, q, key, items, ok] {
+                if (!guard || !guard->modCompleter_ || !guard->modQuery_) return;
+                if (guard->modQuery_->text().trimmed() != q) return;
+                if (ok) {
+                    guard->modSuggestCache_.insert(key, items);
+                    guard->modSuggestCacheAt_.insert(key, QDateTime::currentMSecsSinceEpoch());
+                }
+                guard->applyModSuggestions(q, items);
+            }, Qt::QueuedConnection);
+        }).detach();
+    }
+
+    void applyModSuggestions(const QString& prefix, const QStringList& items) {
+        if (!modCompleter_) return;
+        auto* model = qobject_cast<QStringListModel*>(modCompleter_->model());
+        if (!model) return;
+        model->setStringList(items);
+        if (items.isEmpty()) {
+            if (auto* popup = modCompleter_->popup()) popup->hide();
+            return;
+        }
+        modCompleter_->setCompletionPrefix(prefix);
+        modCompleter_->complete();
     }
 
     void startModSearch() {
@@ -3393,6 +3480,10 @@ private:
     QPushButton* clearCacheBtn_ = nullptr;
 
     QLineEdit* modQuery_ = nullptr;
+    QCompleter* modCompleter_ = nullptr;
+    QTimer* modSuggestTimer_ = nullptr;
+    QHash<QString, QStringList> modSuggestCache_;
+    QHash<QString, qint64> modSuggestCacheAt_;
     QComboBox* modLoader_ = nullptr;
     QComboBox* modSort_ = nullptr;
     QComboBox* loaderCombo_ = nullptr;
