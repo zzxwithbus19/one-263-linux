@@ -86,16 +86,25 @@ step "makepkg（只构建，不安装、不联网拉依赖）"
 args=(-f --noconfirm)
 [ "$NOCHECK" = 1 ] && args+=(--nocheck)
 [ "$NODEPS" = 1 ] && args+=(-d)
+# 产物格式：默认按 /etc/makepkg.conf（现在通常是 .pkg.tar.zst）；
+# MC263_PKGEXT=.pkg.tar.xz 可以换成 xz（或 .pkg.tar.gz / .pkg.tar）
+ext_args=()
+if [ -n "${MC263_PKGEXT:-}" ]; then
+    mkconf="$OUT/makepkg-pkgext.conf"
+    sed -E "s|^PKGEXT=.*|PKGEXT='${MC263_PKGEXT}'|" /etc/makepkg.conf > "$mkconf"
+    ext_args=(--config "$mkconf")
+    echo "  产物格式: $MC263_PKGEXT"
+fi
 # 同一版本号的旧包先删掉：不然上次构建留下的 -debug / 旧内容会混进仓库
-rm -f "$OUT"/mc263*-"$VER"-"$REL"-*.pkg.tar.zst
-if ! ( cd "$OUT" && makepkg "${args[@]}" ); then
+rm -f "$OUT"/mc263*-"$VER"-"$REL"-*.pkg.tar.*
+if ! ( cd "$OUT" && makepkg "${args[@]}" "${ext_args[@]}" ); then
     echo
     die "makepkg 失败。依赖问题的处理：sudo pacman -S --needed base-devel qt6-base qt6-wayland python curl
   其它问题看上面 makepkg 的输出（构建在 $OUT/src）"
 fi
 
-PKG="$(ls -t "$OUT"/mc263-"$VER"-"$REL"-*.pkg.tar.zst 2>/dev/null | head -1 || true)"
-[ -n "$PKG" ] && [ -f "$PKG" ] || die "makepkg 跑完了但没找到 .pkg.tar.zst"
+PKG="$(ls -t "$OUT"/mc263-"$VER"-"$REL"-*.pkg.tar.* 2>/dev/null | head -1 || true)"
+[ -n "$PKG" ] && [ -f "$PKG" ] || die "makepkg 跑完了但没找到 .pkg.tar.*"
 PKG_NAME="$(basename "$PKG")"
 
 # ---------- 5. 包内容校验 ----------
