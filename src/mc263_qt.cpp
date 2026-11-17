@@ -713,6 +713,14 @@ static void setCardTitle(QGroupBox* box, QLayout* lay, const QString& text) {
     else if (auto* fm = qobject_cast<QFormLayout*>(lay)) fm->insertRow(0, t);
 }
 
+// 表格默认行高偏矮、整体容易被布局压缩成一条，这里统一给个舒适的最小高度
+static void enlargeTable(QTableWidget* table, int rows = 4) {
+    if (!table) return;
+    constexpr int kRowHeight = 30;
+    table->verticalHeader()->setDefaultSectionSize(kRowHeight);
+    table->setMinimumHeight(46 + rows * kRowHeight);
+}
+
 // 切页过渡用的临时贴图：画上一页的快照，透明度从 1 收到 0。
 // 自己画（而不是 QGraphicsOpacityEffect）是为了保住窗口自绘的圆角底色。
 class FadeOverlay : public QWidget {
@@ -1474,6 +1482,7 @@ private:
         instModTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
         instModTable_->setSelectionMode(QAbstractItemView::ExtendedSelection);
         instModTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        enlargeTable(instModTable_, 3);
         iv->addWidget(instModTable_, 1);
         auto* mrow = new QHBoxLayout();
         auto* iRefresh = new QPushButton("刷新", ibox);
@@ -1902,6 +1911,7 @@ private:
         javaTable_->verticalHeader()->setVisible(false);
         javaTable_->setShowGrid(false);
         javaTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        enlargeTable(javaTable_, 4);
         jv->addWidget(javaTable_);
         javaCombo_ = new QComboBox(right);
         javaState_ = new QLabel("尚未扫描", right);
@@ -1928,6 +1938,7 @@ private:
         compatTable_->verticalHeader()->setVisible(false);
         compatTable_->setShowGrid(false);
         compatTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        enlargeTable(compatTable_, 4);
         cv->addWidget(compatTable_);
         compatState_ = new QLabel("尚未检查", right);
         netCheck_ = new QCheckBox("同时检查官方下载源连通性", right);
