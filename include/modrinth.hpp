@@ -47,6 +47,7 @@ struct Version {
     std::string projectId;   // /version_file 查询时会带回来，更新检查要用
     std::string name;
     std::string number;
+    std::string versionType;  // release / beta / alpha
     std::vector<std::string> gameVersions;
     std::vector<std::string> loaders;
     std::vector<File> files;
@@ -107,6 +108,7 @@ inline Version parseVersionObject(const JValue& v) {
     x.projectId = field(v, "project_id");
     x.name = field(v, "name");
     x.number = field(v, "version_number");
+    x.versionType = field(v, "version_type");
     if (const JValue* gv = v.find("game_versions"); gv && gv->isArray())
         for (const JValue& s : gv->array()) if (s.isString()) x.gameVersions.push_back(s.str());
     if (const JValue* ld = v.find("loaders"); ld && ld->isArray())

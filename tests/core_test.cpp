@@ -157,12 +157,13 @@ int main() {
           "Modrinth 搜索响应解析");
 
     const std::string verJson = R"([{"id":"ver1","name":"Sodium 0.6","version_number":"0.6.0",
-        "game_versions":["26.3"],"loaders":["fabric"],
+        "version_type":"release","game_versions":["26.3"],"loaders":["fabric"],
         "files":[{"url":"https://cdn/x.jar","filename":"sodium-0.6.jar","size":2048,
                   "primary":true,"hashes":{"sha1":"abc123"}}]}])";
     std::vector<mc263::modrinth::Version> mvers;
     check(mc263::modrinth::parseVersions(verJson, mvers, merr) && mvers.size() == 1 &&
               mvers[0].gameVersions.size() == 1 && mvers[0].loaders[0] == "fabric" &&
+              mvers[0].versionType == "release" &&
               mc263::modrinth::primaryFile(mvers[0]) != nullptr &&
               mc263::modrinth::primaryFile(mvers[0])->sha1 == "abc123",
           "Modrinth 版本响应解析");
