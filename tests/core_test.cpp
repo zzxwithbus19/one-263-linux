@@ -465,6 +465,66 @@ broken = "not-a-color"
               "崩溃摘要：只留最后 N 行");
     }
 
+    // 游戏显示后端配置往返
+    {
+        Config dc;
+        dc.gameDisplay = "wayland";
+        Config back = Config::fromJson(dc.toJson());
+        check(back.gameDisplay == "wayland", "配置：gameDisplay 可往返");
+        check(Config{}.gameDisplay == "auto", "配置：gameDisplay 默认 auto");
+    }
+
+    // 加载器目录被删/未装时退回原版
+    {
+        Layout ll = Layout::at(root / "launcher");
+        std::string e;
+        ll.ensure(e);
+        fs::create_directories(ll.versionDir("26.3"), ec);
+        { std::ofstream o(ll.versionJson("26.3")); o << kFakeVersion; }
+        Config cc;
+        cc.version = "26.3";
+        cc.profile = "quilt";
+        cc.arch = "x86_64";
+        check(effectiveVersionId(ll, cc) == "26.3", "版本目录：没有 +quilt 时退回原版");
+        check(isolatedGameDir(ll, cc).filename().string() == "26.3", "版本目录：隔离目录也退回原版");
+
+        fs::create_directories(ll.versionDir("26.3+quilt"), ec);
+        { std::ofstream o(ll.versionJson("26.3+quilt")); o << kFakeVersion; }
+        check(effectiveVersionId(ll, cc) == "26.3+quilt", "版本目录：有 +quilt 时用加载器版本");
+
+        Config missing;
+        missing.version = "26.4-snapshot-8";
+        missing.profile = "quilt";
+        missing.arch = "x86_64";
+        check(effectiveVersionId(ll, missing) == "26.4-snapshot-8+quilt",
+              "版本目录：两个都没有时返回原名（报错能指到具体文件）");
+    }
+
+    // 游戏语言写进 options.txt
+    {
+        std::string e;
+        fs::path gd = root / "langtest";
+        fs::create_directories(gd, ec);
+        { std::ofstream o(gd / "options.txt"); o << "fov:70\nlang:en_us\nfoo:1\n"; }
+        check(applyGameLanguage(gd, "zh_cn", e), "语言：写入 options.txt 成功");
+        const std::string text = fsx::readText(gd / "options.txt", e);
+        check(text.find("lang:zh_cn") != std::string::npos, "语言：lang 行被改成 zh_cn");
+        check(text.find("fov:70") != std::string::npos && text.find("foo:1") != std::string::npos,
+              "语言：其他设置行原样保留");
+        check(text.find("lang:en_us") == std::string::npos, "语言：不再有 en_us");
+
+        fs::path fresh = root / "langfresh";
+        check(applyGameLanguage(fresh, "ja_jp", e), "语言：没有 options.txt 时直接创建");
+        check(fsx::readText(fresh / "options.txt", e).find("lang:ja_jp") != std::string::npos,
+              "语言：新文件里是 ja_jp");
+
+        Config lc;
+        lc.language = "en_us";
+        check(effectiveGameLanguage(lc) == "en_us", "语言：显式设置优先");
+        lc.language.clear();
+        check(effectiveGameLanguage(lc) == detectSystemLanguage(), "语言：空则跟随系统");
+    }
+
     std::cout << "core: " << passed << " 项通过\n";
     return 0;
 }

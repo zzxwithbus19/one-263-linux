@@ -216,6 +216,11 @@ struct Config {
     bool fabric = false;
     std::string profile;  // 加载器 profile 名（如 fabric），空 = 原版
     std::string language;  // 游戏语言（en_us / zh_cn…）；空 = 跟随系统
+    // 上次由启动器写进 options.txt 的语言（用来判断设置有没有变；空 = 还没写过）
+    std::string appliedLanguage;
+    // 游戏窗口后端：auto = 让游戏（SDL）自己选；wayland = SDL_VIDEO_DRIVER=wayland；
+    // x11 = SDL_VIDEO_DRIVER=x11（走 XWayland）。只影响游戏进程。
+    std::string gameDisplay = "auto";
     // 配色来源：auto = 检测到 Noctalia 色板就用它，否则跟随系统；system = 只用系统调色板；
     // noctalia = 强制读 Noctalia 的 Material You 色板（读不到就退回系统）
     std::string themeSource = "auto";
@@ -237,6 +242,8 @@ struct Config {
         j.set("fabric", JValue::booleanV(fabric));
         j.set("profile", JValue::stringV(profile));
         j.set("language", JValue::stringV(language));
+        j.set("appliedLanguage", JValue::stringV(appliedLanguage));
+        j.set("gameDisplay", JValue::stringV(gameDisplay));
         j.set("themeSource", JValue::stringV(themeSource));
         JValue a = JValue::arrayV();
         for (const auto& s : extraJvmArgs) a.push(JValue::stringV(s));
@@ -259,9 +266,13 @@ struct Config {
         const JValue* mi = j.find("minMemoryMb"); if (mi) c.minMemoryMb = static_cast<int>(mi->number(0));
         const JValue* jobs = j.find("jobs"); if (jobs) c.jobs = static_cast<int>(jobs->number(10));
         const JValue* f = j.find("fabric"); if (f) c.fabric = f->boolean(false);
-        s("profile", c.profile); s("language", c.language); s("themeSource", c.themeSource);
+        s("profile", c.profile); s("language", c.language);
+        s("appliedLanguage", c.appliedLanguage); s("gameDisplay", c.gameDisplay);
+        s("themeSource", c.themeSource);
         if (c.themeSource != "auto" && c.themeSource != "system" && c.themeSource != "noctalia")
             c.themeSource = "auto";
+        if (c.gameDisplay != "auto" && c.gameDisplay != "wayland" && c.gameDisplay != "x11")
+            c.gameDisplay = "auto";
         const JValue* a = j.find("extraJvmArgs");
         if (a && a->isArray()) { c.extraJvmArgs.clear(); for (const auto& v : a->array()) if (v.isString()) c.extraJvmArgs.push_back(v.str()); }
         const JValue* cc = j.find("components");
@@ -295,9 +306,21 @@ inline std::string versionDirName(const Config& c) {
     return c.fabric ? c.version + "+fabric" : c.version;
 }
 
+// 实际该用的版本目录名：配置里可能还留着 profile（quilt/fabric），
+// 但那个加载器版本已经被删/还没装 —— 这时退回原版版本，而不是报
+// “缺少版本 json: …+quilt/…+quilt.json”（玩家删 versions/ 里的目录很正常）。
+inline std::string effectiveVersionId(const Layout& l, const Config& c) {
+    const std::string composed = versionDirName(c);
+    if (composed == c.version) return composed;
+    std::error_code ec;
+    if (fs::is_regular_file(l.versionJson(composed), ec)) return composed;
+    if (fs::is_regular_file(l.versionJson(c.version), ec)) return c.version;
+    return composed;
+}
+
 // 版本隔离后的 gameDir：每个版本一个目录，存档 / mods / 资源包互不干扰
 inline fs::path isolatedGameDir(const Layout& l, const Config& c) {
-    return l.versionsDir / versionDirName(c);
+    return l.versionsDir / effectiveVersionId(l, c);
 }
 
 struct GameDirInfo {
@@ -749,7 +772,8 @@ struct VersionMeta {
 
 inline VersionMeta loadVersion(const Layout& l, const Config& c) {
     VersionMeta m;
-    fs::path vj = l.versionJson(versionDirName(c));
+    const std::string vid = effectiveVersionId(l, c);
+    fs::path vj = l.versionJson(vid);
     std::string err;
     std::string text = fsx::readText(vj, err);
     if (!err.empty()) { m.error = "缺少版本 json: " + vj.string(); return m; }
@@ -796,7 +820,7 @@ inline VersionMeta loadVersion(const Layout& l, const Config& c) {
     // 展平进了加载器 json（libraries / assetIndex 都在），但游戏本体仍然是
     // versions/<mc 版本>/<mc 版本>.jar。它必须进 classpath，否则 Knot 直接报
     // "Minecraft game provider couldn't locate the game!"。
-    const fs::path ownJar = l.versionJar(versionDirName(c));
+    const fs::path ownJar = l.versionJar(vid);
     std::error_code jec;
     if (!c.profile.empty() || c.fabric) {
         if (fs::exists(ownJar, jec)) {
@@ -951,7 +975,7 @@ inline LaunchPlan buildLaunchPlan(const Layout& l, const Config& c, const JavaIn
     if (!vm.ok()) { p.error = vm.error; return p; }
     std::string err;
     if (!l.ensure(err)) { p.error = "无法创建运行目录: " + err; return p; }
-    fs::path natives = l.nativesDir / versionDirName(c);
+    fs::path natives = l.nativesDir / effectiveVersionId(l, c);
     if (!extractNatives(vm.nativeJars, natives, err)) { p.error = err; return p; }
 
     // 版本隔离（始终开启，不提供关闭）：每个版本自己的 gameDir，存档 / mods / 资源包互不影响
@@ -1572,6 +1596,40 @@ inline fs::path collectCrashReport(const Layout& l, const std::string& versionTa
         }
     }
     return outPath;
+}
+
+// ------------------------------------------------------------ 游戏语言 ----
+inline std::string effectiveGameLanguage(const Config& c) {
+    return c.language.empty() ? detectSystemLanguage() : c.language;
+}
+
+// Minecraft 以 options.txt 里的 lang: 为准，--language 只在没有 options.txt 时起作用。
+// 所以要把启动器选的语言写进当前版本目录的 options.txt；其他行原样保留。
+inline bool applyGameLanguage(const fs::path& isolated, const std::string& lang, std::string& err) {
+    if (lang.empty()) { err = "语言为空"; return false; }
+    if (!fsx::makeDirs(isolated, err)) return false;
+    const fs::path f = isolated / "options.txt";
+    std::vector<std::string> lines;
+    std::error_code ec;
+    if (fs::is_regular_file(f, ec)) {
+        std::ifstream in(f);
+        if (!in) { err = "读不了 " + f.string(); return false; }
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(line);
+        }
+    }
+    bool replaced = false;
+    for (auto& l : lines) {
+        if (l.rfind("lang:", 0) == 0) { l = "lang:" + lang; replaced = true; }
+    }
+    if (!replaced) lines.push_back("lang:" + lang);
+    std::ofstream out(f, std::ios::trunc);
+    if (!out) { err = "写不了 " + f.string(); return false; }
+    for (const auto& l : lines) out << l << '\n';
+    err.clear();
+    return true;
 }
 
 // ------------------------------------------------------ 主题来源（Noctalia）----

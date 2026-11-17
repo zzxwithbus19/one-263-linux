@@ -6,6 +6,7 @@
 #include "fs_util.hpp"
 #include "mini_json.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <set>
@@ -161,7 +162,9 @@ inline bool search(const std::string& query, const std::string& loader, const st
                    const std::string& sort, const fs::path& cacheDir,
                    std::vector<Hit>& out, std::string& err) {
     std::string facets = "[[\"project_type:mod\"]";
-    if (!loader.empty()) facets += ",[\"categories:" + loader + "\"]";
+    // Quilt 强兼容 Fabric：选 Quilt 时把 fabric 类目也带上（内层数组 = OR）
+    if (loader == "quilt") facets += ",[\"categories:quilt\",\"categories:fabric\"]";
+    else if (!loader.empty()) facets += ",[\"categories:" + loader + "\"]";
     if (!gameVersion.empty()) facets += ",[\"versions:" + gameVersion + "\"]";
     facets += "]";
     const std::string index = sort.empty() ? "downloads" : sort;
@@ -176,7 +179,12 @@ inline bool versions(const std::string& project, const std::string& loader, cons
                      const fs::path& cacheDir, std::vector<Version>& out, std::string& err) {
     std::string url = "https://api.modrinth.com/v2/project/" + urlEncode(project) + "/version";
     std::string sep = "?";
-    if (!loader.empty()) { url += sep + "loaders=" + urlEncode("[\"" + loader + "\"]"); sep = "&"; }
+    if (!loader.empty()) {
+        const std::string arr = loader == "quilt" ? "[\"quilt\",\"fabric\"]"
+                                                  : "[\"" + loader + "\"]";
+        url += sep + "loaders=" + urlEncode(arr);
+        sep = "&";
+    }
     if (!gameVersion.empty()) url += sep + "game_versions=" + urlEncode("[\"" + gameVersion + "\"]");
     std::string text;
     if (!mc263::dl::fetchText(url, "", cacheDir, 25, text, err)) return false;
@@ -291,7 +299,11 @@ inline bool resolveDependencies(const Version& root, const std::string& loader,
                 std::vector<Version> list;
                 std::string lerr;
                 if (versions(d.projectId, loader, gameVersion, cacheDir, list, lerr) && !list.empty()) {
-                    v = list.front();
+                    // 前置优先装正式版（Sodium 一类附加 Mod 对 Beta 的支持不一定齐全）
+                    const auto rel = std::find_if(list.begin(), list.end(), [](const Version& x) {
+                        return x.versionType.empty() || x.versionType == "release";
+                    });
+                    v = rel != list.end() ? *rel : list.front();
                     got = true;
                 } else if (verr.empty()) {
                     verr = lerr;
