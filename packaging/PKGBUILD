@@ -13,12 +13,13 @@
 
 pkgname=mc263
 pkgver=26.3
-pkgrel=13
+pkgrel=14
 pkgdesc="Minecraft 26.3 launcher (Qt6 native, Wayland-ready)"
 arch=('x86_64')
 url="https://github.com/zzxwithbus19/one-263-linux"
 license=('AGPL-3.0-or-later')
-depends=('qt6-base' 'qt6-wayland' 'python' 'curl')
+depends=('qt6-base' 'qt6-wayland' 'curl')
+checkdepends=('python')
 optdepends=('java-runtime: run the game (the launcher can also use Mojang runtimes)')
 # 自建源分发只发主包，不生成 -debug（省得 release 里多一个没人下的包）
 options=('!debug')

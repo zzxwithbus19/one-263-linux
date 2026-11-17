@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VER="${MC263_VER:-$(sed -n 's/^pkgver=//p' "$ROOT/packaging/PKGBUILD" | head -1)}"
 VER="${VER:-26.3}"
 # Debian 修订号与 Arch 的 pkgrel 是两条线，默认从 1 开始
-REV="${MC263_DEB_REV:-2}"
+REV="${MC263_DEB_REV:-1}"
 OUT="${MC263_DEB_OUT:-$ROOT/dist/deb}"
 STAGE="$ROOT/build/deb"
 HOST_ARCH="$(uname -m)"

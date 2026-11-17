@@ -62,7 +62,6 @@ sed -e "s|^pkgrel=.*|pkgrel=$REL|" \
 echo "  sha256($(basename "$TAR")) = $SHA"
 
 # ---------- 3. 依赖自查（只报告，不安装）----------
-# python 只在 make check 里跑 mock CDN，运行时包不依赖它
 missing="$(pacman -T qt6-base qt6-wayland python curl 2>/dev/null || true)"
 if [ -n "$missing" ]; then
     warn "本地缺少依赖: $missing"
