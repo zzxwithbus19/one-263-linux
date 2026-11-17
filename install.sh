@@ -16,8 +16,8 @@ set -eu
 
 REPO="${MC263_REPO:-zzxwithbus19/one-263-linux}"
 VER="${MC263_VER:-26.3}"
-PKGREL="${MC263_PKGREL:-14}"   # 与 packaging/PKGBUILD 的 pkgrel 保持一致
-DEBREV="${MC263_DEB_REV:-2}"   # 与 packaging/build-deb.sh 的修订号保持一致
+PKGREL="${MC263_PKGREL:-13}"   # 与 packaging/PKGBUILD 的 pkgrel 保持一致
+DEBREV="${MC263_DEB_REV:-1}"   # 与 packaging/build-deb.sh 的修订号保持一致
 TAG="${MC263_TAG:-}"
 ARCH="$(uname -m)"
 # dpkg 的架构名和 uname 不一样：x86_64 → amd64，aarch64 → arm64
@@ -346,12 +346,12 @@ install_elf() {
 
     if ! ldconfig -p 2>/dev/null | grep -q 'libQt6Widgets\.so\.6'; then
         warn "系统里没找到 libQt6Widgets.so.6，直接运行会失败。按发行版装："
-        echo "  Fedora:   sudo dnf install qt6-qtbase qt6-qtwayland curl" >&2
-        echo "  openSUSE: sudo zypper install qt6-qtbase libQt6WaylandClient6 curl" >&2
-        echo "  Arch:     sudo pacman -S qt6-base qt6-wayland curl" >&2
-        echo "  Debian:   sudo apt install qt6-base-dev curl" >&2
+        echo "  Fedora:   sudo dnf install qt6-qtbase qt6-qtwayland python3" >&2
+        echo "  openSUSE: sudo zypper install qt6-qtbase libQt6WaylandClient6 python3" >&2
+        echo "  Arch:     sudo pacman -S qt6-base qt6-wayland python" >&2
+        echo "  Debian:   sudo apt install qt6-base-dev python3" >&2
     fi
-    command -v curl >/dev/null 2>&1 || warn "没有 curl，下载功能不可用（装一个即可）"
+    command -v python3 >/dev/null 2>&1 || warn "没有 python3，下载功能不可用（装一个即可）"
 
     case ":$PATH:" in
         *":$BIN_DIR:"*) ;;
@@ -443,9 +443,9 @@ else
     fi
 
     if [ "$PM" = dnf ]; then
-        step "安装 Qt6 运行时依赖（qt6-qtbase / qt6-qtwayland / curl）"
-        $SUDO dnf install -y qt6-qtbase qt6-qtwayland curl || \
-            $SUDO dnf install -y qt6-qtbase curl || die "依赖安装失败，请检查网络或软件源"
+        step "安装 Qt6 运行时依赖（qt6-qtbase / qt6-qtwayland / python3）"
+        $SUDO dnf install -y qt6-qtbase qt6-qtwayland python3 || \
+            $SUDO dnf install -y qt6-qtbase python3 || die "依赖安装失败，请检查网络或软件源"
         if ! install_dnf "$TMP/$ASSET"; then
             sig_help "$(keep_pkg "$ASSET")"
             exit 1
