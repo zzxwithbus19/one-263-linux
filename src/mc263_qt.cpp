@@ -295,7 +295,7 @@ QGroupBox {
     margin-top: 0px; padding: 16px 18px 16px 18px;
 }
 QLabel#cardTitle {
-    font-size: 13px; font-weight: 700; padding-bottom: 6px;
+    font-size: 13px; font-weight: 500; padding-bottom: 6px;
     border-bottom: 1px solid @border@; margin-bottom: 8px;
 }
 QScrollArea { background: transparent; border: none; }
@@ -669,13 +669,34 @@ public:
         compatTable_->resizeColumnsToContents();
         compatState_->setText(QString::number(okCount) + "/" + QString::number(items.size()) + " 项通过");
     }
+    // 下载页只展示常用/主流版本，避免几十个补丁版本把下拉框塞满。
+    // 想调整白名单只改这里；26.x 当前线全部保留，预览版不过滤。
+    static bool keepDownloadVersion(const QString& id) {
+        if (id.startsWith("26.")) return true;
+        if (id.contains("snapshot", Qt::CaseInsensitive) ||
+            id.contains("pre", Qt::CaseInsensitive) ||
+            id.contains("rc", Qt::CaseInsensitive))
+            return true;
+        static const QStringList curated = {
+            "1.12.2", "1.15.2", "1.16.5", "1.19.1", "1.19.2",
+            "1.20.1", "1.20.6", "1.21", "1.21.1"};
+        return curated.contains(id);
+    }
+
     void applyOnlineVersions(const std::vector<std::string>& versions, const QString& err) {
         if (!err.isEmpty()) { downloadLog_->appendPlainText("在线版本获取失败: " + err); return; }
         QString cur = downloadVersion_->currentText();
         downloadVersion_->clear();
-        for (const auto& v : versions) downloadVersion_->addItem(QString::fromStdString(v));
+        int shown = 0;
+        for (const auto& v : versions) {
+            const QString id = QString::fromStdString(v);
+            if (!keepDownloadVersion(id)) continue;
+            downloadVersion_->addItem(id);
+            ++shown;
+        }
         if (!cur.isEmpty()) downloadVersion_->setCurrentText(cur);
-        downloadLog_->appendPlainText("在线版本列表已更新（" + QString::number(versions.size()) + " 个）");
+        downloadLog_->appendPlainText("在线版本列表已更新（显示 " + QString::number(shown) +
+                                      " / " + QString::number(versions.size()) + " 个）");
     }
 
 protected:
@@ -924,7 +945,7 @@ private:
     QWidget* pageLaunch() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        addPageHeader(v, "启动游戏", "选本地版本、填玩家名，日志实时输出；缺 Java 会先被闸门拦住");
+        addPageHeader(v, "启动游戏");
         auto* box = new QGroupBox("原版启动", w);
         auto* form = new QFormLayout(box);
         setCardTitle(box, form, "原版启动");
@@ -1022,9 +1043,9 @@ private:
         v->addLayout(row);
         launchState_ = new QLabel("就绪", w);
         v->addWidget(launchState_);
-        v->addWidget(mbox);
         launchLog_ = new QPlainTextEdit(w); launchLog_->setReadOnly(true);
         v->addWidget(launchLog_, 1);
+        v->addWidget(mbox);
         connect(launchBtn_, &QPushButton::clicked, this, &LauncherWindow::startLaunch);
         connect(refreshBtn, &QPushButton::clicked, this, &LauncherWindow::refreshLocalVersions);
         connect(openDirBtn, &QPushButton::clicked, this, [this] {
@@ -1042,7 +1063,7 @@ private:
     QWidget* pageDownload() {
         auto* w = new QWidget(this);
         auto* v = new QVBoxLayout(w);
-        addPageHeader(v, "下载游戏", "从 Mojang 官方 CDN 或镜像拉取 26.3：SHA1 校验 + 多线程 + 断点缓存");
+        addPageHeader(v, "下载游戏");
         auto* box = new QGroupBox("下载来源", w);
         auto* form = new QFormLayout(box);
         setCardTitle(box, form, "下载来源");
@@ -1246,8 +1267,11 @@ private:
         lform->addRow(QString(), loaderNote);
         modLoaderBox_ = lbox;
         v->insertWidget(firstCardIndex, lbox);
+        updateLoaderCardVisibility();
         connect(modContentType_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
                 [this](int) { applyModContentType(); });
+        connect(modVersionCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this](int) { updateLoaderCardVisibility(); });
 
 
         modTable_ = new QTableWidget(0, 4, w);
@@ -1317,9 +1341,24 @@ private:
         return modContentType_ ? modContentType_->currentData().toString() : QStringLiteral("mod");
     }
 
+    // 当前选中的版本只要已经装了 Fabric/Quilt，加载器卡片就没有意义了，整块隐藏。
+    void updateLoaderCardVisibility() {
+        if (!modLoaderBox_) return;
+        if (modContentType() != "mod") { modLoaderBox_->hide(); return; }
+        const QString base = modGameVersion();
+        bool hasLoader = false;
+        if (!base.isEmpty()) {
+            for (const auto& id : core::availableVersions(layout_)) {
+                const QString v = QString::fromStdString(id);
+                if (v.startsWith(base + "+")) { hasLoader = true; break; }
+            }
+        }
+        modLoaderBox_->setVisible(!hasLoader);
+    }
+
     void applyModContentType() {
         const QString type = modContentType();
-        if (modLoaderBox_) modLoaderBox_->setVisible(type == "mod");
+        updateLoaderCardVisibility();
         if (modOpenDirBtn_) modOpenDirBtn_->setVisible(type == "mod");
         if (modInstallBtn_)
             modInstallBtn_->setText(type == "mod" ? "安装选中 Mod" : "下载选中");
@@ -1375,6 +1414,7 @@ private:
         int idx = modVersionCombo_->findData(wanted);
         if (idx < 0) idx = 0;
         modVersionCombo_->setCurrentIndex(idx);
+        updateLoaderCardVisibility();
     }
 
     void requestModSuggestions() {
@@ -2242,7 +2282,7 @@ private:
         instModTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
         instModTable_->setSelectionMode(QAbstractItemView::ExtendedSelection);
         instModTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        enlargeTable(instModTable_, 3);
+        enlargeTable(instModTable_, 7);
         iv->addWidget(instModTable_, 1);
         auto* mrow = new QHBoxLayout();
         auto* iRefresh = new QPushButton("刷新", ibox);
@@ -3188,7 +3228,12 @@ private:
                                       ? avail - static_cast<uint64_t>(want) : 0;
             line += " * 启动后预计剩余 " + fmtMem(left);
         }
-        memPreview_->setText(line);
+        if (autoMode) {
+            memPreview_->hide();
+        } else {
+            memPreview_->setText(line);
+            memPreview_->show();
+        }
         if (gameStat_) {
             const MemColors mc = memColors(palette());
             gameStat_->setText(autoMode
