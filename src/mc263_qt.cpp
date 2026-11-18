@@ -1038,16 +1038,25 @@ private:
         auto* openDirBtn = new QPushButton("打开游戏目录", w);
         auto* noteBtn = new QPushButton("日志", w);
         noteBtn->setToolTip("日志写在 <游戏目录>/note/，最多保留 10 个");
+        auto* clearLogBtn = new QPushButton("清空日志", w);
+        clearLogBtn->setToolTip("只清空当前窗口输出，不删除 note/ 里的日志文件");
         row->addWidget(launchBtn_); row->addWidget(refreshBtn); row->addWidget(openDirBtn);
-        row->addWidget(noteBtn); row->addStretch(1);
+        row->addWidget(noteBtn); row->addWidget(clearLogBtn); row->addStretch(1);
         v->addLayout(row);
         launchState_ = new QLabel("就绪", w);
         v->addWidget(launchState_);
         launchLog_ = new QPlainTextEdit(w); launchLog_->setReadOnly(true);
+        // 给启动输出足够空间，同时别把下面的内存卡片完全挤出视口
+        launchLog_->setMinimumHeight(180);
+        launchLog_->setMaximumHeight(240);
         v->addWidget(launchLog_, 1);
         v->addWidget(mbox);
         connect(launchBtn_, &QPushButton::clicked, this, &LauncherWindow::startLaunch);
         connect(refreshBtn, &QPushButton::clicked, this, &LauncherWindow::refreshLocalVersions);
+        connect(clearLogBtn, &QPushButton::clicked, this, [this] {
+            if (launchLog_) launchLog_->clear();
+            if (launchState_) launchState_->setText("日志已清空");
+        });
         connect(openDirBtn, &QPushButton::clicked, this, [this] {
             QProcess::startDetached("xdg-open", {QString::fromStdString(layout_.gameDir.string())});
         });
