@@ -62,7 +62,7 @@ sed -e "s|^pkgrel=.*|pkgrel=$REL|" \
 echo "  sha256($(basename "$TAR")) = $SHA"
 
 # ---------- 3. 依赖自查（只报告，不安装）----------
-missing="$(pacman -T qt6-base qt6-wayland python curl 2>/dev/null || true)"
+missing="$(pacman -T clang lld qt6-base qt6-wayland python curl 2>/dev/null || true)"
 if [ -n "$missing" ]; then
     warn "本地缺少依赖: $missing"
     warn "请自己装：sudo pacman -S --needed $missing"
@@ -99,7 +99,7 @@ fi
 rm -f "$OUT"/mc263*-"$VER"-"$REL"-*.pkg.tar.*
 if ! ( cd "$OUT" && makepkg "${args[@]}" "${ext_args[@]}" ); then
     echo
-    die "makepkg 失败。依赖问题的处理：sudo pacman -S --needed base-devel qt6-base qt6-wayland python curl
+    die "makepkg 失败。依赖问题的处理：sudo pacman -S --needed base-devel clang lld qt6-base qt6-wayland python curl
   其它问题看上面 makepkg 的输出（构建在 $OUT/src）"
 fi
 

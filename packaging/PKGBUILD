@@ -6,7 +6,7 @@
 #   sudo pacman -U dist/arch/mc263-26.3-13-x86_64.pkg.tar.xz
 #
 # 构建依赖自己装（脚本不联网、不替你 pacman -S）：
-#   sudo pacman -S --needed base-devel qt6-base qt6-wayland python curl
+#   sudo pacman -S --needed base-devel clang lld qt6-base qt6-wayland python curl
 #
 # 本文件是模板：build-arch.sh 会把 pkgrel 与 tarball 的真实 sha256
 # 填进 dist/arch/PKGBUILD 的副本，再交给 makepkg。
@@ -19,6 +19,7 @@ arch=('x86_64')
 url="https://github.com/zzxwithbus19/one-263-linux"
 license=('AGPL-3.0-or-later')
 depends=('qt6-base' 'qt6-wayland' 'curl')
+makedepends=('clang' 'lld')
 checkdepends=('python')
 optdepends=('java-runtime: run the game (the launcher can also use Mojang runtimes)')
 # 自建源分发只发主包，不生成 -debug（省得 release 里多一个没人下的包）
