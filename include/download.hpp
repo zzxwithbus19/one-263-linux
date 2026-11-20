@@ -232,13 +232,21 @@ inline bool curlGet(const std::string& url, const fs::path& dest, int timeout, s
     return true;
 }
 
+// 元数据临时文件：pid + 进程内原子序号 + URL hash。
+// 同一进程多线程抓同一个 URL 时也不会写同一个 .tmp。
+inline fs::path metaTempPath(const fs::path& cacheDir, const std::string& url) {
+    static std::atomic<uint64_t> seq{0};
+    return cacheDir / ("meta-" + std::to_string(::getpid()) + "-" +
+                       std::to_string(seq.fetch_add(1, std::memory_order_relaxed)) + "-" +
+                       std::to_string(std::hash<std::string>{}(url)) + ".tmp");
+}
+
 inline bool fetchText(const std::string& url, const std::string& mirror,
                       const fs::path& cacheDir, int timeout, std::string& out, std::string& err,
                       const CancelFn& cancelled = {}, bool* wasCancelled = nullptr) {
     std::error_code ec;
     fs::create_directories(cacheDir, ec);
-    fs::path tmp = cacheDir / ("meta-" + std::to_string(::getpid()) + "-" +
-                               std::to_string(std::hash<std::string>{}(url)) + ".tmp");
+    fs::path tmp = metaTempPath(cacheDir, url);
     if (!curlGet(mirrorUrl(url, mirror), tmp, timeout, err, cancelled, wasCancelled)) {
         fs::remove(tmp, ec);
         return false;

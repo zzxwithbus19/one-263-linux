@@ -10,6 +10,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -138,6 +139,29 @@ private:
     }
     bool object(JValue& out, int depth, std::string& err) {
         out = JValue::objectV();
+        // 小对象线性查重（绝大多数字段只有几个 key）；超过 16 个 key 才建哈希索引，
+        // 避免 asset index 这类大对象在解析时退化成 O(n²)。
+        static constexpr size_t kLinearKeys = 16;
+        std::unordered_map<std::string, size_t> index;
+        bool indexed = false;
+        auto store = [&](std::string key, JValue v) {
+            if (!indexed && out.o.size() < kLinearKeys) {
+                for (auto& kv : out.o) {
+                    if (kv.first == key) { kv.second = std::move(v); return; }
+                }
+                out.o.emplace_back(std::move(key), std::move(v));
+                return;
+            }
+            if (!indexed) {
+                index.reserve(out.o.size() * 2);
+                for (size_t i = 0; i < out.o.size(); ++i)
+                    index.emplace(out.o[i].first, i);
+                indexed = true;
+            }
+            auto [it, inserted] = index.emplace(key, out.o.size());
+            if (inserted) out.o.emplace_back(std::move(key), std::move(v));
+            else out.o[it->second].second = std::move(v);
+        };
         ++p_; // {
         skip();
         if (p_ < s_.size() && s_[p_] == '}') { ++p_; return true; }
@@ -151,7 +175,7 @@ private:
             ++p_;
             JValue v;
             if (!value(v, depth + 1, err)) return false;
-            out.set(key, std::move(v));
+            store(std::move(key), std::move(v));
             skip();
             if (p_ < s_.size() && s_[p_] == ',') { ++p_; continue; }
             if (p_ < s_.size() && s_[p_] == '}') { ++p_; return true; }

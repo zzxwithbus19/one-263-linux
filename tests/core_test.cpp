@@ -2,11 +2,13 @@
 #include "launcher_core.hpp"
 #include "modrinth.hpp"
 
+#include <chrono>
 #include <cstdlib>
 
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -176,6 +178,42 @@ int main() {
               mc263::modrinth::primaryFile(mvers[0])->sha1 == "abc123",
           "Modrinth 版本响应解析");
     check(mc263::modrinth::urlEncode("a b/c") == "a%20b%2Fc", "Modrinth 查询参数转义");
+
+    // 6.2) JSON 大对象：解析不应退化成 O(n²)，重复 key 仍后值覆盖
+    {
+        std::string big = R"({"objects":{)";
+        big.reserve(20000 * 32);
+        for (int i = 0; i < 20000; ++i) {
+            if (i) big += ',';
+            big += "\"k" + std::to_string(i) + "\":{\"hash\":\"h" + std::to_string(i) + "\"}";
+        }
+        big += "}}";
+
+        std::string jerr;
+        const auto t0 = std::chrono::steady_clock::now();
+        JValue j = mc263::jsonParse(big, jerr);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+        const JValue* objs = j.find("objects");
+        check(jerr.empty() && objs && objs->object().size() == 20000,
+              "JSON：2 万 key 对象解析完整");
+        check(ms < 5000, "JSON：2 万 key 解析没有退化成 O(n²)（" +
+                             std::to_string(ms) + " ms）");
+
+        JValue dup = mc263::jsonParse(R"({"a":1,"a":2,"b":3})", jerr);
+        const JValue* a = dup.find("a");
+        check(jerr.empty() && a && a->number() == 2 && dup.object().size() == 2,
+              "JSON：重复 key 仍然后值覆盖");
+    }
+
+    // 6.3) 元数据临时路径：同 URL 连续生成也必须唯一
+    {
+        std::set<fs::path> paths;
+        for (int i = 0; i < 1000; ++i)
+            paths.insert(mc263::dl::metaTempPath("/tmp/mc263-cache", "https://example.invalid/x"));
+        check(paths.size() == 1000, "下载：临时文件名并发唯一");
+    }
+
     {
         fs::create_directories(l.versionDir("26.3+fabric"), ec);
         std::ofstream o(l.versionJson("26.3+fabric"));
