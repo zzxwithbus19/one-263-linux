@@ -25,6 +25,15 @@ struct JValue {
     std::vector<JValue> a;
     std::vector<std::pair<std::string, JValue>> o; // 用 vector 避免类内不完整类型
 
+    // clang 要求 pair<string, JValue> 在实例化 vector 析构时已经是完整类型；
+    // 把特殊成员放到类外定义即可，GCC / clang 都接受。
+    JValue() = default;
+    ~JValue();
+    JValue(const JValue&);
+    JValue(JValue&&) noexcept;
+    JValue& operator=(const JValue&);
+    JValue& operator=(JValue&&) noexcept;
+
     bool isNull() const { return t == T::Null; }
     bool isArray() const { return t == T::Array; }
     bool isObject() const { return t == T::Object; }
@@ -63,6 +72,12 @@ struct JValue {
         o.emplace_back(key, std::move(v));
     }
 };
+
+inline JValue::~JValue() = default;
+inline JValue::JValue(const JValue&) = default;
+inline JValue::JValue(JValue&&) noexcept = default;
+inline JValue& JValue::operator=(const JValue&) = default;
+inline JValue& JValue::operator=(JValue&&) noexcept = default;
 
 namespace detail {
 inline void appendUtf8(std::string& out, uint32_t cp) {

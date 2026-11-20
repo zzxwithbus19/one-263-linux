@@ -26,7 +26,7 @@ def pkg_config_flags(pkg):
 
 
 def main():
-    cxx = os.environ.get("CXX", "g++")
+    cxx = os.environ.get("CXX", "clang++")
     qt = pkg_config_flags("Qt6Widgets")
     common = ["-std=c++23", "-O2", "-Wall", "-Wextra", "-Wpedantic", "-Iinclude"]
 
