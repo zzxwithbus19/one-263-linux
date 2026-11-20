@@ -17,6 +17,10 @@ endif
 STD      := -std=c++23
 OPT      ?= -O2
 WARN     := -Wall -Wextra -Wpedantic
+# Qt 6 头文件里有 C++26 的 `= delete("reason")`，Clang 会当成扩展警告刷屏
+ifeq ($(findstring clang,$(CXX)),clang)
+WARN     += -Wno-c++26-extensions
+endif
 INCLUDES := -Iinclude
 COMMON   := $(STD) $(OPT) $(WARN) $(INCLUDES)
 

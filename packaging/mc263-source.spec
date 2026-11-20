@@ -22,6 +22,9 @@ BuildArch:      %{?_arch}
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  gcc-c++
+# Makefile 默认 clang++（-Oz + LTO），Fedora/COPR 的 mock 需要显式装上
+BuildRequires:  clang
+BuildRequires:  lld
 BuildRequires:  make
 BuildRequires:  python3
 # %check 的 C++ 下载器测试会实际调用系统 curl
